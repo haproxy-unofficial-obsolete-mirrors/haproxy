@@ -4136,9 +4136,9 @@ int check_config_validity()
 		}
 
 		if (curproxy->options & PR_O_SSL3_CHK) {
-			curproxy->check_len = sizeof(sslv3_client_hello_pkt);
-			curproxy->check_req = (char *)malloc(sizeof(sslv3_client_hello_pkt));
-			memcpy(curproxy->check_req, sslv3_client_hello_pkt, sizeof(sslv3_client_hello_pkt));
+			curproxy->check_len = sizeof(sslv3_client_hello_pkt) - 1;
+			curproxy->check_req = (char *)malloc(curproxy->check_len);
+			memcpy(curproxy->check_req, sslv3_client_hello_pkt, curproxy->check_len);
 		}
 
 		/* The small pools required for the capture lists */
