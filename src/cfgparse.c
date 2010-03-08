@@ -669,11 +669,24 @@ int cfg_parse_global(const char *file, int linenum, char **args, int inv)
 		}
 
 		if (args[1][0] == '/') {
+			struct sockaddr_un *sk = str2sun(args[1]);
+			if (!sk) {
+				Alert("parsing [%s:%d] : Socket path '%s' too long (max %d)\n", file, linenum,
+				      args[1], (int)sizeof(sk->sun_path) - 1);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			logsrv.u.un = *sk;
 			logsrv.u.addr.sa_family = AF_UNIX;
-			logsrv.u.un = *str2sun(args[1]);
 		} else {
+			struct sockaddr_in *sk = str2sa(args[1]);
+			if (!sk) {
+				Alert("parsing [%s:%d] : Unknown host in '%s'\n", file, linenum, args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			logsrv.u.in = *sk;
 			logsrv.u.addr.sa_family = AF_INET;
-			logsrv.u.in = *str2sa(args[1]);
 			if (!logsrv.u.in.sin_port)
 				logsrv.u.in.sin_port = htons(SYSLOG_PORT);
 		}
@@ -2308,6 +2321,8 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 		curproxy->grace = val;
 	}
 	else if (!strcmp(args[0], "dispatch")) {  /* dispatch address */
+		struct sockaddr_in *sk;
+
 		if (curproxy == &defproxy) {
 			Alert("parsing [%s:%d] : '%s' not allowed in 'defaults' section.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -2321,7 +2336,13 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		curproxy->dispatch_addr = *str2sa(args[1]);
+		sk = str2sa(args[1]);
+		if (!sk) {
+			Alert("parsing [%s:%d] : Unknown host in '%s'\n", file, linenum, args[1]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		curproxy->dispatch_addr = *sk;
 	}
 	else if (!strcmp(args[0], "balance")) {  /* set balancing with optional algorithm */
 		if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], NULL))
@@ -2340,6 +2361,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 		char *raddr;
 		short realport;
 		int do_check;
+		struct sockaddr_in *sk;
 
 		if (curproxy == &defproxy) {
 			Alert("parsing [%s:%d] : '%s' not allowed in 'defaults' section.\n", file, linenum, args[0]);
@@ -2401,9 +2423,15 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 			newsrv->state |= SRV_MAPPORTS;
 		}	    
 
-		newsrv->addr = *str2sa(raddr);
-		newsrv->addr.sin_port = htons(realport);
+		sk = str2sa(raddr);
 		free(raddr);
+		if (!sk) {
+			Alert("parsing [%s:%d] : Unknown host in '%s'\n", file, linenum, args[2]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		newsrv->addr = *sk;
+		newsrv->addr.sin_port = htons(realport);
 
 		newsrv->curfd = -1; /* no health-check in progress */
 		newsrv->inter = DEF_CHKINTR;
@@ -2546,7 +2574,13 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 				cur_arg += 2;
 			}
 			else if (!strcmp(args[cur_arg], "addr")) {
-				newsrv->check_addr = *str2sa(args[cur_arg + 1]);
+				struct sockaddr_in *sk = str2sa(args[cur_arg + 1]);
+				if (!sk) {
+					Alert("parsing [%s:%d] : Unknown host in '%s'\n", file, linenum, args[cur_arg + 1]);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				newsrv->check_addr = *sk;
 				cur_arg += 2;
 			}
 			else if (!strcmp(args[cur_arg], "port")) {
@@ -2619,6 +2653,8 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 			}
 			else if (!strcmp(args[cur_arg], "source")) {  /* address to which we bind when connecting */
 				int port_low, port_high;
+				struct sockaddr_in *sk;
+
 				if (!*args[cur_arg + 1]) {
 #if defined(CONFIG_HAP_CTTPROXY) || defined(CONFIG_HAP_LINUX_TPROXY)
 					Alert("parsing [%s:%d] : '%s' expects <addr>[:<port>[-<port>]], and optional '%s' <addr> as argument.\n",
@@ -2631,7 +2667,13 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 					goto out;
 				}
 				newsrv->state |= SRV_BIND_SRC;
-				newsrv->source_addr = *str2sa_range(args[cur_arg + 1], &port_low, &port_high);
+				sk = str2sa_range(args[cur_arg + 1], &port_low, &port_high);
+				if (!sk) {
+					Alert("parsing [%s:%d] : Unknown host in '%s'\n", file, linenum, args[cur_arg + 1]);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				newsrv->source_addr = *sk;
 
 				if (port_low != port_high) {
 					int i;
@@ -2671,8 +2713,14 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 						} else if (!strcmp(args[cur_arg + 1], "clientip")) {
 							newsrv->state |= SRV_TPROXY_CIP;
 						} else {
+							struct sockaddr_in *sk = str2sa(args[cur_arg + 1]);
+							if (!sk) {
+								Alert("parsing [%s:%d] : Unknown host in '%s'\n", file, linenum, args[cur_arg + 1]);
+								err_code |= ERR_ALERT | ERR_FATAL;
+								goto out;
+							}
+							newsrv->tproxy_addr = *sk;
 							newsrv->state |= SRV_TPROXY_ADDR;
-							newsrv->tproxy_addr = *str2sa(args[cur_arg + 1]);
 						}
 						global.last_checks |= LSTCHK_NETADM;
 #if !defined(CONFIG_HAP_LINUX_TPROXY)
@@ -2815,11 +2863,24 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 			}
 
 			if (args[1][0] == '/') {
+				struct sockaddr_un *sk = str2sun(args[1]);
+				if (!sk) {
+					Alert("parsing [%s:%d] : Socket path '%s' too long (max %d)\n", file, linenum,
+					      args[1], (int)sizeof(sk->sun_path) - 1);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				logsrv.u.un = *sk;
 				logsrv.u.addr.sa_family = AF_UNIX;
-				logsrv.u.un = *str2sun(args[1]);
 			} else {
+				struct sockaddr_in *sk = str2sa(args[1]);
+				if (!sk) {
+					Alert("parsing [%s:%d] : Unknown host in '%s'\n", file, linenum, args[1]);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				logsrv.u.in = *sk;
 				logsrv.u.addr.sa_family = AF_INET;
-				logsrv.u.in = *str2sa(args[1]);
 				if (!logsrv.u.in.sin_port) {
 					logsrv.u.in.sin_port =
 						htons(SYSLOG_PORT);
@@ -2853,6 +2914,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 	}
 	else if (!strcmp(args[0], "source")) {  /* address to which we bind when connecting */
 		int cur_arg;
+		struct sockaddr_in *sk;
 
 		if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], NULL))
 			err_code |= ERR_WARN;
@@ -2870,7 +2932,13 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 		curproxy->iface_name = NULL;
 		curproxy->iface_len = 0;
 
-		curproxy->source_addr = *str2sa(args[1]);
+		sk = str2sa(args[1]);
+		if (!sk) {
+			Alert("parsing [%s:%d] : Unknown host in '%s'\n", file, linenum, args[1]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		curproxy->source_addr = *sk;
 		curproxy->options |= PR_O_BIND_SRC;
 
 		cur_arg = 2;
@@ -2897,8 +2965,14 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 				} else if (!strcmp(args[cur_arg + 1], "clientip")) {
 					curproxy->options |= PR_O_TPXY_CIP;
 				} else {
+					struct sockaddr_in *sk = str2sa(args[cur_arg + 1]);
+					if (!sk) {
+						Alert("parsing [%s:%d] : Unknown host in '%s'\n", file, linenum, args[cur_arg + 1]);
+						err_code |= ERR_ALERT | ERR_FATAL;
+						goto out;
+					}
+					curproxy->tproxy_addr = *sk;
 					curproxy->options |= PR_O_TPXY_ADDR;
-					curproxy->tproxy_addr = *str2sa(args[cur_arg + 1]);
 				}
 				global.last_checks |= LSTCHK_NETADM;
 #if !defined(CONFIG_HAP_LINUX_TPROXY)
