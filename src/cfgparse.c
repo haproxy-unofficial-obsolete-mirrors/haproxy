@@ -2008,6 +2008,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 
 			/* use HTTP request to check servers' health */
 			free(curproxy->check_req);
+			curproxy->check_req = NULL;
 			curproxy->options &= ~PR_O_SSL3_CHK;
 			curproxy->options &= ~PR_O_SMTP_CHK;
 			curproxy->options |= PR_O_HTTP_CHK;
@@ -2037,6 +2038,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 				err_code |= ERR_WARN;
 
 			free(curproxy->check_req);
+			curproxy->check_req = NULL;
 			curproxy->options &= ~PR_O_HTTP_CHK;
 			curproxy->options &= ~PR_O_SMTP_CHK;
 			curproxy->options |= PR_O_SSL3_CHK;
@@ -2044,6 +2046,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 		else if (!strcmp(args[1], "smtpchk")) {
 			/* use SMTP request to check servers' health */
 			free(curproxy->check_req);
+			curproxy->check_req = NULL;
 			curproxy->options &= ~PR_O_HTTP_CHK;
 			curproxy->options &= ~PR_O_SSL3_CHK;
 			curproxy->options |= PR_O_SMTP_CHK;
