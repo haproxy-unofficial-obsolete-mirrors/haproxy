@@ -3014,12 +3014,12 @@ int process_response(struct session *t)
 		}
 
 		/*
-		 * 9: we may be facing a 1xx response (100 continue, 101 switching protocols),
+		 * 9: we may be facing a 100 continue response,
 		 * in which case this is not the right response, and we're waiting for the
 		 * next one. Let's allow this response to go to the client and wait for the
 		 * next one.
 		 */
-		if (txn->status < 200) {
+		if (txn->status == 100) {
 			hdr_idx_init(&txn->hdr_idx);
 			buffer_forward(rep, rep->lr - (rep->data + msg->som));
 			msg->msg_state = HTTP_MSG_RPBEFORE;
