@@ -690,7 +690,7 @@ int uxst_req_analyser_stats(struct session *s, struct buffer *req)
 		    (req->flags & BF_READ_ERROR)              || /* input error */
 		    (req->flags & BF_READ_TIMEOUT)            || /* read timeout */
 		    tick_is_expired(req->analyse_exp, now_ms) || /* request timeout */
-		    (req->flags & BF_SHUTR)) {                   /* input closed */
+		    ((req->flags & BF_SHUTR) && s->ana_state != STATS_ST_CLOSE)) {                   /* input closed */
 			buffer_shutw_now(s->rep);
 			s->ana_state = 0;
 			req->analysers = 0;
