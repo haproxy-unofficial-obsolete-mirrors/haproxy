@@ -786,7 +786,7 @@ int stats_dump_proxy(struct session *s, struct proxy *px, struct uri_auth *uri)
 		/* stats.sv has been initialized above */
 		for (; s->data_ctx.stats.sv != NULL; s->data_ctx.stats.sv = sv->next) {
 
-			int sv_state; /* 0=DOWN, 1=going up, 2=going down, 3=UP, 4,5=NOLB, 6=unchecked */
+			int sv_state; /* 0=DOWN, 1=going up, 2=going down, 3=UP, 4,5=NOLB, 6=unchecked, 7=MAINT */
 
 			sv = s->data_ctx.stats.sv;
 
@@ -804,8 +804,12 @@ int stats_dump_proxy(struct session *s, struct proxy *px, struct uri_auth *uri)
 				svs = sv;
 
 			/* FIXME: produce some small strings for "UP/DOWN x/y &#xxxx;" */
-			if (!(svs->state & SRV_CHECKED))
-				sv_state = 6;
+			if (!(svs->state & SRV_CHECKED)) {
+				if (svs->health)
+					sv_state = 6;
+				else
+					sv_state = 7; /* DOWN in the config */
+			}
 			else if (svs->state & SRV_RUNNING) {
 				if (svs->health == svs->rise + svs->fall - 1)
 					sv_state = 3; /* UP */
@@ -821,17 +825,17 @@ int stats_dump_proxy(struct session *s, struct proxy *px, struct uri_auth *uri)
 				else
 					sv_state = 0; /* DOWN */
 
-			if ((sv_state == 0) && (s->data_ctx.stats.flags & STAT_HIDE_DOWN)) {
+			if ((sv_state == 0 || sv_state == 7) && (s->data_ctx.stats.flags & STAT_HIDE_DOWN)) {
 				/* do not report servers which are DOWN */
 				s->data_ctx.stats.sv = sv->next;
 				continue;
 			}
 
 			if (!(s->data_ctx.stats.flags & STAT_FMT_CSV)) {
-				static char *srv_hlt_st[7] = { "DOWN", "DN %d/%d &uarr;",
+				static char *srv_hlt_st[8] = { "DOWN", "DN %d/%d &uarr;",
 							       "UP %d/%d &darr;", "UP",
 							       "NOLB %d/%d &darr;", "NOLB",
-							       "<i>no check</i>" };
+							       "<i>no check</i>", "MAINT" };
 				chunk_printf(&msg, sizeof(trash),
 				     /* name */
 				     "<tr align=\"center\" class=\"%s%d\"><td>%s</td>"
@@ -844,7 +848,7 @@ int stats_dump_proxy(struct session *s, struct proxy *px, struct uri_auth *uri)
 				     "<td align=right>%s</td><td align=right>%s</td>"
 				     "",
 				     (sv->state & SRV_BACKUP) ? "backup" : "active",
-				     sv_state, sv->id,
+				     (sv->state & SRV_CHECKED) ? sv_state : 6, sv->id,
 				     U2H0(sv->nbpend), U2H1(sv->nbpend_max), LIM2A2(sv->maxqueue, "-"),
 				     U2H3(read_freq_ctr(&sv->sess_per_sec)), U2H4(sv->sps_max),
 				     U2H5(sv->cur_sess), U2H6(sv->cur_sess_max), LIM2A7(sv->maxconn, "-"),
@@ -915,10 +919,10 @@ int stats_dump_proxy(struct session *s, struct proxy *px, struct uri_auth *uri)
 						     "<td>-</td></tr>\n");
 				}
 			} else {
-				static char *srv_hlt_st[7] = { "DOWN,", "DOWN %d/%d,",
+				static char *srv_hlt_st[8] = { "DOWN,", "DOWN %d/%d,",
 							       "UP %d/%d,", "UP,",
 							       "NOLB %d/%d,", "NOLB,",
-							       "no check," };
+							       "no check,", "MAINT," };
 				chunk_printf(&msg, sizeof(trash),
 				     /* pxid, name */
 				     "%s,%s,"

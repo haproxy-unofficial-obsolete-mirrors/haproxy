@@ -4492,6 +4492,13 @@ cookie <value>
   the same cookie value, and it is in fact somewhat common between normal and
   backup servers. See also the "cookie" keyword in backend section.
 
+disabled
+  The "disabled" keyword starts the server in the "disabled" state. That means
+  that it is marked down in maintenance mode, and no connection other than the
+  ones allowed by persist mode will reach it. It is very well suited to setup
+  new servers, because normal traffic will never reach them, while it is still
+  possible to test the service by making use of the force-persist mechanism.
+
 fall <count>
   The "fall" parameter states that a server will be considered as dead after
   <count> consecutive unsuccessful health checks. This value defaults to 3 if

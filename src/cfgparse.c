@@ -2503,7 +2503,8 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 					goto out;
 				}
 
-				newsrv->health = newsrv->rise;
+				if (newsrv->health)
+					newsrv->health = newsrv->rise;
 				cur_arg += 2;
 			}
 			else if (!strcmp(args[cur_arg], "fall")) {
@@ -2654,6 +2655,10 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 				do_check = 1;
 				cur_arg += 1;
 			}
+			else if (!strcmp(args[cur_arg], "disabled")) {
+				newsrv->health = 0;
+				cur_arg += 1;
+			}
 			else if (!strcmp(args[cur_arg], "source")) {  /* address to which we bind when connecting */
 				int port_low, port_high;
 				struct sockaddr_in *sk;
@@ -2773,10 +2778,19 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int inv)
 				goto out;
 			}
 			else {
-				Alert("parsing [%s:%d] : server %s only supports options 'backup', 'cookie', 'redir', 'check', 'track', 'id', 'inter', 'fastinter', 'downinter', 'rise', 'fall', 'addr', 'port', 'source', 'minconn', 'maxconn', 'maxqueue', 'slowstart' and 'weight'.\n",
+				Alert("parsing [%s:%d] : server %s only supports options 'backup', 'cookie', 'redir', 'check', 'disabled' ,'track', 'id', 'inter', 'fastinter', 'downinter', 'rise', 'fall', 'addr', 'port', 'source', 'minconn', 'maxconn', 'maxqueue', 'slowstart' and 'weight'.\n",
 				      file, linenum, newsrv->id);
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;
+			}
+		}
+
+		if (!newsrv->health) {
+			/* disable checks if the server is forced down */
+			newsrv->uweight = 0;
+			if (do_check) {
+				do_check = 0;
+				global.maxsock--;
 			}
 		}
 
