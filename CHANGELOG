@@ -1,6 +1,27 @@
 ChangeLog :
 ===========
 
+2010/03/30 : 1.3.24
+    - [BUG] Clear-cookie path issue
+    - [BUG] http: switch to tunnel mode after status 101 responses
+    - [MINOR] config: fix too large ssl-hello-check message.
+    - [BUG] config: reset check request to avoid double free when switching to ssl
+    - [BUG] config: report unresolvable host names as errors
+    - [DOC] fix a typo about timeout check and clarify the explanation.
+    - [BUG] logs: don't report "last data" when we have just closed after an error
+    - [MINOR] report total number of processed connections when stopping a proxy
+    - [DOC] be more clear about the limitation to one single monitor-net entry
+    - [MINOR] stats: don't send empty lines in "show errors"
+    - [BUG] url_param hash may return a down server
+    - [MINOR] force null-termination of hostname
+    - [BUG] stats: don't abort if the client closes before the response
+    - [BUG] init: unconditionally catch SIGPIPE
+    - [DOC] indicate in the doc how to bind to port ranges
+    - [MINOR] cli: "show errors" should display "backend <NONE>" when backend was not used
+    - [MINOR] config: allow "slowstart 0s"
+    - [BUILD] 'make tags' did not consider files ending in '.c'
+    - [MEDIUM] checks: add the ability to disable a server in the config
+
 2010/01/28 : 1.3.23
     - [MINOR] server tracking: don't care about the tracked server's mode
     - [MEDIUM] appsession: add the "request-learn" option
