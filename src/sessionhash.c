@@ -114,6 +114,9 @@ void appsession_hash_dump(struct appsession_hash *hash)
 	unsigned int idx;
 	appsess *item;
 
+	if (! hash->table)
+		return;
+
 	printf("Dumping hashtable 0x%p\n", hash);
 	for (idx = 0; idx < TABLESIZE; idx++) {
 		/* we don't even need to call _safe because we return at once */

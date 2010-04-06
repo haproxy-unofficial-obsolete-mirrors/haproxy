@@ -3720,7 +3720,8 @@ void manage_client_side_cookies(struct session *t, struct buffer *req)
 				}
 
 				if ((t->be->appsession_name != NULL) &&
-				    (memcmp(p1, t->be->appsession_name, p2 - p1) == 0)) {
+				    (t->be->appsession_name_len == p2 - p1) &&
+				    (memcmp(p1, t->be->appsession_name, t->be->appsession_name_len) == 0)) {
 					/* first, let's see if the cookie is our appcookie*/
 
 					/* Cool... it's the right one */
@@ -4138,7 +4139,8 @@ void manage_server_side_cookies(struct session *t, struct buffer *rtr)
 			}
 			/* next, let's see if the cookie is our appcookie */
 			else if ((t->be->appsession_name != NULL) &&
-			         (memcmp(p1, t->be->appsession_name, p2 - p1) == 0)) {
+				 (t->be->appsession_name_len == p2 - p1) &&
+			         (memcmp(p1, t->be->appsession_name, t->be->appsession_name_len) == 0)) {
 
 				/* Cool... it's the right one */
 
@@ -4303,7 +4305,7 @@ void get_srv_from_appsession(struct session *t, const char *begin, int len)
 	char *request_line;
 
 	if (t->be->appsession_name == NULL ||
-	    (t->txn.meth != HTTP_METH_GET && t->txn.meth != HTTP_METH_POST) ||
+	    (t->txn.meth != HTTP_METH_GET && t->txn.meth != HTTP_METH_POST && t->txn.meth != HTTP_METH_HEAD) ||
 	    (request_line = memchr(begin, ';', len)) == NULL ||
 	    ((1 + t->be->appsession_name_len + 1 + t->be->appsession_len) > (begin + len - request_line)))
 		return;
