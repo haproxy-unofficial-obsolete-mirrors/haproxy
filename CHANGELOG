@@ -1,6 +1,22 @@
 ChangeLog :
 ===========
 
+2010/06/07 : 1.4.7
+    - [BUG] http: dispatch and http_proxy modes were broken for a long time
+    - [BUG] http: the transaction must be initialized even in TCP mode
+    - [BUG] tcp: dropped connections must be counted as "denied" not "failed"
+    - [BUG] consistent hash: balance on all servers, not only 2 !
+    - [CONTRIB] halog: report per-server status codes, errors and response times
+    - [BUG] http: the transaction must be initialized even in TCP mode (part 2)
+    - [BUG] stick_table: fix possible memory leak in case of connection error
+    - [BUG] proxy: connection rate limiting was eating lots of CPU
+    - [BUG] frontend: always ensure to zero rep->analysers
+    - [BUG] http: report correct flags in case of client aborts during body
+    - [TESTS] refine non-regression tests and add 4 new tests
+    - [BUG] debug: wrong pointer was used to report a status line
+    - [BUG] debug: correctly report truncated messages
+    - [DOC] document the "dispatch" keyword
+
 2010/05/16 : 1.4.6
     - [BUILD] ebtree: update to v6.0.1 to remove references to dprintf()
     - [CLEANUP] acl: make use of eb_is_empty() instead of open coding the tree's emptiness test
