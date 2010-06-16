@@ -114,7 +114,6 @@ int event_accept(int fd) {
 			goto out_close;
 		}
 
-		LIST_ADDQ(&sessions, &s->list);
 		LIST_INIT(&s->back_refs);
 
 		s->flags = 0;
@@ -133,6 +132,8 @@ int event_accept(int fd) {
 			}
 			s->flags |= SN_MONITOR;
 		}
+
+		LIST_ADDQ(&sessions, &s->list);
 
 		if ((t = task_new()) == NULL) { /* disable this proxy for a while */
 			Alert("out of memory in event_accept().\n");
