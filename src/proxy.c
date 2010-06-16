@@ -353,6 +353,8 @@ int proxy_cfg_ensure_no_http(struct proxy *curproxy)
 		Warning("config : 'option httplog' not usable with %s '%s' (needs 'mode http'). Falling back to 'option tcplog'.\n",
 			proxy_type_str(curproxy), curproxy->id);
 	}
+	/* This one must be removed in TCP mode because it aborts clients after the timeout */
+	curproxy->options &= ~PR_O_FORCE_CLO;
 	return 0;
 }
 
