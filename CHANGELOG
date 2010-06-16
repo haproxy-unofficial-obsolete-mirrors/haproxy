@@ -1,6 +1,15 @@
 ChangeLog :
 ===========
 
+2010/06/16 : 1.3.25
+    - [BUG] appsession should match the whole cookie name
+    - [BUG] cttproxy: socket fd leakage in check_cttproxy_version
+    - [BUG] client: don't add a new session to the list too early
+    - [BUG] proxy: connection rate limiting was eating lots of CPU
+    - [BUG] frontend: always ensure to zero rep->analysers
+    - [DOC] document the "dispatch" keyword
+    - [BUG] config: disable "option forceclose" in non-http instances
+
 2010/03/30 : 1.3.24
     - [BUG] Clear-cookie path issue
     - [BUG] http: switch to tunnel mode after status 101 responses
