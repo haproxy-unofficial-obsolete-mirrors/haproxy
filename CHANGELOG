@@ -1,6 +1,13 @@
 ChangeLog :
 ===========
 
+2010/06/16 : 1.4.8
+    - [DOC] mention 'option http-server-close' effect in Tq section
+    - [DOC] summarize and highlight persistent connections behaviour
+    - [DOC] add configuration samples
+    - [BUG] stick_table: the fix for the memory leak caused a regression
+    - [BUG] client: don't add a new session to the list too early
+
 2010/06/07 : 1.4.7
     - [BUG] http: dispatch and http_proxy modes were broken for a long time
     - [BUG] http: the transaction must be initialized even in TCP mode
