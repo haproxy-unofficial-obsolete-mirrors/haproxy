@@ -802,11 +802,12 @@ int process_store_rules(struct session *s, struct buffer *rep, int an_bit)
 
 	/* process store request and store response */
 	for (i = 0; i < s->store_count; i++) {
-		if (stktable_store(s->store[i].table, s->store[i].ts, s->srv->puid) > 0) {
+		if (stktable_store(s->store[i].table, s->store[i].ts, s->srv->puid) > 0)
 			stksess_free(s->store[i].table, s->store[i].ts);
-			s->store[i].ts = NULL;
-		}
+		/* always remove pointer to session to ensure we won't free it again */
+		s->store[i].ts = NULL;
 	}
+	s->store_count = 0; /* everything is stored */
 
 	rep->analysers &= ~an_bit;
 	rep->analyse_exp = TICK_ETERNITY;
