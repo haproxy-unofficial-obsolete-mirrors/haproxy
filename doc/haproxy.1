@@ -6,7 +6,7 @@ HAProxy \- fast and reliable http reverse proxy and load balancer
 
 .SH SYNOPSIS
 
-haproxy \-f <configuration\ file> [\-n\ maxconn] [\-N\ maxconn] [\-d] [\-D] [\-q] [\-V] [\-c] [\-p\ <pidfile>] [\-s] [\-l] [\-dk] [\-ds] [\-de] [\-dp] [\-db] [\-m\ <megs>] [{\-sf|\-st}\ pidlist...] 
+haproxy \-f <configuration\ file> [\-L\ <name>] [\-n\ maxconn] [\-N\ maxconn] [\-C\ <dir>] [\-v|\-vv] [\-d] [\-D] [\-q] [\-V] [\-c] [\-p\ <pidfile>] [\-dk] [\-ds] [\-de] [\-dp] [\-db] [\-dM[<byte>]] [\-m\ <megs>] [{\-sf|\-st}\ pidlist...]
 
 .SH DESCRIPTION
 
@@ -37,12 +37,31 @@ instances without risking the system's stability.
 Specify configuration file path.
 
 .TP
+\fB\-L <name>\fP
+Set the local instance's peer name. Peers are defined in the \fBpeers\fP
+configuration section and used for syncing stick tables between different
+instances. If this option is not specified, the local hostname is used as peer
+name.
+
+.TP
 \fB\-n <maxconn>\fP
 Set the high limit for the total number of simultaneous connections.
 
 .TP
 \fB\-N <maxconn>\fP
 Set the high limit for the per-listener number of simultaneous connections.
+
+.TP
+\fB\-C <dir>\fP
+Change directory to <\fIdir\fP> before loading any files.
+
+.TP
+\fB\-v\fP
+Display HAProxy's version.
+
+.TP
+\fB\-vv\fP
+Display HAProxy's version and all build options.
 
 .TP
 \fB\-d\fP
@@ -80,32 +99,26 @@ Ask the process to write down each of its children's pids to this file
 in daemon mode.
 
 .TP
-\fB\-s\fP
-Show statistics (only if compiled in).
-Statistics are only available if compiled in with the 'STATTIME' option.
-It's only used during code optimization phases, and will soon disappear.
-
-.TP
-\fB\-l\fP
-Show even more statistics (implies '\-s').
-
-.TP
 \fB\-dk\fP
-Disable use of kqueue(). kqueue() is available only on BSD systems.
+Disable use of \fBkqueue\fP(2). \fBkqueue\fP(2) is available only on BSD systems.
 
 .TP
 \fB\-ds\fP
-Disable use of speculative epoll(). epoll() is available only on Linux 2.6
-and some custom Linux 2.4 systems.
+Disable use of speculative \fBepoll\fP(7). \fBepoll\fP(7) is available only on
+Linux 2.6 and some custom Linux 2.4 systems.
 
 .TP
 \fB\-de\fP
-Disable use of epoll(). epoll() is available only on Linux 2.6
+Disable use of \fBepoll\fP(7). \fBepoll\fP(7) is available only on Linux 2.6
 and some custom Linux 2.4 systems.
 
 .TP
 \fB\-dp\fP
-Disables use of poll(). select() might be used instead.
+Disables use of \fBpoll\fP(2). \fBselect\fP(2) might be used instead.
+
+.TP
+\fB\-dS\fP
+Disables use of \fBsplice\fP(2), which is broken on older kernels.
 
 .TP
 \fB\-db\fP
@@ -114,6 +127,13 @@ For debugging, the '\-db' option is very useful as it temporarily
 disables daemon mode and multi-process mode. The service can then be
 stopped by simply pressing Ctrl-C, without having to edit the config nor
 run full debug.
+
+.TP
+\fB\-dM[<byte>]\fP
+Initializes all allocated memory areas with the given <\fIbyte\fP>. This makes
+it easier to detect bugs resulting from uninitialized memory accesses, at the
+expense of touching all allocated memory once. If <\fIbyte\fP> is not
+specified, it defaults to 0x50 (ASCII 'P').
 
 .TP
 \fB\-m <megs>\fP
@@ -168,9 +188,8 @@ This signal is intercepted and ignored on systems without \fBMSG_NOSIGNAL\fP.
 
 .SH SEE ALSO
 
-A much better documentation can be found in haproxy-en.txt. On debian
-systems, you can find this file in
-/usr/share/doc/haproxy/haproxy-en.txt.gz.
+A much better documentation can be found in configuration.txt. On Debian
+systems, you can find this file in /usr/share/doc/haproxy/configuration.txt.gz.
 
 .SH AUTHOR
 
