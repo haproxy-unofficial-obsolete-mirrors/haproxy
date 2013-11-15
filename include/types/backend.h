@@ -105,8 +105,18 @@
 /* hash types */
 #define BE_LB_HASH_MAP    0x000000 /* map-based hash (default) */
 #define BE_LB_HASH_CONS   0x100000 /* consistent hashbit to indicate a dynamic algorithm */
-#define BE_LB_HASH_AVAL   0x200000 /* run an avalanche hash before a map */
-#define BE_LB_HASH_TYPE   0x300000 /* get/clear hash types */
+#define BE_LB_HASH_TYPE   0x100000 /* get/clear hash types */
+
+/* additional modifier on top of the hash function (only avalanche right now) */
+#define BE_LB_HMOD_AVAL   0x200000  /* avalanche modifier */
+#define BE_LB_HASH_MOD    0x200000  /* get/clear hash modifier */
+
+/* BE_LB_HFCN_* is the hash function, to be used with BE_LB_HASH_FUNC */
+#define BE_LB_HFCN_SDBM   0x000000 /* sdbm hash */
+#define BE_LB_HFCN_DJB2   0x400000 /* djb2 hash */
+#define BE_LB_HFCN_WT6    0x800000 /* wt6 hash */
+#define BE_LB_HASH_FUNC   0xC00000 /* get/clear hash function */
+
 
 /* various constants */
 

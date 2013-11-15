@@ -4085,25 +4085,67 @@ stats_error_parsing:
 		}
 	}
 	else if (!strcmp(args[0], "hash-type")) { /* set hashing method */
+		/**
+		 * The syntax for hash-type config element is
+		 * hash-type {map-based|consistent} [[<algo>] avalanche]
+		 *
+		 * The default hash function is sdbm for map-based and sdbm+avalanche for consistent.
+		 */
+		curproxy->lbprm.algo &= ~(BE_LB_HASH_TYPE | BE_LB_HASH_FUNC | BE_LB_HASH_MOD);
+
 		if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], NULL))
 			err_code |= ERR_WARN;
 
 		if (strcmp(args[1], "consistent") == 0) {	/* use consistent hashing */
-			curproxy->lbprm.algo &= ~BE_LB_HASH_TYPE;
 			curproxy->lbprm.algo |= BE_LB_HASH_CONS;
 		}
 		else if (strcmp(args[1], "map-based") == 0) {	/* use map-based hashing */
-			curproxy->lbprm.algo &= ~BE_LB_HASH_TYPE;
 			curproxy->lbprm.algo |= BE_LB_HASH_MAP;
 		}
-		else if (strcmp(args[1], "avalanche") == 0) {	/* use full hash before map-based hashing */
-			curproxy->lbprm.algo &= ~BE_LB_HASH_TYPE;
-			curproxy->lbprm.algo |= BE_LB_HASH_AVAL;
-		}
-		else {
-			Alert("parsing [%s:%d] : '%s' only supports 'avalanche', 'consistent' and 'map-based'.\n", file, linenum, args[0]);
+		else if (strcmp(args[1], "avalanche") == 0) {
+			Alert("parsing [%s:%d] : experimental feature '%s %s' is not supported anymore, please use '%s map-based sdbm avalanche' instead.\n", file, linenum, args[0], args[1], args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
+		}
+		else {
+			Alert("parsing [%s:%d] : '%s' only supports 'consistent' and 'map-based'.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
+		/* set the hash function to use */
+		if (!*args[2]) {
+			/* the default algo is sdbm */
+			curproxy->lbprm.algo |= BE_LB_HFCN_SDBM;
+
+			/* if consistent with no argument, then avalanche modifier is also applied */
+			if ((curproxy->lbprm.algo & BE_LB_HASH_TYPE) == BE_LB_HASH_CONS)
+				curproxy->lbprm.algo |= BE_LB_HMOD_AVAL;
+		} else {
+			/* set the hash function */
+			if (!strcmp(args[2], "sdbm")) {
+				curproxy->lbprm.algo |= BE_LB_HFCN_SDBM;
+			}
+			else if (!strcmp(args[2], "djb2")) {
+				curproxy->lbprm.algo |= BE_LB_HFCN_DJB2;
+			} else if (!strcmp(args[2], "wt6")) {
+				curproxy->lbprm.algo |= BE_LB_HFCN_WT6;
+			}
+			else {
+				Alert("parsing [%s:%d] : '%s' only supports 'sdbm', 'djb2' or 'wt6' hash functions.\n", file, linenum, args[0]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+
+			/* set the hash modifier */
+			if (!strcmp(args[3], "avalanche")) {
+				curproxy->lbprm.algo |= BE_LB_HMOD_AVAL;
+			}
+			else if (*args[3]) {
+				Alert("parsing [%s:%d] : '%s' only supports 'avalanche' as a modifier for hash functions.\n", file, linenum, args[0]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
 		}
 	}
 	else if (!strcmp(args[0], "server") || !strcmp(args[0], "default-server")) {  /* server address */
