@@ -1322,9 +1322,9 @@ void init_default_instance()
 	defproxy.maxconn = cfg_maxpconn;
 	defproxy.conn_retries = CONN_RETRIES;
 
-	defproxy.defsrv.inter = DEF_CHKINTR;
-	defproxy.defsrv.fastinter = 0;
-	defproxy.defsrv.downinter = 0;
+	defproxy.defsrv.check.inter = DEF_CHKINTR;
+	defproxy.defsrv.check.fastinter = 0;
+	defproxy.defsrv.check.downinter = 0;
 	defproxy.defsrv.rise = DEF_RISETIME;
 	defproxy.defsrv.fall = DEF_FALLTIME;
 	defproxy.defsrv.check.port = 0;
@@ -1620,6 +1620,34 @@ out:
 	return err_code;
 }
 
+static int init_check(struct check *check, int type, const char * file, int linenum)
+{
+	check->type = type;
+
+	/* Allocate buffer for requests... */
+	if ((check->bi = calloc(sizeof(struct buffer) + global.tune.chksize, sizeof(char))) == NULL) {
+		Alert("parsing [%s:%d] : out of memory while allocating check buffer.\n", file, linenum);
+		return ERR_ALERT | ERR_ABORT;
+	}
+	check->bi->size = global.tune.chksize;
+
+	/* Allocate buffer for responses... */
+	if ((check->bo = calloc(sizeof(struct buffer) + global.tune.chksize, sizeof(char))) == NULL) {
+		Alert("parsing [%s:%d] : out of memory while allocating check buffer.\n", file, linenum);
+		return ERR_ALERT | ERR_ABORT;
+	}
+	check->bo->size = global.tune.chksize;
+
+	/* Allocate buffer for partial results... */
+	if ((check->conn = calloc(1, sizeof(struct connection))) == NULL) {
+		Alert("parsing [%s:%d] : out of memory while allocating check connection.\n", file, linenum);
+		return ERR_ALERT | ERR_ABORT;
+	}
+
+	check->conn->t.sock.fd = -1; /* no agent in progress yet */
+
+	return 0;
+}
 
 int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 {
@@ -4241,8 +4269,8 @@ stats_error_parsing:
 			}
 
 			newsrv->addr = *sk;
-			newsrv->proto = newsrv->check.proto = protocol_by_family(newsrv->addr.ss_family);
-			newsrv->xprt  = newsrv->check.xprt  = &raw_sock;
+			newsrv->proto = newsrv->check_common.proto = protocol_by_family(newsrv->addr.ss_family);
+			newsrv->xprt  = newsrv->check_common.xprt  = &raw_sock;
 
 			if (!newsrv->proto) {
 				Alert("parsing [%s:%d] : Unknown protocol family %d '%s'\n",
@@ -4251,11 +4279,11 @@ stats_error_parsing:
 				goto out;
 			}
 
-			newsrv->check.use_ssl	= curproxy->defsrv.check.use_ssl;
+			newsrv->check.use_ssl = curproxy->defsrv.check.use_ssl;
 			newsrv->check.port	= curproxy->defsrv.check.port;
-			newsrv->inter		= curproxy->defsrv.inter;
-			newsrv->fastinter	= curproxy->defsrv.fastinter;
-			newsrv->downinter	= curproxy->defsrv.downinter;
+			newsrv->check.inter	= curproxy->defsrv.check.inter;
+			newsrv->check.fastinter	= curproxy->defsrv.check.fastinter;
+			newsrv->check.downinter	= curproxy->defsrv.check.downinter;
 			newsrv->rise		= curproxy->defsrv.rise;
 			newsrv->fall		= curproxy->defsrv.fall;
 			newsrv->maxqueue	= curproxy->defsrv.maxqueue;
@@ -4271,7 +4299,9 @@ stats_error_parsing:
 			newsrv->uweight = newsrv->iweight
 						= curproxy->defsrv.iweight;
 
-			newsrv->health = newsrv->rise;	/* up, but will fall down at first failure */
+			newsrv->check.status	= HCHK_STATUS_INI;
+			newsrv->check.health	= newsrv->rise;	/* up, but will fall down at first failure */
+			newsrv->check.server	= newsrv;
 
 			cur_arg = 3;
 		} else {
@@ -4306,8 +4336,8 @@ stats_error_parsing:
 					goto out;
 				}
 
-				if (newsrv->health)
-					newsrv->health = newsrv->rise;
+				if (newsrv->check.health)
+					newsrv->check.health = newsrv->rise;
 				cur_arg += 2;
 			}
 			else if (!strcmp(args[cur_arg], "fall")) {
@@ -4343,7 +4373,7 @@ stats_error_parsing:
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
-				newsrv->inter = val;
+				newsrv->check.inter = val;
 				cur_arg += 2;
 			}
 			else if (!strcmp(args[cur_arg], "fastinter")) {
@@ -4360,7 +4390,7 @@ stats_error_parsing:
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
-				newsrv->fastinter = val;
+				newsrv->check.fastinter = val;
 				cur_arg += 2;
 			}
 			else if (!strcmp(args[cur_arg], "downinter")) {
@@ -4377,7 +4407,7 @@ stats_error_parsing:
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
-				newsrv->downinter = val;
+				newsrv->check.downinter = val;
 				cur_arg += 2;
 			}
 			else if (!defsrv && !strcmp(args[cur_arg], "addr")) {
@@ -4408,7 +4438,7 @@ stats_error_parsing:
 					goto out;
 				}
 
-				newsrv->check.addr = *sk;
+				newsrv->check_common.addr = *sk;
 				cur_arg += 2;
 			}
 			else if (!strcmp(args[cur_arg], "port")) {
@@ -4488,7 +4518,7 @@ stats_error_parsing:
 			else if (!defsrv && !strcmp(args[cur_arg], "disabled")) {
 				newsrv->state |= SRV_MAINTAIN;
 				newsrv->state &= ~SRV_RUNNING;
-				newsrv->health = 0;
+				newsrv->check.health = 0;
 				cur_arg += 1;
 			}
 			else if (!defsrv && !strcmp(args[cur_arg], "observe")) {
@@ -4832,6 +4862,8 @@ stats_error_parsing:
 		}
 
 		if (do_check) {
+			int ret;
+
 			if (newsrv->trackit) {
 				Alert("parsing [%s:%d]: unable to enable checks and tracking at the same time!\n",
 					file, linenum);
@@ -4844,15 +4876,15 @@ stats_error_parsing:
 			 * same as for the production traffic. Otherwise we use raw_sock by
 			 * default, unless one is specified.
 			 */
-			if (!newsrv->check.port && !is_addr(&newsrv->check.addr)) {
+			if (!newsrv->check.port && !is_addr(&newsrv->check_common.addr)) {
 #ifdef USE_OPENSSL
 				newsrv->check.use_ssl |= newsrv->use_ssl;
 #endif
 				newsrv->check.send_proxy |= (newsrv->state & SRV_SEND_PROXY);
 			}
-			/* try to get the port from check.addr if check.port not set */
+			/* try to get the port from check_core.addr if check.port not set */
 			if (!newsrv->check.port)
-				newsrv->check.port = get_host_port(&newsrv->check.addr);
+				newsrv->check.port = get_host_port(&newsrv->check_common.addr);
 
 			if (!newsrv->check.port)
 				newsrv->check.port = realport; /* by default */
@@ -4877,31 +4909,14 @@ stats_error_parsing:
 				goto out;
 			}
 
-			/* Allocate buffer for check requests... */
-			if ((newsrv->check.bi = calloc(sizeof(struct buffer) + global.tune.chksize, sizeof(char))) == NULL) {
-				Alert("parsing [%s:%d] : out of memory while allocating check buffer.\n", file, linenum);
-				err_code |= ERR_ALERT | ERR_ABORT;
-				goto out;
-			}
-			newsrv->check.bi->size = global.tune.chksize;
-
-			/* Allocate buffer for check responses... */
-			if ((newsrv->check.bo = calloc(sizeof(struct buffer) + global.tune.chksize, sizeof(char))) == NULL) {
-				Alert("parsing [%s:%d] : out of memory while allocating check buffer.\n", file, linenum);
-				err_code |= ERR_ALERT | ERR_ABORT;
-				goto out;
-			}
-			newsrv->check.bo->size = global.tune.chksize;
-
-			/* Allocate buffer for partial check results... */
-			if ((newsrv->check.conn = calloc(1, sizeof(struct connection))) == NULL) {
-				Alert("parsing [%s:%d] : out of memory while allocating check connection.\n", file, linenum);
-				err_code |= ERR_ALERT | ERR_ABORT;
+			ret = init_check(&newsrv->check,
+					 curproxy->options2 & PR_O2_CHK_ANY,
+					 file, linenum);
+			if (ret) {
+				err_code |= ret;
 				goto out;
 			}
 
-			newsrv->check.conn->t.sock.fd = -1; /* no check in progress yet */
-			newsrv->check.status = HCHK_STATUS_INI;
 			newsrv->state |= SRV_CHECKED;
 		}
 
@@ -6793,7 +6808,7 @@ out_uri_auth_compat:
 				if (srv->state & SRV_MAINTAIN) {
 					newsrv->state |= SRV_MAINTAIN;
 					newsrv->state &= ~SRV_RUNNING;
-					newsrv->health = 0;
+					newsrv->check.health = 0;
 				}
 
 				newsrv->track = srv;

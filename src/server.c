@@ -22,7 +22,7 @@ static struct srv_kw_list srv_keywords = {
 	.list = LIST_HEAD_INIT(srv_keywords.list)
 };
 
-int srv_downtime(struct server *s)
+int srv_downtime(const struct server *s)
 {
 	if ((s->state & SRV_RUNNING) && s->last_change < now.tv_sec)		// ignore negative time
 		return s->down_time;
@@ -30,15 +30,17 @@ int srv_downtime(struct server *s)
 	return now.tv_sec - s->last_change + s->down_time;
 }
 
-int srv_getinter(struct server *s)
+int srv_getinter(const struct check *check)
 {
-	if ((s->state & SRV_CHECKED) && (s->health == s->rise + s->fall - 1))
-		return s->inter;
+	const struct server *s = check->server;
 
-	if (!(s->state & SRV_RUNNING) && s->health==0)
-		return (s->downinter)?(s->downinter):(s->inter);
+	if ((s->state & SRV_CHECKED) && (check->health == s->rise + s->fall - 1))
+		return check->inter;
 
-	return (s->fastinter)?(s->fastinter):(s->inter);
+	if (!(s->state & SRV_RUNNING) && check->health == 0)
+		return (check->downinter)?(check->downinter):(check->inter);
+
+	return (check->fastinter)?(check->fastinter):(check->inter);
 }
 
 /*

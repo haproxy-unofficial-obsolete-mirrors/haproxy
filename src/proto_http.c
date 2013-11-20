@@ -2911,7 +2911,7 @@ int http_process_req_stat_post(struct stream_interface *si, struct http_txn *txn
 						if ((px->state != PR_STSTOPPED) && !(sv->state & SRV_MAINTAIN)) {
 							/* Not already in maintenance, we can change the server state */
 							sv->state |= SRV_MAINTAIN;
-							set_server_down(sv);
+							set_server_down(&sv->check);
 							altered_servers++;
 							total_servers++;
 						}
@@ -2919,8 +2919,8 @@ int http_process_req_stat_post(struct stream_interface *si, struct http_txn *txn
 					case ST_ADM_ACTION_ENABLE:
 						if ((px->state != PR_STSTOPPED) && (sv->state & SRV_MAINTAIN)) {
 							/* Already in maintenance, we can change the server state */
-							set_server_up(sv);
-							sv->health = sv->rise;	/* up, but will fall down at first failure */
+							set_server_up(&sv->check);
+							sv->check.health = sv->rise;	/* up, but will fall down at first failure */
 							altered_servers++;
 							total_servers++;
 						}
@@ -3642,6 +3642,14 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit, 
 	else
 		do_stats = 0;
 
+	/* only apply req{,i}{rep/deny/tarpit} if the request was not yet
+	 * blocked by an http-request rule.
+	 */
+	if (!(txn->flags & (TX_CLDENY|TX_CLTARPIT)) && (px->req_exp != NULL)) {
+		if (apply_filters_to_request(s, req, px) < 0)
+			goto return_bad_req;
+	}
+
 	/* return a 403 if either rule has blocked */
 	if (txn->flags & (TX_CLDENY|TX_CLTARPIT)) {
 		if (txn->flags & TX_CLDENY) {
@@ -3650,12 +3658,13 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit, 
 			stream_int_retnclose(req->prod, http_error_message(s, HTTP_ERR_403));
 			session_inc_http_err_ctr(s);
 			s->fe->fe_counters.denied_req++;
-			if (an_bit == AN_REQ_HTTP_PROCESS_BE)
+			if (s->fe != s->be)
 				s->be->be_counters.denied_req++;
 			if (s->listener->counters)
 				s->listener->counters->denied_req++;
 			goto return_prx_cond;
 		}
+
 		/* When a connection is tarpitted, we use the tarpit timeout,
 		 * which may be the same as the connect timeout if unspecified.
 		 * If unset, then set it to zero because we really want it to
@@ -3678,43 +3687,6 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit, 
 				s->be->be_counters.denied_req++;
 			if (s->listener->counters)
 				s->listener->counters->denied_req++;
-			return 1;
-		}
-	}
-
-	/* try headers filters */
-	if (px->req_exp != NULL) {
-		if (apply_filters_to_request(s, req, px) < 0)
-			goto return_bad_req;
-
-		/* has the request been denied ? */
-		if (txn->flags & TX_CLDENY) {
-			/* no need to go further */
-			txn->status = 403;
-			/* let's log the request time */
-			s->logs.tv_request = now;
-			stream_int_retnclose(req->prod, http_error_message(s, HTTP_ERR_403));
-			session_inc_http_err_ctr(s);
-			goto return_prx_cond;
-		}
-
-		/* When a connection is tarpitted, we use the tarpit timeout,
-		 * which may be the same as the connect timeout if unspecified.
-		 * If unset, then set it to zero because we really want it to
-		 * eventually expire. We build the tarpit as an analyser.
-		 */
-		if (txn->flags & TX_CLTARPIT) {
-			channel_erase(s->req);
-			/* wipe the request out so that we can drop the connection early
-			 * if the client closes first.
-			 */
-			channel_dont_connect(req);
-			req->analysers = 0; /* remove switching rules etc... */
-			req->analysers |= AN_REQ_HTTP_TARPIT;
-			req->analyse_exp = tick_add_ifset(now_ms,  s->be->timeout.tarpit);
-			if (!req->analyse_exp)
-				req->analyse_exp = tick_add(now_ms, 0);
-			session_inc_http_err_ctr(s);
 			return 1;
 		}
 	}
@@ -4208,10 +4180,6 @@ int http_process_tarpit(struct session *s, struct channel *req, int an_bit)
 
 	req->analysers = 0;
 	req->analyse_exp = TICK_ETERNITY;
-
-	s->fe->fe_counters.failed_req++;
-	if (s->listener->counters)
-		s->listener->counters->failed_req++;
 
 	if (!(s->flags & SN_ERR_MASK))
 		s->flags |= SN_ERR_PRXCOND;
@@ -6364,25 +6332,11 @@ int apply_filter_to_req_headers(struct session *t, struct channel *req, struct h
 			case ACT_DENY:
 				txn->flags |= TX_CLDENY;
 				last_hdr = 1;
-
-				t->fe->fe_counters.denied_req++;
-				if (t->fe != t->be)
-					t->be->be_counters.denied_req++;
-				if (t->listener->counters)
-					t->listener->counters->denied_req++;
-
 				break;
 
 			case ACT_TARPIT:
 				txn->flags |= TX_CLTARPIT;
 				last_hdr = 1;
-
-				t->fe->fe_counters.denied_req++;
-				if (t->fe != t->be)
-					t->be->be_counters.denied_req++;
-				if (t->listener->counters)
-					t->listener->counters->denied_req++;
-
 				break;
 
 			case ACT_REPLACE:
@@ -6486,25 +6440,11 @@ int apply_filter_to_req_line(struct session *t, struct channel *req, struct hdr_
 
 		case ACT_DENY:
 			txn->flags |= TX_CLDENY;
-
-			t->fe->fe_counters.denied_req++;
-			if (t->fe != t->be)
-				t->be->be_counters.denied_req++;
-			if (t->listener->counters)
-				t->listener->counters->denied_req++;
-
 			done = 1;
 			break;
 
 		case ACT_TARPIT:
 			txn->flags |= TX_CLTARPIT;
-
-			t->fe->fe_counters.denied_req++;
-			if (t->fe != t->be)
-				t->be->be_counters.denied_req++;
-			if (t->listener->counters)
-				t->listener->counters->denied_req++;
-
 			done = 1;
 			break;
 
@@ -8551,7 +8491,7 @@ struct http_req_rule *parse_http_req_cond(const char **args, const char *file, i
 		cur_arg += 2;
 	} else if (strcmp(args[0], "redirect") == 0) {
 		struct redirect_rule *redir;
-		char *errmsg;
+		char *errmsg = NULL;
 
 		if ((redir = http_parse_redirect_rule(file, linenum, proxy, (const char **)args + 1, &errmsg)) == NULL) {
 			Alert("parsing [%s:%d] : error detected in %s '%s' while parsing 'http-request %s' rule : %s.\n",
@@ -9522,8 +9462,8 @@ smp_fetch_base(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
  * the Host header followed by the path component if it begins with a slash ('/').
  * This means that '*' will not be added, resulting in exactly the first Host
  * entry. If no Host header is found, then the path is used. The resulting value
- * is hashed using the url hash followed by a full avalanche hash and provides a
- * 32-bit integer value. This fetch is useful for tracking per-URL activity on
+ * is hashed using the path hash followed by a full avalanche hash and provides a
+ * 32-bit integer value. This fetch is useful for tracking per-path activity on
  * high-traffic sites without having to store whole paths.
  */
 static int
@@ -9568,9 +9508,9 @@ smp_fetch_base32(struct proxy *px, struct session *l4, void *l7, unsigned int op
 }
 
 /* This concatenates the source address with the 32-bit hash of the Host and
- * URL as returned by smp_fetch_base32(). The idea is to have per-source and
- * per-url counters. The result is a binary block from 8 to 20 bytes depending
- * on the source address length. The URL hash is stored before the address so
+ * path as returned by smp_fetch_base32(). The idea is to have per-source and
+ * per-path counters. The result is a binary block from 8 to 20 bytes depending
+ * on the source address length. The path hash is stored before the address so
  * that in environments where IPv6 is insignificant, truncating the output to
  * 8 bytes would still work.
  */
@@ -10100,6 +10040,95 @@ smp_fetch_url_param_val(struct proxy *px, struct session *l4, void *l7, unsigned
 	return ret;
 }
 
+/* This produces a 32-bit hash of the concatenation of the first occurrence of
+ * the Host header followed by the path component if it begins with a slash ('/').
+ * This means that '*' will not be added, resulting in exactly the first Host
+ * entry. If no Host header is found, then the path is used. The resulting value
+ * is hashed using the url hash followed by a full avalanche hash and provides a
+ * 32-bit integer value. This fetch is useful for tracking per-URL activity on
+ * high-traffic sites without having to store whole paths.
+ * this differs from the base32 functions in that it includes the url parameters
+ * as well as the path
+ */
+static int
+smp_fetch_url32(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                 const struct arg *args, struct sample *smp, const char *kw)
+{
+	struct http_txn *txn = l7;
+	struct hdr_ctx ctx;
+	unsigned int hash = 0;
+	char *ptr, *beg, *end;
+	int len;
+
+	CHECK_HTTP_MESSAGE_FIRST();
+
+	ctx.idx = 0;
+	if (http_find_header2("Host", 4, txn->req.chn->buf->p + txn->req.sol, &txn->hdr_idx, &ctx)) {
+		/* OK we have the header value in ctx.line+ctx.val for ctx.vlen bytes */
+		ptr = ctx.line + ctx.val;
+		len = ctx.vlen;
+		while (len--)
+			hash = *(ptr++) + (hash << 6) + (hash << 16) - hash;
+	}
+
+	/* now retrieve the path */
+	end = txn->req.chn->buf->p + txn->req.sol + txn->req.sl.rq.u + txn->req.sl.rq.u_l;
+	beg = http_get_path(txn);
+	if (!beg)
+		beg = end;
+
+	for (ptr = beg; ptr < end ; ptr++);
+
+	if (beg < ptr && *beg == '/') {
+		while (beg < ptr)
+			hash = *(beg++) + (hash << 6) + (hash << 16) - hash;
+	}
+	hash = full_hash(hash);
+
+	smp->type = SMP_T_UINT;
+	smp->data.uint = hash;
+	smp->flags = SMP_F_VOL_1ST;
+	return 1;
+}
+
+/* This concatenates the source address with the 32-bit hash of the Host and
+ * URL as returned by smp_fetch_base32(). The idea is to have per-source and
+ * per-url counters. The result is a binary block from 8 to 20 bytes depending
+ * on the source address length. The URL hash is stored before the address so
+ * that in environments where IPv6 is insignificant, truncating the output to
+ * 8 bytes would still work.
+ */
+static int
+smp_fetch_url32_src(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                     const struct arg *args, struct sample *smp, const char *kw)
+{
+	struct chunk *temp;
+
+	if (!smp_fetch_url32(px, l4, l7, opt, args, smp, kw))
+		return 0;
+
+	temp = get_trash_chunk();
+	memcpy(temp->str + temp->len, &smp->data.uint, sizeof(smp->data.uint));
+	temp->len += sizeof(smp->data.uint);
+
+	switch (l4->si[0].conn->addr.from.ss_family) {
+	case AF_INET:
+		memcpy(temp->str + temp->len, &((struct sockaddr_in *)&l4->si[0].conn->addr.from)->sin_addr, 4);
+		temp->len += 4;
+		break;
+	case AF_INET6:
+		memcpy(temp->str + temp->len, &((struct sockaddr_in6 *)(&l4->si[0].conn->addr.from))->sin6_addr, 16);
+		temp->len += 16;
+		break;
+	default:
+		return 0;
+	}
+
+	smp->data.str = *temp;
+	smp->type = SMP_T_BIN;
+	return 1;
+}
+
 /* This function is used to validate the arguments passed to any "hdr" fetch
  * keyword. These keywords support an optional positive or negative occurrence
  * number. We must ensure that the number is greater than -MAX_HDR_HISTORY. It
@@ -10319,6 +10348,8 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {ILH, {
 
 	{ "status",          smp_fetch_stcode,         0,                NULL,    SMP_T_UINT, SMP_USE_HRSHP },
 	{ "url",             smp_fetch_url,            0,                NULL,    SMP_T_CSTR, SMP_USE_HRQHV },
+	{ "url32",           smp_fetch_url32,          0,                NULL,    SMP_T_UINT, SMP_USE_HRQHV },
+	{ "url32+src",       smp_fetch_url32_src,      0,                NULL,    SMP_T_BIN,  SMP_USE_HRQHV },
 	{ "url_ip",          smp_fetch_url_ip,         0,                NULL,    SMP_T_IPV4, SMP_USE_HRQHV },
 	{ "url_port",        smp_fetch_url_port,       0,                NULL,    SMP_T_UINT, SMP_USE_HRQHV },
 	{ "url_param",       smp_fetch_url_param,      ARG2(1,STR,STR),  NULL,    SMP_T_CSTR, SMP_USE_HRQHV },
