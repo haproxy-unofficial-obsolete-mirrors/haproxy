@@ -52,9 +52,13 @@
 #define SRV_GOINGDOWN	0x0020	/* this server says that it's going down (404) */
 #define SRV_WARMINGUP	0x0040	/* this server is warming up after a failure */
 #define SRV_MAINTAIN	0x0080	/* this server is in maintenance mode */
-/* unused: 0x0100, 0x0200, 0x0400 */
+#define SRV_DRAIN	0x0100	/* this server has been requested to drain its connections */
+/* unused: 0x0200, 0x0400 */
 #define SRV_SEND_PROXY	0x0800	/* this server talks the PROXY protocol */
 #define SRV_NON_STICK	0x1000	/* never add connections allocated to this server to a stick table */
+#define SRV_AGENT_CHECKED  0x2000  /* this server needs to be checked using an agent check.
+				    * This is run independently of the main check whose
+				    * presence is indicated by the SRV_CHECKED flag */
 
 /* function which act on servers need to return various errors */
 #define SRV_STATUS_OK       0   /* everything is OK. */
@@ -71,6 +75,7 @@
 
 /* check flags */
 #define CHK_STATE_RUNNING	0x0001  /* this check is currently running */
+#define CHK_STATE_DISABLED	0x0002  /* this check is currently administratively disabled */
 
 /* various constants */
 #define SRV_UWGHT_RANGE 256
@@ -120,8 +125,9 @@ struct check {
 	int inter, fastinter, downinter;        /* checks: time in milliseconds */
 	int result;				/* health-check result : SRV_CHK_* */
 	int state;				/* health-check result : CHK_* */
-	int health;				/* 0 to server->rise-1 = bad;
-						 * rise to server->rise+server->fall-1 = good */
+	int health;				/* 0 to rise-1 = bad;
+						 * rise to rise+fall-1 = good */
+	int rise, fall;				/* time in iterations */
 	int type;				/* Check type, one of PR_O2_*_CHK */
 	struct server *server;			/* back-pointer to server */
 };
@@ -154,7 +160,6 @@ struct server {
 	struct server *tracknext, *track;	/* next server in a tracking list, tracked server */
 	char *trackit;				/* temporary variable to make assignment deferrable */
 	int consecutive_errors;			/* current number of consecutive errors */
-	int rise, fall;				/* time in iterations */
 	int consecutive_errors_limit;		/* number of consecutive errors that triggers an event */
 	short observe, onerror;			/* observing mode: one of HANA_OBS_*; what to do on error: on of ANA_ONERR_* */
 	short onmarkeddown;			/* what to do when marked down: one of HANA_ONMARKEDDOWN_* */
@@ -190,6 +195,7 @@ struct server {
 	} check_common;
 
 	struct check check;                     /* health-check specific configuration */
+	struct check agent;                     /* agent specific configuration */
 
 #ifdef USE_OPENSSL
 	int use_ssl;				/* ssl enabled */

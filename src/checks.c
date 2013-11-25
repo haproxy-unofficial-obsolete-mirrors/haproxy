@@ -228,9 +228,18 @@ static void set_server_check_status(struct check *check, short status, const cha
 		tv_zero(&check->start);
 	}
 
+	/* Failure to connect to the agent as a secondary check should not
+	 * cause the server to be marked down. So only log status changes
+	 * for HCHK_STATUS_* statuses */
+	if (check == &s->agent && check->status < HCHK_STATUS_L7TOUT)
+		return;
+
 	if (s->proxy->options2 & PR_O2_LOGHCHKS &&
 	(((check->health != 0) && (check->result & SRV_CHK_FAILED)) ||
-	    ((check->health != s->rise + s->fall - 1) && (check->result & SRV_CHK_PASSED)) ||
+	    (((check->health != check->rise + check->fall - 1) ||
+	      (!s->uweight && !(s->state & SRV_DRAIN)) ||
+	      (s->uweight && (s->state & SRV_DRAIN))) &&
+	     (check->result & SRV_CHK_PASSED)) ||
 	    ((s->state & SRV_GOINGDOWN) && !(check->result & SRV_CHK_DISABLE)) ||
 	    (!(s->state & SRV_GOINGDOWN) && (check->result & SRV_CHK_DISABLE)))) {
 
@@ -240,8 +249,8 @@ static void set_server_check_status(struct check *check, short status, const cha
 
 		/* FIXME begin: calculate local version of the health/rise/fall/state */
 		health = check->health;
-		rise   = s->rise;
-		fall   = s->fall;
+		rise   = check->rise;
+		fall   = check->fall;
 		state  = s->state;
 
 		if (check->result & SRV_CHK_FAILED) {
@@ -284,7 +293,7 @@ static void set_server_check_status(struct check *check, short status, const cha
 		chunk_appendf(&trash, ", status: %d/%d %s",
 		             (state & SRV_RUNNING) ? (health - rise + 1) : (health),
 		             (state & SRV_RUNNING) ? (fall) : (rise),
-		             (state & SRV_RUNNING)?"UP":"DOWN");
+			     (state & SRV_RUNNING)?(s->eweight?"UP":"DRAIN"):"DOWN");
 
 		Warning("%s.\n", trash.str);
 		send_log(s->proxy, LOG_NOTICE, "%s.\n", trash.str);
@@ -395,10 +404,10 @@ void set_server_down(struct check *check)
 	int xferred;
 
 	if (s->state & SRV_MAINTAIN) {
-		check->health = s->rise;
+		check->health = check->rise;
 	}
 
-	if (check->health == s->rise || s->track) {
+	if ((s->state & SRV_RUNNING && check->health == check->rise) || s->track) {
 		int srv_was_paused = s->state & SRV_GOINGDOWN;
 		int prev_srv_count = s->proxy->srv_bck + s->proxy->srv_act;
 
@@ -462,10 +471,11 @@ void set_server_up(struct check *check) {
 	unsigned int old_state = s->state;
 
 	if (s->state & SRV_MAINTAIN) {
-		check->health = s->rise;
+		check->health = check->rise;
 	}
 
-	if (check->health == s->rise || s->track) {
+	if ((s->check.health >= s->check.rise && s->agent.health >= s->agent.rise &&
+	     check->health == check->rise) || s->track) {
 		if (s->proxy->srv_bck == 0 && s->proxy->srv_act == 0) {
 			if (s->proxy->last_change < now.tv_sec)		// ignore negative times
 				s->proxy->down_time += now.tv_sec - s->proxy->last_change;
@@ -481,18 +491,10 @@ void set_server_up(struct check *check) {
 
 		if (s->slowstart > 0) {
 			s->state |= SRV_WARMINGUP;
-			if (s->proxy->lbprm.algo & BE_LB_PROP_DYN) {
-				/* For dynamic algorithms, start at the first step of the weight,
-				 * without multiplying by BE_WEIGHT_SCALE.
-				 */
-				s->eweight = s->uweight;
-				if (s->proxy->lbprm.update_server_eweight)
-					s->proxy->lbprm.update_server_eweight(s);
-			}
 			task_schedule(s->warmup, tick_add(now_ms, MS_TO_TICKS(MAX(1000, s->slowstart / 20))));
 		}
-		if (s->proxy->lbprm.set_server_status_up)
-			s->proxy->lbprm.set_server_status_up(s);
+
+		server_recalc_eweight(s);
 
 		/* If the server is set with "on-marked-up shutdown-backup-sessions",
 		 * and it's not a backup server and its effective weight is > 0,
@@ -534,8 +536,8 @@ void set_server_up(struct check *check) {
 					set_server_up(check);
 	}
 
-	if (check->health >= s->rise)
-		check->health = s->rise + s->fall - 1; /* OK now */
+	if (check->health >= check->rise)
+		check->health = check->rise + check->fall - 1; /* OK now */
 
 }
 
@@ -611,6 +613,27 @@ static void set_server_enabled(struct check *check) {
 			set_server_enabled(check);
 }
 
+static void check_failed(struct check *check)
+{
+	struct server *s = check->server;
+
+	/* The agent secondary check should only cause a server to be marked
+	 * as down if check->status is HCHK_STATUS_L7STS, which indicates
+	 * that the agent returned "fail", "stopped" or "down".
+	 * The implication here is that failure to connect to the agent
+	 * as a secondary check should not cause the server to be marked
+	 * down. */
+	if (check == &s->agent && check->status != HCHK_STATUS_L7STS)
+		return;
+
+	if (check->health > check->rise) {
+		check->health--; /* still good */
+		s->counters.failed_checks++;
+	}
+	else
+		set_server_down(check);
+}
+
 void health_adjust(struct server *s, short status)
 {
 	int failed;
@@ -660,27 +683,21 @@ void health_adjust(struct server *s, short status)
 
 		case HANA_ONERR_SUDDTH:
 		/* simulate a pre-fatal failed health check */
-			if (s->check.health > s->rise)
-				s->check.health = s->rise + 1;
+			if (s->check.health > s->check.rise)
+				s->check.health = s->check.rise + 1;
 
 			/* no break - fall through */
 
 		case HANA_ONERR_FAILCHK:
 		/* simulate a failed health check */
 			set_server_check_status(&s->check, HCHK_STATUS_HANA, trash.str);
-
-			if (s->check.health > s->rise) {
-				s->check.health--; /* still good */
-				s->counters.failed_checks++;
-			}
-			else
-				set_server_down(&s->check);
+			check_failed(&s->check);
 
 			break;
 
 		case HANA_ONERR_MARKDWN:
 		/* mark server down */
-			s->check.health = s->rise;
+			s->check.health = s->check.rise;
 			set_server_check_status(&s->check, HCHK_STATUS_HANA, trash.str);
 			set_server_down(&s->check);
 
@@ -720,7 +737,7 @@ static int httpchk_build_status_header(struct server *s, char *buffer)
 	if (!(s->state & SRV_CHECKED))
 		sv_state = 6; /* should obviously never happen */
 	else if (s->state & SRV_RUNNING) {
-		if (s->check.health == s->rise + s->fall - 1)
+		if (s->check.health == s->check.rise + s->check.fall - 1)
 			sv_state = 3; /* UP */
 		else
 			sv_state = 2; /* going down */
@@ -736,8 +753,8 @@ static int httpchk_build_status_header(struct server *s, char *buffer)
 
 	hlen += sprintf(buffer + hlen,
 			     srv_hlt_st[sv_state],
-			     (s->state & SRV_RUNNING) ? (s->check.health - s->rise + 1) : (s->check.health),
-			     (s->state & SRV_RUNNING) ? (s->fall) : (s->rise));
+			     (s->state & SRV_RUNNING) ? (s->check.health - s->check.rise + 1) : (s->check.health),
+			     (s->state & SRV_RUNNING) ? (s->check.fall) : (s->check.rise));
 
 	hlen += sprintf(buffer + hlen, "; name=%s/%s; node=%s; weight=%d/%d; scur=%d/%d; qcur=%d",
 			     s->proxy->id, s->id,
@@ -821,7 +838,6 @@ static void event_srv_chk_w(struct connection *conn)
 	conn->flags |= CO_FL_ERROR;
 	goto out_wakeup;
 }
-
 
 /*
  * This function is used only for server health-checks. It handles the server's
@@ -978,19 +994,36 @@ static void event_srv_chk_r(struct connection *conn)
 		short status = HCHK_STATUS_L7RSP;
 		const char *desc = "Unknown feedback string";
 		const char *down_cmd = NULL;
+		int disabled;
 
 		if (!done)
 			goto wait_more_data;
 
 		cut_crlf(check->bi->data);
 
+		/*
+		 * The agent may have been disabled after a check was
+		 * initialised.  If so, ignore weight changes and drain
+		 * settings from the agent.  Note that the setting is
+		 * always present in the state of the agent the server,
+		 * regardless of if the agent is being run as a primary or
+		 * secondary check. That is, regardless of if the check
+		 * parameter of this function is the agent or check field
+		 * of the server.
+		 */
+		disabled = check->server->agent.state & CHK_STATE_DISABLED;
+
 		if (strchr(check->bi->data, '%')) {
+			if (disabled)
+				break;
 			desc = server_parse_weight_change_request(s, check->bi->data);
 			if (!desc) {
 				status = HCHK_STATUS_L7OKD;
 				desc = check->bi->data;
 			}
 		} else if (!strcasecmp(check->bi->data, "drain")) {
+			if (disabled)
+				break;
 			desc = server_parse_weight_change_request(s, "0%");
 			if (!desc) {
 				desc = "drain";
@@ -1012,14 +1045,12 @@ static void event_srv_chk_r(struct connection *conn)
 			 */
 			if (end[0] == '\0' || end[0] == ' ' || end[0] == '\t') {
 				status = HCHK_STATUS_L7STS;
-				/* Skip over leading blanks */
-				while (end[0] != '\0' && (end[0] == ' ' || end[0] == '\t'))
-					end++;
-				desc = end;
+				desc = check->bi->data;
 			}
 		}
 
 		set_server_check_status(check, status, desc);
+		set_server_drain_state(check->server);
 		break;
 	}
 
@@ -1273,23 +1304,7 @@ static struct task *server_warmup(struct task *t)
 	if ((s->state & (SRV_RUNNING|SRV_WARMINGUP|SRV_MAINTAIN)) != (SRV_RUNNING|SRV_WARMINGUP))
 		return t;
 
-	if (now.tv_sec < s->last_change || now.tv_sec >= s->last_change + s->slowstart) {
-		/* go to full throttle if the slowstart interval is reached */
-		s->state &= ~SRV_WARMINGUP;
-		if (s->proxy->lbprm.algo & BE_LB_PROP_DYN)
-			s->eweight = s->uweight * BE_WEIGHT_SCALE;
-		if (s->proxy->lbprm.update_server_eweight)
-			s->proxy->lbprm.update_server_eweight(s);
-	}
-	else if (s->proxy->lbprm.algo & BE_LB_PROP_DYN) {
-		/* for dynamic algorithms, let's slowly update the weight */
-		s->eweight = (BE_WEIGHT_SCALE * (now.tv_sec - s->last_change) +
-			      s->slowstart - 1) / s->slowstart;
-		s->eweight *= s->uweight;
-		if (s->proxy->lbprm.update_server_eweight)
-			s->proxy->lbprm.update_server_eweight(s);
-	}
-	/* Note that static algorithms are already running at full throttle */
+	server_recalc_eweight(s);
 
 	/* probably that we can refill this server with a bit more connections */
 	check_for_pending(s);
@@ -1320,10 +1335,14 @@ static struct task *process_chk(struct task *t)
 		if (!expired) /* woke up too early */
 			return t;
 
-		/* we don't send any health-checks when the proxy is stopped or when
-		 * the server should not be checked.
+		/* we don't send any health-checks when the proxy is
+		 * stopped, the server should not be checked or the check
+		 * is disabled.
 		 */
-		if (!(s->state & SRV_CHECKED) || s->proxy->state == PR_STSTOPPED || (s->state & SRV_MAINTAIN))
+		if (!(s->state & SRV_CHECKED) ||
+		    s->proxy->state == PR_STSTOPPED ||
+		    (s->state & SRV_MAINTAIN) ||
+		    (check->state & CHK_STATE_DISABLED))
 			goto reschedule;
 
 		/* we'll initiate a new check */
@@ -1335,8 +1354,11 @@ static struct task *process_chk(struct task *t)
 		check->bo->p = check->bo->data;
 		check->bo->o = 0;
 
-		/* prepare the check buffer */
-		if (check->type) {
+	       /* prepare the check buffer
+	        * This should not be used if check is the secondary agent check
+	        * of a server as s->proxy->check_req will relate to the
+	        * configuration of the primary check */
+	       if (check->type && check != &s->agent) {
 			bo_putblk(check->bo, s->proxy->check_req, s->proxy->check_len);
 
 			/* we want to check if this host replies to HTTP or SSLv3 requests
@@ -1421,12 +1443,7 @@ static struct task *process_chk(struct task *t)
 		/* here, we have seen a synchronous error, no fd was allocated */
 
 		check->state &= ~CHK_STATE_RUNNING;
-		if (check->health > s->rise) {
-			check->health--; /* still good */
-			s->counters.failed_checks++;
-		}
-		else
-			set_server_down(check);
+		check_failed(check);
 
 		/* we allow up to min(inter, timeout.connect) for a connection
 		 * to establish but only when timeout.check is set
@@ -1494,14 +1511,8 @@ static struct task *process_chk(struct task *t)
 			conn_full_close(conn);
 		}
 
-		if (check->result & SRV_CHK_FAILED) {    /* a failure or timeout detected */
-			if (check->health > s->rise) {
-				check->health--; /* still good */
-				s->counters.failed_checks++;
-			}
-			else
-				set_server_down(check);
-		}
+		if (check->result & SRV_CHK_FAILED)  /* a failure or timeout detected */
+			check_failed(check);
 		else {  /* check was OK */
 			/* we may have to add/remove this server from the LB group */
 			if ((s->state & SRV_RUNNING) && (s->proxy->options & PR_O_DISABLE404)) {
@@ -1511,7 +1522,7 @@ static struct task *process_chk(struct task *t)
 					set_server_disabled(check);
 			}
 
-			if (check->health < s->rise + s->fall - 1) {
+			if (check->health < check->rise + check->fall - 1) {
 				check->health++; /* was bad, stays for a while */
 				set_server_up(check);
 			}
@@ -1531,6 +1542,32 @@ static struct task *process_chk(struct task *t)
 		t->expire = tick_add(t->expire, MS_TO_TICKS(check->inter));
  out_wait:
 	return t;
+}
+
+static int start_check_task(struct check *check, int mininter,
+			    int nbcheck, int srvpos)
+{
+	struct task *t;
+	/* task for the check */
+	if ((t = task_new()) == NULL) {
+		Alert("Starting [%s:%s] check: out of memory.\n",
+		      check->server->proxy->id, check->server->id);
+		return 0;
+	}
+
+	check->task = t;
+	t->process = process_chk;
+	t->context = check;
+
+	/* check this every ms */
+	t->expire = tick_add(now_ms,
+			     MS_TO_TICKS(((mininter &&
+					   mininter >= srv_getinter(check)) ?
+					  mininter : srv_getinter(check)) * srvpos / nbcheck));
+	check->start = now;
+	task_queue(t);
+
+	return 1;
 }
 
 /*
@@ -1553,6 +1590,20 @@ int start_checks() {
 	 */
 	for (px = proxy; px; px = px->next) {
 		for (s = px->srv; s; s = s->next) {
+			if (s->slowstart) {
+				if ((t = task_new()) == NULL) {
+					Alert("Starting [%s:%s] check: out of memory.\n", px->id, s->id);
+					return -1;
+				}
+				/* We need a warmup task that will be called when the server
+				 * state switches from down to up.
+				 */
+				s->warmup = t;
+				t->process = server_warmup;
+				t->context = s;
+				t->expire = TICK_ETERNITY;
+			}
+
 			if (!(s->state & SRV_CHECKED))
 				continue;
 
@@ -1576,42 +1627,20 @@ int start_checks() {
 	 */
 	for (px = proxy; px; px = px->next) {
 		for (s = px->srv; s; s = s->next) {
-			if (s->slowstart) {
-				if ((t = task_new()) == NULL) {
-					Alert("Starting [%s:%s] check: out of memory.\n", px->id, s->id);
+			/* A task for the main check */
+			if (s->state & SRV_CHECKED) {
+				if (!start_check_task(&s->check, mininter, nbcheck, srvpos))
+					return -1;
+				srvpos++;
+			}
+
+			/* A task for a auxiliary agent check */
+			if (s->state & SRV_AGENT_CHECKED) {
+				if (!start_check_task(&s->agent, mininter, nbcheck, srvpos)) {
 					return -1;
 				}
-				/* We need a warmup task that will be called when the server
-				 * state switches from down to up.
-				 */
-				s->warmup = t;
-				t->process = server_warmup;
-				t->context = s;
-				t->expire = TICK_ETERNITY;
+				srvpos++;
 			}
-
-			if (!(s->state & SRV_CHECKED))
-				continue;
-
-			/* one task for the checks */
-			if ((t = task_new()) == NULL) {
-				Alert("Starting [%s:%s] check: out of memory.\n", px->id, s->id);
-				return -1;
-			}
-
-			s->check.task = t;
-			t->process = process_chk;
-			t->context = &s->check;
-
-			/* check this every ms */
-			t->expire = tick_add(now_ms,
-					     MS_TO_TICKS(((mininter &&
-							   mininter >= srv_getinter(&s->check)) ?
-							  mininter : srv_getinter(&s->check)) * srvpos / nbcheck));
-			s->check.start = now;
-			task_queue(t);
-
-			srvpos++;
 		}
 	}
 	return 0;

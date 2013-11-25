@@ -58,6 +58,26 @@ struct srv_kw *srv_find_kw(const char *kw);
 /* Dumps all registered "server" keywords to the <out> string pointer. */
 void srv_dump_kws(char **out);
 
+/* Recomputes the server's eweight based on its state, uweight, the current time,
+ * and the proxy's algorihtm. To be used after updating sv->uweight. The warmup
+ * state is automatically disabled if the time is elapsed.
+ */
+void server_recalc_eweight(struct server *sv);
+
+/* returns the current server throttle rate between 0 and 100% */
+static inline unsigned int server_throttle_rate(struct server *sv)
+{
+	struct proxy *px = sv->proxy;
+
+	/* when uweight is 0, we're in soft-stop so that cannot be a slowstart,
+	 * thus the throttle is 100%.
+	 */
+	if (!sv->uweight)
+		return 100;
+
+	return 100U * (px->lbprm.wmult * sv->eweight + px->lbprm.wdiv - 1) / (px->lbprm.wdiv * sv->uweight);
+}
+
 /*
  * Parses weight_str and configures sv accordingly.
  * Returns NULL on success, error message string otherwise.
@@ -65,6 +85,18 @@ void srv_dump_kws(char **out);
 const char *server_parse_weight_change_request(struct server *sv,
 					       const char *weight_str);
 
+/*
+ * Update the server's drain state to reflect its user-weight.  This is not
+ * done immediately to allow a discrepancy between the server's user-weight
+ * and drains state to control logging of changes in the drain state.
+ */
+static inline void set_server_drain_state(struct server *s)
+{
+	if (!s->uweight)
+		s->state |= SRV_DRAIN;
+	else
+		s->state &= ~SRV_DRAIN;
+}
 /*
  * Local variables:
  *  c-indent-level: 8

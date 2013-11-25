@@ -777,11 +777,12 @@ nosplice
   "option splice-response".
 
 spread-checks <0..50, in percent>
-  Sometimes it is desirable to avoid sending health checks to servers at exact
-  intervals, for instance when many logical servers are located on the same
-  physical server. With the help of this parameter, it becomes possible to add
-  some randomness in the check interval between 0 and +/- 50%. A value between
-  2 and 5 seems to show good results. The default value remains at 0.
+  Sometimes it is desirable to avoid sending agent and health checks to
+  servers at exact intervals, for instance when many logical servers are
+  located on the same physical server. With the help of this parameter, it
+  becomes possible to add some randomness in the check interval between 0
+  and +/- 50%. A value between 2 and 5 seems to show good results. The
+  default value remains at 0.
 
 tune.bufsize <number>
   Sets the buffer size to this size (in bytes). Lower values allow more
@@ -1173,7 +1174,6 @@ option httpclose                     (*)  X          X         X         X
 option httplog                            X          X         X         X
 option http_proxy                    (*)  X          X         X         X
 option independent-streams           (*)  X          X         X         X
-option lb-agent-chk                       X          -         X         X
 option ldap-check                         X          -         X         X
 option log-health-checks             (*)  X          -         X         X
 option log-separate-errors           (*)  X          X         X         -
@@ -3823,9 +3823,9 @@ option httpchk <method> <uri> <version>
           option httpchk OPTIONS * HTTP/1.1\r\nHost:\ www
           server apache1 192.168.1.1:443 check port 80
 
-  See also : "option lb-agent-chk", "option ssl-hello-chk", "option smtpchk",
-             "option mysql-check", "option pgsql-check", "http-check" and
-             the "check", "port" and "inter" server options.
+  See also : "option ssl-hello-chk", "option smtpchk", "option mysql-check",
+             "option pgsql-check", "http-check" and the "check", "port" and
+             "inter" server options.
 
 
 option httpclose
@@ -3960,45 +3960,6 @@ no option independent-streams
         deprecated.
 
   See also : "timeout client", "timeout server" and "timeout tunnel"
-
-
-option lb-agent-chk
-  Use a TCP connection to obtain a metric of server health
-  May be used in sections :   defaults | frontend | listen | backend
-                                 yes   |     no   |   yes  |   yes
-  Arguments : none
-
-  This alters health checking behaviour by connecting making a TCP
-  connection and reading an ASCII string. The string should have one of
-  the following forms:
-
-  * An ASCII representation of an positive integer percentage.
-     e.g. "75%"
-
-     Values in this format will set the weight proportional to the initial
-     weight of a server as configured when haproxy starts.
-
-  * The string "drain".
-
-    This will cause the weight of a server to be set to 0, and thus it will
-    not accept any new connections other than those that are accepted via
-    persistence.
-
-  * The string "down", optionally followed by a description string.
-
-    Mark the server as down and log the description string as the reason.
-
-  * The string "stopped", optionally followed by a description string.
-
-    This currently has the same behaviour as down (iii).
-
-  * The string "fail", optionally followed by a description string.
-
-    This currently has the same behaviour as down (iii).
-
-  The use of an alternate check-port, used to obtain agent heath check
-  information described above as opposed to the port of the service, may be
-  useful in conjunction with this option.
 
 
 option ldap-check
@@ -7709,6 +7670,70 @@ addr <ipv4|ipv6>
 
   Supported in default-server: No
 
+agent-check
+  Enable an auxiliary agent check which is run independently of a regular
+  health check. An agent health check is performed by making a TCP
+  connection to the port set by the "agent-port" parameter" and reading
+  an ASCII string. The string should have one of the following forms:
+
+  * An ASCII representation of an positive integer percentage.
+    e.g. "75%"
+
+    Values in this format will set the weight proportional to the initial
+    weight of a server as configured when haproxy starts.
+
+  * The string "drain".
+
+    This will cause the weight of a server to be set to 0, and thus it will
+    not accept any new connections other than those that are accepted via
+    persistence.
+
+  * The string "down", optionally followed by a description string.
+
+    Mark the server as down and log the description string as the reason.
+
+  * The string "stopped", optionally followed by a description string.
+
+    This currently has the same behaviour as "down".
+
+  * The string "fail", optionally followed by a description string.
+
+    This currently has the same behaviour as "down".
+
+  Failure to connect to the agent is not considered an error as connectivity
+  is tested by the regular health check which is enabled by the "check"
+  parameter.
+
+  Requires the ""agent-port" parameter to be set.
+  See also the "agent-check" parameter.
+
+  Supported in default-server: No
+
+agent-inter <delay>
+  The "agent-inter" parameter sets the interval between two agent checks
+  to <delay> milliseconds. If left unspecified, the delay defaults to 2000 ms.
+
+  Just as with every other time-based parameter, it may be entered in any
+  other explicit unit among { us, ms, s, m, h, d }. The "agent-inter"
+  parameter also serves as a timeout for agent checks "timeout check" is
+  not set. In order to reduce "resonance" effects when multiple servers are
+  hosted on the same hardware, the agent and health checks of all servers
+  are started with a small time offset between them. It is also possible to
+  add some random noise in the agent and health checks interval using the
+  global "spread-checks" keyword. This makes sense for instance when a lot
+  of backends use the same servers.
+
+  See also the "agent-check" and "agent-port" parameters.
+
+  Supported in default-server: Yes
+
+agent-port <port>
+  The "agent-port" parameter sets the TCP port used for agent checks.
+
+  See also the "agent-check" and "agent-inter" parameters.
+
+  Supported in default-server: Yes
+
 backup
   When "backup" is present on a server line, the server is only used in load
   balancing when all other non-backup servers are unavailable. Requests coming
@@ -7735,10 +7760,9 @@ check
   backend. It is possible to change the address using the "addr" parameter, the
   port using the "port" parameter, the source address using the "source"
   address, and the interval and timers using the "inter", "rise" and "fall"
-  parameters. The request method is define in the backend using the
-  "httpchk", "lb-agent-chk", "smtpchk", "mysql-check", "pgsql-check" and
-  "ssl-hello-chk" options. Please refer to those options and parameters for
-  more information.
+  parameters. The request method is define in the backend using the "httpchk",
+  "smtpchk", "mysql-check", "pgsql-check" and "ssl-hello-chk" options. Please
+  refer to those options and parameters for more information.
 
   Supported in default-server: No
 
@@ -7885,11 +7909,11 @@ downinter <delay>
   other explicit unit among { us, ms, s, m, h, d }. The "inter" parameter also
   serves as a timeout for health checks sent to servers if "timeout check" is
   not set. In order to reduce "resonance" effects when multiple servers are
-  hosted on the same hardware, the health-checks of all servers are started
-  with a small time offset between them. It is also possible to add some random
-  noise in the health checks interval using the global "spread-checks"
-  keyword. This makes sense for instance when a lot of backends use the same
-  servers.
+  hosted on the same hardware, the agent and health checks of all servers
+  are started with a small time offset between them. It is also possible to
+  add some random noise in the agent and health checks interval using the
+  global "spread-checks" keyword. This makes sense for instance when a lot
+  of backends use the same servers.
 
   Supported in default-server: Yes
 
@@ -12027,6 +12051,28 @@ clear table <table> [ data.<type> <operator> <value> ] | [ key <key> ]
         $ echo "show table http_proxy" | socat stdio /tmp/sock1
     >>> # table: http_proxy, type: ip, size:204800, used:1
 
+enable agent <backend>/<server>
+  Mark the auxiliary agent check as temporarily stopped.
+
+  In the case where an agent check is being run as a auxiliary check, due
+  to the agent-check parameter of a server directive, new checks are only
+  initialised when the agent is in the enabled. Thus, disable agent will
+  prevent any new agent checks from begin initiated until the agent
+  re-enabled using enable agent.
+
+  When an agent is disabled the processing of an auxiliary agent check that
+  was initiated while the agent was set as enabled is as follows: All
+  results that would alter the weight, specifically "drain" or a weight
+  returned by the agent, are ignored. The processing of agent check is
+  otherwise unchanged.
+
+  The motivation for this feature is to allow the weight changing effects
+  of the agent checks to be paused to allow the weight of a server to be
+  configured using set weight without being overridden by the agent.
+
+  This command is restricted and can only be issued on sockets configured for
+  level "admin".
+
 disable frontend <frontend>
   Mark the frontend as temporarily stopped. This corresponds to the mode which
   is used during a soft restart : the frontend releases the port but can be
@@ -12054,6 +12100,15 @@ disable server <backend>/<server>
 
   Both the backend and the server may be specified either by their name or by
   their numeric ID, prefixed with a sharp ('#').
+
+  This command is restricted and can only be issued on sockets configured for
+  level "admin".
+
+enable agent <backend>/<server>
+  Resume auxiliary agent check that was temporarily stopped.
+
+  See "disable agent" for details of the effect of temporarily starting
+  and stopping an auxiliary agent.
 
   This command is restricted and can only be issued on sockets configured for
   level "admin".
