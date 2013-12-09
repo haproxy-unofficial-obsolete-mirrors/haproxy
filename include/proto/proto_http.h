@@ -104,7 +104,7 @@ void http_perform_server_redirect(struct session *s, struct stream_interface *si
 void http_return_srv_error(struct session *s, struct stream_interface *si);
 void http_capture_bad_message(struct error_snapshot *es, struct session *s,
                               struct http_msg *msg,
-			      int state, struct proxy *other_end);
+			      enum ht_state state, struct proxy *other_end);
 unsigned int http_get_hdr(const struct http_msg *msg, const char *hname, int hlen,
 			  struct hdr_idx *idx, int occ,
 			  struct hdr_ctx *ctx, char **vptr, int *vlen);
@@ -117,8 +117,8 @@ struct http_req_rule *parse_http_req_cond(const char **args, const char *file, i
 struct http_res_rule *parse_http_res_cond(const char **args, const char *file, int linenum, struct proxy *proxy);
 void free_http_req_rules(struct list *r);
 struct chunk *http_error_message(struct session *s, int msgnum);
-struct redirect_rule *http_parse_redirect_rule(const char *file, int line, struct proxy *curproxy,
-                                               const char **args, char **errmsg);
+struct redirect_rule *http_parse_redirect_rule(const char *file, int linenum, struct proxy *curproxy,
+                                               const char **args, char **errmsg, int use_fmt);
 
 /* to be used when contents change in an HTTP message */
 #define http_msg_move_end(msg, bytes) do { \

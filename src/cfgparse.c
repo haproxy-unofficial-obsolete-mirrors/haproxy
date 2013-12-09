@@ -2770,7 +2770,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
-		if ((rule = http_parse_redirect_rule(file, linenum, curproxy, (const char **)args + 1, &errmsg)) == NULL) {
+		if ((rule = http_parse_redirect_rule(file, linenum, curproxy, (const char **)args + 1, &errmsg, 0)) == NULL) {
 			Alert("parsing [%s:%d] : error detected in %s '%s' while parsing redirect rule : %s.\n",
 			      file, linenum, proxy_type_str(curproxy), curproxy->id, errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -3732,6 +3732,16 @@ stats_error_parsing:
 			memcpy(curproxy->check_req, DEF_LDAP_CHECK_REQ, sizeof(DEF_LDAP_CHECK_REQ) - 1);
 			curproxy->check_len = sizeof(DEF_LDAP_CHECK_REQ) - 1;
 		}
+		else if (!strcmp(args[1], "tcp-check")) {
+			/* use raw TCPCHK send/expect to check servers' health */
+			if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[1], NULL))
+				err_code |= ERR_WARN;
+
+			free(curproxy->check_req);
+			curproxy->check_req = NULL;
+			curproxy->options2 &= ~PR_O2_CHK_ANY;
+			curproxy->options2 |= PR_O2_TCPCHK_CHK;
+		}
 		else if (!strcmp(args[1], "forwardfor")) {
 			int cur_arg;
 
@@ -3965,6 +3975,161 @@ stats_error_parsing:
 		}
 		else {
 			Alert("parsing [%s:%d] : '%s' only supports 'disable-on-404', 'send-state', 'expect'.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+	}
+	else if (!strcmp(args[0], "tcp-check")) {
+		if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], NULL))
+			err_code |= ERR_WARN;
+
+		if (strcmp(args[1], "send") == 0) {
+			if (! *(args[2]) ) {
+				/* SEND string expected */
+				Alert("parsing [%s:%d] : '%s %s %s' expects <STRING> as argument.\n",
+				      file, linenum, args[0], args[1], args[2]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			} else {
+				struct tcpcheck_rule *tcpcheck;
+
+				tcpcheck = (struct tcpcheck_rule *)calloc(1, sizeof(*tcpcheck));
+
+				tcpcheck->action = TCPCHK_ACT_SEND;
+				tcpcheck->string_len = strlen(args[2]);
+				tcpcheck->string = strdup(args[2]);
+				tcpcheck->expect_regex = NULL;
+
+				LIST_ADDQ(&curproxy->tcpcheck_rules, &tcpcheck->list);
+			}
+		}
+		else if (strcmp(args[1], "send-binary") == 0) {
+			if (! *(args[2]) ) {
+				/* SEND binary string expected */
+				Alert("parsing [%s:%d] : '%s %s %s' expects <BINARY STRING> as argument.\n",
+				      file, linenum, args[0], args[1], args[2]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			} else {
+				struct tcpcheck_rule *tcpcheck;
+				char *err = NULL;
+
+				tcpcheck = (struct tcpcheck_rule *)calloc(1, sizeof(*tcpcheck));
+
+				tcpcheck->action = TCPCHK_ACT_SEND;
+				if (parse_binary(args[2], &tcpcheck->string, &tcpcheck->string_len, &err) == 0) {
+					Alert("parsing [%s:%d] : '%s %s %s' expects <BINARY STRING> as argument, but %s\n",
+					      file, linenum, args[0], args[1], args[2], err);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				tcpcheck->expect_regex = NULL;
+
+				LIST_ADDQ(&curproxy->tcpcheck_rules, &tcpcheck->list);
+			}
+		}
+		else if (strcmp(args[1], "expect") == 0) {
+			const char *ptr_arg;
+			int cur_arg;
+			int inverse = 0;
+
+			if (curproxy->options2 & PR_O2_EXP_TYPE) {
+				Alert("parsing [%s:%d] : '%s %s' already specified.\n", file, linenum, args[0], args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+
+			cur_arg = 2;
+			/* consider exclamation marks, sole or at the beginning of a word */
+			while (*(ptr_arg = args[cur_arg])) {
+				while (*ptr_arg == '!') {
+					inverse = !inverse;
+					ptr_arg++;
+				}
+				if (*ptr_arg)
+					break;
+				cur_arg++;
+			}
+			/* now ptr_arg points to the beginning of a word past any possible
+			 * exclamation mark, and cur_arg is the argument which holds this word.
+			 */
+			if (strcmp(ptr_arg, "binary") == 0) {
+				if (!*(args[cur_arg + 1])) {
+					Alert("parsing [%s:%d] : '%s %s %s' expects <binary string> as an argument.\n",
+					      file, linenum, args[0], args[1], ptr_arg);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				struct tcpcheck_rule *tcpcheck;
+				char *err = NULL;
+
+				tcpcheck = (struct tcpcheck_rule *)calloc(1, sizeof(*tcpcheck));
+
+				tcpcheck->action = TCPCHK_ACT_EXPECT;
+				if (parse_binary(args[cur_arg + 1], &tcpcheck->string, &tcpcheck->string_len, &err) == 0) {
+					Alert("parsing [%s:%d] : '%s %s %s' expects <BINARY STRING> as argument, but %s\n",
+					      file, linenum, args[0], args[1], args[2], err);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				tcpcheck->expect_regex = NULL;
+				tcpcheck->inverse = inverse;
+
+				LIST_ADDQ(&curproxy->tcpcheck_rules, &tcpcheck->list);
+			}
+			else if (strcmp(ptr_arg, "string") == 0) {
+				if (!*(args[cur_arg + 1])) {
+					Alert("parsing [%s:%d] : '%s %s %s' expects <string> as an argument.\n",
+					      file, linenum, args[0], args[1], ptr_arg);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				struct tcpcheck_rule *tcpcheck;
+
+				tcpcheck = (struct tcpcheck_rule *)calloc(1, sizeof(*tcpcheck));
+
+				tcpcheck->action = TCPCHK_ACT_EXPECT;
+				tcpcheck->string_len = strlen(args[cur_arg + 1]);
+				tcpcheck->string = strdup(args[cur_arg + 1]);
+				tcpcheck->expect_regex = NULL;
+				tcpcheck->inverse = inverse;
+
+				LIST_ADDQ(&curproxy->tcpcheck_rules, &tcpcheck->list);
+			}
+			else if (strcmp(ptr_arg, "rstring") == 0) {
+				if (!*(args[cur_arg + 1])) {
+					Alert("parsing [%s:%d] : '%s %s %s' expects <regex> as an argument.\n",
+					      file, linenum, args[0], args[1], ptr_arg);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				struct tcpcheck_rule *tcpcheck;
+
+				tcpcheck = (struct tcpcheck_rule *)calloc(1, sizeof(*tcpcheck));
+
+				tcpcheck->action = TCPCHK_ACT_EXPECT;
+				tcpcheck->string_len = 0;
+				tcpcheck->string = NULL;
+				tcpcheck->expect_regex = calloc(1, sizeof(regex_t));
+				if (regcomp(tcpcheck->expect_regex, args[cur_arg + 1], REG_EXTENDED) != 0) {
+					Alert("parsing [%s:%d] : '%s %s %s' : bad regular expression '%s'.\n",
+					      file, linenum, args[0], args[1], ptr_arg, args[cur_arg + 1]);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				tcpcheck->inverse = inverse;
+
+				LIST_ADDQ(&curproxy->tcpcheck_rules, &tcpcheck->list);
+			}
+			else {
+				Alert("parsing [%s:%d] : '%s %s' only supports [!] 'binary', 'string', 'rstring', found '%s'.\n",
+				      file, linenum, args[0], args[1], ptr_arg);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+		}
+		else {
+			Alert("parsing [%s:%d] : '%s' only supports 'send' or 'expect'.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
@@ -4950,9 +5115,8 @@ stats_error_parsing:
 				goto out;
 			}
 
-			ret = init_check(&newsrv->check,
-					 curproxy->options2 & PR_O2_CHK_ANY,
-					 file, linenum);
+			/* note: check type will be set during the config review phase */
+			ret = init_check(&newsrv->check, 0, file, linenum);
 			if (ret) {
 				err_code |= ret;
 				goto out;
@@ -6498,7 +6662,7 @@ int check_config_validity()
 			if (!target) {
 				Alert("Proxy '%s': unable to find table '%s' referenced by track-sc%d.\n",
 				      curproxy->id, trule->act_prm.trk_ctr.table.n,
-				      1 + tcp_trk_idx(trule->action));
+				      tcp_trk_idx(trule->action));
 				cfgerr++;
 			}
 			else if (target->table.size == 0) {
@@ -6509,7 +6673,7 @@ int check_config_validity()
 			else if (!stktable_compatible_sample(trule->act_prm.trk_ctr.expr,  target->table.type)) {
 				Alert("Proxy '%s': stick-table '%s' uses a type incompatible with the 'track-sc%d' rule.\n",
 				      curproxy->id, trule->act_prm.trk_ctr.table.n ? trule->act_prm.trk_ctr.table.n : curproxy->id,
-				      1 + tcp_trk_idx(trule->action));
+				      tcp_trk_idx(trule->action));
 				cfgerr++;
 			}
 			else {
@@ -6537,7 +6701,7 @@ int check_config_validity()
 			if (!target) {
 				Alert("Proxy '%s': unable to find table '%s' referenced by track-sc%d.\n",
 				      curproxy->id, trule->act_prm.trk_ctr.table.n,
-				      1 + tcp_trk_idx(trule->action));
+				      tcp_trk_idx(trule->action));
 				cfgerr++;
 			}
 			else if (target->table.size == 0) {
@@ -6548,7 +6712,7 @@ int check_config_validity()
 			else if (!stktable_compatible_sample(trule->act_prm.trk_ctr.expr,  target->table.type)) {
 				Alert("Proxy '%s': stick-table '%s' uses a type incompatible with the 'track-sc%d' rule.\n",
 				      curproxy->id, trule->act_prm.trk_ctr.table.n ? trule->act_prm.trk_ctr.table.n : curproxy->id,
-				      1 + tcp_trk_idx(trule->action));
+				      tcp_trk_idx(trule->action));
 				cfgerr++;
 			}
 			else {
@@ -6811,6 +6975,9 @@ out_uri_auth_compat:
 			if (newsrv->use_ssl || newsrv->check.use_ssl)
 				cfgerr += ssl_sock_prepare_srv_ctx(newsrv, curproxy);
 #endif /* USE_OPENSSL */
+
+			/* set the check type on the server */
+			newsrv->check.type = curproxy->options2 & PR_O2_CHK_ANY;
 
 			if (newsrv->trackit) {
 				struct proxy *px;

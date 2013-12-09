@@ -50,19 +50,21 @@
 #include <types/stick_table.h>
 
 /* values for proxy->state */
-enum {
+enum pr_state {
 	PR_STNEW = 0,           /* proxy has not been initialized yet */
 	PR_STREADY,             /* proxy has been initialized and is ready */
 	PR_STFULL,              /* frontend is full (maxconn reached) */
 	PR_STPAUSED,            /* frontend is paused (during hot restart) */
 	PR_STSTOPPED,           /* proxy is stopped (end of a restart) */
 	PR_STERROR,             /* proxy experienced an unrecoverable error */
-};
+} __attribute__((packed));
 
 /* values for proxy->mode */
-#define PR_MODE_TCP     0
-#define PR_MODE_HTTP    1
-#define PR_MODE_HEALTH  2
+enum pr_mode {
+	PR_MODE_TCP = 0,
+	PR_MODE_HTTP,
+	PR_MODE_HEALTH,
+} __attribute__((packed));
 
 /* flag values for proxy->cap. This is a bitmask of capabilities supported by the proxy */
 #define PR_CAP_NONE    0x0000
@@ -152,7 +154,8 @@ enum {
 #define PR_O2_LDAP_CHK  0x60000000      /* use LDAP check for server health */
 #define PR_O2_SSL3_CHK  0x70000000      /* use SSLv3 CLIENT_HELLO packets for server health */
 #define PR_O2_LB_AGENT_CHK 0x80000000   /* use a TCP connection to obtain a metric of server health */
-/* unused: 0x90000000 to 0xF000000, reserved for health checks */
+#define PR_O2_TCPCHK_CHK 0x90000000     /* use TCPCHK check for server health */
+/* unused: 0xA0000000 to 0xF000000, reserved for health checks */
 #define PR_O2_CHK_ANY   0xF0000000      /* Mask to cover any check */
 /* end of proxy->options2 */
 
@@ -197,14 +200,17 @@ struct error_snapshot {
 
 struct proxy {
 	enum obj_type obj_type;                 /* object type == OBJ_TYPE_PROXY */
-	int state;				/* proxy state */
+	enum pr_state state;                    /* proxy state, one of PR_* */
+	enum pr_mode mode;                      /* mode = PR_MODE_TCP, PR_MODE_HTTP or PR_MODE_HEALTH */
+	char cap;                               /* supported capabilities (PR_CAP_*) */
+	unsigned int maxconn;                   /* max # of active sessions on the frontend */
+
 	int options;				/* PR_O_REDISP, PR_O_TRANSP, ... */
 	int options2;				/* PR_O2_* */
 	struct in_addr mon_net, mon_mask;	/* don't forward connections from this net (network order) FIXME: should support IPv6 */
 	unsigned int ck_opts;			/* PR_CK_* (cookie options) */
 	unsigned int fe_req_ana, be_req_ana;	/* bitmap of common request protocol analysers for the frontend and backend */
 	unsigned int fe_rsp_ana, be_rsp_ana;	/* bitmap of common response protocol analysers for the frontend and backend */
-	int mode;				/* mode = PR_MODE_TCP, PR_MODE_HTTP or PR_MODE_HEALTH */
 	unsigned int http_needed;               /* non-null if HTTP analyser may be used */
 	union {
 		struct proxy *be;		/* default backend, or NULL if none set */
@@ -280,7 +286,6 @@ struct proxy {
 	struct freq_ctr fe_conn_per_sec;	/* received connections per second on the frontend */
 	struct freq_ctr fe_sess_per_sec;	/* accepted sessions per second on the frontend (after tcp rules) */
 	struct freq_ctr be_sess_per_sec;	/* sessions per second on the backend */
-	unsigned int maxconn;			/* max # of active sessions on the frontend */
 	unsigned int fe_sps_lim;		/* limit on new sessions per second on the frontend */
 	unsigned int fullconn;			/* #conns on backend above which servers are used at full load */
 	struct in_addr except_net, except_mask; /* don't x-forward-for for this address. FIXME: should support IPv6 */
@@ -298,7 +303,6 @@ struct proxy {
 	time_t last_change;			/* last time, when the state was changed */
 
 	int conn_retries;			/* maximum number of connect retries */
-	int cap;				/* supported capabilities (PR_CAP_*) */
 	int (*accept)(struct session *s);       /* application layer's accept() */
 	struct conn_src conn_src;               /* connection source settings */
 	struct proxy *next;
@@ -324,6 +328,7 @@ struct proxy {
 
 	struct task *task;			/* the associated task, mandatory to manage rate limiting, stopping and resource shortage, NULL if disabled */
 	int grace;				/* grace time after stop request */
+	struct list tcpcheck_rules;		/* tcp-check send / expect rules */
 	char *check_req;			/* HTTP or SSL request to use for PR_O_HTTP_CHK|PR_O_SSL3_CHK */
 	int check_len;				/* Length of the HTTP or SSL3 request */
 	char *expect_str;			/* http-check expected content : string or text version of the regex */
@@ -403,6 +408,7 @@ struct redirect_rule {
 	int type;
 	int rdr_len;
 	char *rdr_str;
+	struct list rdr_fmt;
 	int code;
 	unsigned int flags;
 	int cookie_len;

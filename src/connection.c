@@ -66,12 +66,8 @@ int conn_fd_handler(int fd)
 			if (!conn_recv_proxy(conn, CO_FL_ACCEPT_PROXY))
 				goto leave;
 
-		if (conn->flags & CO_FL_SI_SEND_PROXY)
-			if (!conn_si_send_proxy(conn, CO_FL_SI_SEND_PROXY))
-				goto leave;
-
-		if (conn->flags & CO_FL_LOCAL_SPROXY)
-			if (!conn_local_send_proxy(conn, CO_FL_LOCAL_SPROXY))
+		if (conn->flags & CO_FL_SEND_PROXY)
+			if (!conn_si_send_proxy(conn, CO_FL_SEND_PROXY))
 				goto leave;
 #ifdef USE_OPENSSL
 		if (conn->flags & CO_FL_SSL_WAIT_HS)
@@ -163,6 +159,9 @@ void conn_update_data_polling(struct connection *c)
 {
 	unsigned int f = c->flags;
 
+	if (!(c->flags & CO_FL_CTRL_READY))
+		return;
+
 	/* update read status if needed */
 	if (unlikely((f & (CO_FL_DATA_RD_ENA|CO_FL_WAIT_RD)) == (CO_FL_DATA_RD_ENA|CO_FL_WAIT_RD))) {
 		fd_poll_recv(c->t.sock.fd);
@@ -202,6 +201,9 @@ void conn_update_data_polling(struct connection *c)
 void conn_update_sock_polling(struct connection *c)
 {
 	unsigned int f = c->flags;
+
+	if (!(c->flags & CO_FL_CTRL_READY))
+		return;
 
 	/* update read status if needed */
 	if (unlikely((f & (CO_FL_SOCK_RD_ENA|CO_FL_WAIT_RD)) == (CO_FL_SOCK_RD_ENA|CO_FL_WAIT_RD))) {
@@ -262,6 +264,9 @@ int conn_recv_proxy(struct connection *conn, int flag)
 
 	/* we might have been called just after an asynchronous shutr */
 	if (conn->flags & CO_FL_SOCK_RD_SH)
+		goto fail;
+
+	if (!(conn->flags & CO_FL_CTRL_READY))
 		goto fail;
 
 	do {
@@ -438,6 +443,7 @@ int conn_recv_proxy(struct connection *conn, int flag)
 
  recv_abort:
 	conn->err_code = CO_ER_PRX_ABORT;
+	conn->flags |= CO_FL_SOCK_RD_SH | CO_FL_SOCK_WR_SH;
 	goto fail;
 
  fail:
@@ -450,13 +456,14 @@ int conn_recv_proxy(struct connection *conn, int flag)
  * buffer <buf> for a maximum size of <buf_len> (including the trailing zero).
  * It returns the number of bytes composing this line (including the trailing
  * LF), or zero in case of failure (eg: not enough space). It supports TCP4,
- * TCP6 and "UNKNOWN" formats.
+ * TCP6 and "UNKNOWN" formats. If any of <src> or <dst> is null, UNKNOWN is
+ * emitted as well.
  */
 int make_proxy_line(char *buf, int buf_len, struct sockaddr_storage *src, struct sockaddr_storage *dst)
 {
 	int ret = 0;
 
-	if (src->ss_family == dst->ss_family && src->ss_family == AF_INET) {
+	if (src && dst && src->ss_family == dst->ss_family && src->ss_family == AF_INET) {
 		ret = snprintf(buf + ret, buf_len - ret, "PROXY TCP4 ");
 		if (ret >= buf_len)
 			return 0;
@@ -486,7 +493,7 @@ int make_proxy_line(char *buf, int buf_len, struct sockaddr_storage *src, struct
 		if (ret >= buf_len)
 			return 0;
 	}
-	else if (src->ss_family == dst->ss_family && src->ss_family == AF_INET6) {
+	else if (src && dst && src->ss_family == dst->ss_family && src->ss_family == AF_INET6) {
 		ret = snprintf(buf + ret, buf_len - ret, "PROXY TCP6 ");
 		if (ret >= buf_len)
 			return 0;
@@ -523,75 +530,4 @@ int make_proxy_line(char *buf, int buf_len, struct sockaddr_storage *src, struct
 			return 0;
 	}
 	return ret;
-}
-
-/* This callback is used to send a valid PROXY protocol line to a socket being
- * established from the local machine. It sets the protocol addresses to the
- * local and remote address. This is typically used with health checks or when
- * it is not possible to determine the other end's address. It returns 0 if it
- * fails in a fatal way or needs to poll to go further, otherwise it returns
- * non-zero and removes itself from the connection's flags (the bit is provided
- * in <flag> by the caller). It is designed to be called by the connection
- * handler and relies on it to commit polling changes. Note that this function
- * expects to be able to send the whole line at once, which should always be
- * possible since it is supposed to start at the first byte of the outgoing
- * data segment.
- */
-int conn_local_send_proxy(struct connection *conn, unsigned int flag)
-{
-	int ret;
-
-	/* we might have been called just after an asynchronous shutw */
-	if (conn->flags & CO_FL_SOCK_WR_SH)
-		goto out_error;
-
-	/* The target server expects a PROXY line to be sent first. Retrieving
-	 * local or remote addresses may fail until the connection is established.
-	 */
-	conn_get_from_addr(conn);
-	if (!(conn->flags & CO_FL_ADDR_FROM_SET))
-		goto out_wait;
-
-	conn_get_to_addr(conn);
-	if (!(conn->flags & CO_FL_ADDR_TO_SET))
-		goto out_wait;
-
-	trash.len = make_proxy_line(trash.str, trash.size, &conn->addr.from, &conn->addr.to);
-	if (!trash.len)
-		goto out_error;
-
-	/* we have to send the whole trash. If the data layer has a
-	 * pending write, we'll also set MSG_MORE.
-	 */
-	ret = send(conn->t.sock.fd, trash.str, trash.len, (conn->flags & CO_FL_DATA_WR_ENA) ? MSG_MORE : 0);
-
-	if (ret == 0)
-		goto out_wait;
-
-	if (ret < 0) {
-		if (errno == EAGAIN || errno == ENOTCONN)
-			goto out_wait;
-		goto out_error;
-	}
-
-	if (ret != trash.len)
-		goto out_error;
-
-	/* The connection is ready now, simply return and let the connection
-	 * handler notify upper layers if needed.
-	 */
-	if (conn->flags & CO_FL_WAIT_L4_CONN)
-		conn->flags &= ~CO_FL_WAIT_L4_CONN;
-	conn->flags &= ~flag;
-	return 1;
-
- out_error:
-	/* Write error on the file descriptor */
-	conn->flags |= CO_FL_ERROR;
-	return 0;
-
- out_wait:
-	__conn_sock_stop_recv(conn);
-	__conn_sock_poll_send(conn);
-	return 0;
 }

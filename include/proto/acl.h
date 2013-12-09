@@ -30,16 +30,16 @@
  * FIXME: we need destructor functions too !
  */
 
-/* Negate an acl result. This turns (ACL_PAT_FAIL, ACL_PAT_MISS, ACL_PAT_PASS)
- * into (ACL_PAT_PASS, ACL_PAT_MISS, ACL_PAT_FAIL).
+/* Negate an acl result. This turns (ACL_MATCH_FAIL, ACL_MATCH_MISS,
+ * ACL_MATCH_PASS) into (ACL_MATCH_PASS, ACL_MATCH_MISS, ACL_MATCH_FAIL).
  */
-static inline int acl_neg(int res)
+static inline enum acl_test_res acl_neg(enum acl_test_res res)
 {
 	return (3 >> res);
 }
 
-/* Convert an acl result to a boolean. Only ACL_PAT_PASS returns 1. */
-static inline int acl_pass(int res)
+/* Convert an acl result to a boolean. Only ACL_MATCH_PASS returns 1. */
+static inline int acl_pass(enum acl_test_res res)
 {
 	return (res >> 1);
 }
@@ -79,7 +79,8 @@ struct acl_cond *prune_acl_cond(struct acl_cond *cond);
  * known ACLs passed in <known_acl>. The new condition is returned (or NULL in
  * case of low memory). Supports multiple conditions separated by "or".
  */
-struct acl_cond *parse_acl_cond(const char **args, struct list *known_acl, int pol, char **err, struct arg_list *al);
+struct acl_cond *parse_acl_cond(const char **args, struct list *known_acl,
+                                enum acl_cond_pol pol, char **err, struct arg_list *al);
 
 /* Builds an ACL condition starting at the if/unless keyword. The complete
  * condition is returned. NULL is returned in case of error or if the first
@@ -90,12 +91,14 @@ struct acl_cond *parse_acl_cond(const char **args, struct list *known_acl, int p
  */
 struct acl_cond *build_acl_cond(const char *file, int line, struct proxy *px, const char **args, char **err);
 
-/* Execute condition <cond> and return either ACL_PAT_FAIL, ACL_PAT_MISS or
- * ACL_PAT_PASS depending on the test results. This function only computes the
- * condition, it does not apply the polarity required by IF/UNLESS, it's up to
- * the caller to do this.
+/* Execute condition <cond> and return either ACL_TEST_FAIL, ACL_TEST_MISS or
+ * ACL_TEST_PASS depending on the test results. ACL_TEST_MISS may only be
+ * returned if <opt> does not contain SMP_OPT_FINAL, indicating that incomplete
+ * data is being examined. The function automatically sets SMP_OPT_ITERATE. This
+ * function only computes the condition, it does not apply the polarity required
+ * by IF/UNLESS, it's up to the caller to do this.
  */
-int acl_exec_cond(struct acl_cond *cond, struct proxy *px, struct session *l4, void *l7, unsigned int opt);
+enum acl_test_res acl_exec_cond(struct acl_cond *cond, struct proxy *px, struct session *l4, void *l7, unsigned int opt);
 
 /* Returns a pointer to the first ACL conflicting with usage at place <where>
  * which is one of the SMP_VAL_* bits indicating a check place, or NULL if
@@ -139,90 +142,6 @@ void acl_unregister_keywords(struct acl_kw_list *kwl);
  */
 int init_acl();
 
-
-/*
- *
- * The following functions are general purpose ACL matching functions.
- *
- */
-
-
-/* ignore the current line */
-int acl_parse_nothing(const char **text, struct acl_pattern *pattern, int *opaque, char **err);
-
-/* NB: For two strings to be identical, it is required that their lengths match */
-int acl_match_str(struct sample *smp, struct acl_pattern *pattern);
-
-/* NB: For two binary buffers to be identical, it is required that their lengths match */
-int acl_match_bin(struct sample *smp, struct acl_pattern *pattern);
-
-/* Checks that the length of the pattern in <test> is included between min and max */
-int acl_match_len(struct sample *smp, struct acl_pattern *pattern);
-
-/* Checks that the integer in <test> is included between min and max */
-int acl_match_int(struct sample *smp, struct acl_pattern *pattern);
-
-/* Parse an integer. It is put both in min and max. */
-int acl_parse_int(const char **text, struct acl_pattern *pattern, int *opaque, char **err);
-
-/* Parse an version. It is put both in min and max. */
-int acl_parse_dotted_ver(const char **text, struct acl_pattern *pattern, int *opaque, char **err);
-
-/* Parse a range of integers delimited by either ':' or '-'. If only one
- * integer is read, it is set as both min and max.
- */
-int acl_parse_range(const char **text, struct acl_pattern *pattern, int *opaque, char **err);
-
-/* Parse a string. It is allocated and duplicated. */
-int acl_parse_str(const char **text, struct acl_pattern *pattern, int *opaque, char **err);
-
-/* Parse a hexa binary definition. It is allocated and duplicated. */
-int acl_parse_bin(const char **text, struct acl_pattern *pattern, int *opaque, char **err);
-
-/* Parse and concatenate strings into one. It is allocated and duplicated. */
-int acl_parse_strcat(const char **text, struct acl_pattern *pattern, int *opaque, char **err);
-
-/* Parse a regex. It is allocated. */
-int acl_parse_reg(const char **text, struct acl_pattern *pattern, int *opaque, char **err);
-
-/* Parse an IP address and an optional mask in the form addr[/mask].
- * The addr may either be an IPv4 address or a hostname. The mask
- * may either be a dotted mask or a number of bits. Returns 1 if OK,
- * otherwise 0.
- */
-int acl_parse_ip(const char **text, struct acl_pattern *pattern, int *opaque, char **err);
-
-/* always return false */
-int acl_match_nothing(struct sample *smp, struct acl_pattern *pattern);
-
-/* Checks that the pattern matches the end of the tested string. */
-int acl_match_end(struct sample *smp, struct acl_pattern *pattern);
-
-/* Checks that the pattern matches the beginning of the tested string. */
-int acl_match_beg(struct sample *smp, struct acl_pattern *pattern);
-
-/* Checks that the pattern is included inside the tested string. */
-int acl_match_sub(struct sample *smp, struct acl_pattern *pattern);
-
-/* Checks that the pattern is included inside the tested string, but enclosed
- * between slashes or at the beginning or end of the string. Slashes at the
- * beginning or end of the pattern are ignored.
- */
-int acl_match_dir(struct sample *smp, struct acl_pattern *pattern);
-
-/* Checks that the pattern is included inside the tested string, but enclosed
- * between dots or at the beginning or end of the string. Dots at the beginning
- * or end of the pattern are ignored.
- */
-int acl_match_dom(struct sample *smp, struct acl_pattern *pattern);
-
-/* Check that the IPv4 address in <test> matches the IP/mask in pattern */
-int acl_match_ip(struct sample *smp, struct acl_pattern *pattern);
-
-/* Executes a regex. It temporarily changes the data to add a trailing zero,
- * and restores the previous character when leaving.
- */
-int acl_match_reg(struct sample *smp, struct acl_pattern *pattern);
 
 #endif /* _PROTO_ACL_H */
 

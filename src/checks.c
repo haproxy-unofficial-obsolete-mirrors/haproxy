@@ -52,6 +52,8 @@
 #include <proto/task.h>
 
 static int httpchk_expect(struct server *s, int done);
+static int tcpcheck_get_step_id(struct server *);
+static void tcpcheck_main(struct connection *);
 
 static const struct check_status check_statuses[HCHK_STATUS_SIZE] = {
 	[HCHK_STATUS_UNKNOWN]	= { SRV_CHK_UNKNOWN,                   "UNK",     "Unknown" },
@@ -777,6 +779,142 @@ static int httpchk_build_status_header(struct server *s, char *buffer)
 	return hlen;
 }
 
+/* Check the connection. If an error has already been reported or the socket is
+ * closed, keep errno intact as it is supposed to contain the valid error code.
+ * If no error is reported, check the socket's error queue using getsockopt().
+ * Warning, this must be done only once when returning from poll, and never
+ * after an I/O error was attempted, otherwise the error queue might contain
+ * inconsistent errors. If an error is detected, the CO_FL_ERROR is set on the
+ * socket. Returns non-zero if an error was reported, zero if everything is
+ * clean (including a properly closed socket).
+ */
+static int retrieve_errno_from_socket(struct connection *conn)
+{
+	int skerr;
+	socklen_t lskerr = sizeof(skerr);
+
+	if (conn->flags & CO_FL_ERROR && ((errno && errno != EAGAIN) || !conn->ctrl))
+		return 1;
+
+	if (!(conn->flags & CO_FL_CTRL_READY) || !conn->ctrl)
+		return 0;
+
+	if (getsockopt(conn->t.sock.fd, SOL_SOCKET, SO_ERROR, &skerr, &lskerr) == 0)
+		errno = skerr;
+
+	if (errno == EAGAIN)
+		errno = 0;
+
+	if (!errno) {
+		/* we could not retrieve an error, that does not mean there is
+		 * none. Just don't change anything and only report the prior
+		 * error if any.
+		 */
+		if (conn->flags & CO_FL_ERROR)
+			return 1;
+		else
+			return 0;
+	}
+
+	conn->flags |= CO_FL_ERROR | CO_FL_SOCK_WR_SH | CO_FL_SOCK_RD_SH;
+	return 1;
+}
+
+/* Try to collect as much information as possible on the connection status,
+ * and adjust the server status accordingly. It may make use of <errno_bck>
+ * if non-null when the caller is absolutely certain of its validity (eg:
+ * checked just after a syscall). If the caller doesn't have a valid errno,
+ * it can pass zero, and retrieve_errno_from_socket() will be called to try
+ * to extract errno from the socket. If no error is reported, it will consider
+ * the <expired> flag. This is intended to be used when a connection error was
+ * reported in conn->flags or when a timeout was reported in <expired>. The
+ * function takes care of not updating a server status which was already set.
+ * All situations where at least one of <expired> or CO_FL_ERROR are set
+ * produce a status.
+ */
+static void chk_report_conn_err(struct connection *conn, int errno_bck, int expired)
+{
+	struct check *check = conn->owner;
+	const char *err_msg;
+	struct chunk *chk;
+
+	if (check->result != SRV_CHK_UNKNOWN)
+		return;
+
+	errno = errno_bck;
+	if (!errno || errno == EAGAIN)
+		retrieve_errno_from_socket(conn);
+
+	if (!(conn->flags & CO_FL_ERROR) && !expired)
+		return;
+
+	/* we'll try to build a meaningful error message depending on the
+	 * context of the error possibly present in conn->err_code, and the
+	 * socket error possibly collected above. This is useful to know the
+	 * exact step of the L6 layer (eg: SSL handshake).
+	 */
+	chk = get_trash_chunk();
+
+	if (check->type == PR_O2_TCPCHK_CHK) {
+		chunk_printf(chk, " at step %d of tcp-check", tcpcheck_get_step_id(check->server));
+		/* we were looking for a string */
+		if (check->current_step && check->current_step->action == TCPCHK_ACT_EXPECT) {
+			if (check->current_step->string)
+				chunk_appendf(chk, " (string '%s')", check->current_step->string);
+			else if (check->current_step->expect_regex)
+				chunk_appendf(chk, " (expect regex)");
+		}
+		else if (check->current_step && check->current_step->action == TCPCHK_ACT_SEND) {
+			chunk_appendf(chk, " (send)");
+		}
+	}
+
+	if (conn->err_code) {
+		if (errno && errno != EAGAIN)
+			chunk_printf(&trash, "%s (%s)%s", conn_err_code_str(conn), strerror(errno), chk->str);
+		else
+			chunk_printf(&trash, "%s%s", conn_err_code_str(conn), chk->str);
+		err_msg = trash.str;
+	}
+	else {
+		if (errno && errno != EAGAIN) {
+			chunk_printf(&trash, "%s%s", strerror(errno), chk->str);
+			err_msg = trash.str;
+		}
+		else {
+			err_msg = chk->str;
+		}
+	}
+
+	if ((conn->flags & (CO_FL_CONNECTED|CO_FL_WAIT_L4_CONN)) == CO_FL_WAIT_L4_CONN) {
+		/* L4 not established (yet) */
+		if (conn->flags & CO_FL_ERROR)
+			set_server_check_status(check, HCHK_STATUS_L4CON, err_msg);
+		else if (expired)
+			set_server_check_status(check, HCHK_STATUS_L4TOUT, err_msg);
+	}
+	else if ((conn->flags & (CO_FL_CONNECTED|CO_FL_WAIT_L6_CONN)) == CO_FL_WAIT_L6_CONN) {
+		/* L6 not established (yet) */
+		if (conn->flags & CO_FL_ERROR)
+			set_server_check_status(check, HCHK_STATUS_L6RSP, err_msg);
+		else if (expired)
+			set_server_check_status(check, HCHK_STATUS_L6TOUT, err_msg);
+	}
+	else if (conn->flags & CO_FL_ERROR) {
+		/* I/O error after connection was established and before we could diagnose */
+		set_server_check_status(check, HCHK_STATUS_SOCKERR, err_msg);
+	}
+	else if (expired) {
+		/* connection established but expired check */
+		if (check->type == PR_O2_SSL3_CHK)
+			set_server_check_status(check, HCHK_STATUS_L6TOUT, err_msg);
+		else	/* HTTP, SMTP, ... */
+			set_server_check_status(check, HCHK_STATUS_L7TOUT, err_msg);
+	}
+
+	return;
+}
+
 /*
  * This function is used only for server health-checks. It handles
  * the connection acknowledgement. If the proxy requires L7 health-checks,
@@ -787,56 +925,60 @@ static void event_srv_chk_w(struct connection *conn)
 {
 	struct check *check = conn->owner;
 	struct server *s = check->server;
-	int fd = conn->t.sock.fd;
 	struct task *t = check->task;
 
-	if (conn->flags & (CO_FL_SOCK_WR_SH | CO_FL_DATA_WR_SH))
-		conn->flags |= CO_FL_ERROR;
-
-	if (unlikely(conn->flags & CO_FL_ERROR)) {
-		int skerr, err = errno;
-		socklen_t lskerr = sizeof(skerr);
-
-		if (!getsockopt(fd, SOL_SOCKET, SO_ERROR, &skerr, &lskerr) && skerr)
-			err = skerr;
-
-		set_server_check_status(check, HCHK_STATUS_L4CON, strerror(err));
-		goto out_error;
-	}
+	if (unlikely(check->result & SRV_CHK_FAILED))
+		goto out_wakeup;
 
 	if (conn->flags & (CO_FL_HANDSHAKE | CO_FL_WAIT_WR))
 		return;
 
-	/* here, we know that the connection is established */
-	if (!(check->result & SRV_CHK_FAILED)) {
-		/* we don't want to mark 'UP' a server on which we detected an error earlier */
-		if (check->bo->o) {
-			conn->xprt->snd_buf(conn, check->bo, MSG_DONTWAIT | MSG_NOSIGNAL);
-			if (conn->flags & CO_FL_ERROR) {
-				set_server_check_status(check, HCHK_STATUS_L4CON, strerror(errno));
-				goto out_wakeup;
-			}
-			if (check->bo->o) {
-				goto out_incomplete;
-			}
-		}
-
-		/* full request sent, we allow up to <timeout.check> if nonzero for a response */
-		if (s->proxy->timeout.check) {
-			t->expire = tick_add_ifset(now_ms, s->proxy->timeout.check);
-			task_queue(t);
-		}
-		goto out_nowake;
+	if (retrieve_errno_from_socket(conn)) {
+		chk_report_conn_err(conn, errno, 0);
+		__conn_data_stop_both(conn);
+		goto out_wakeup;
 	}
+
+	if (conn->flags & (CO_FL_SOCK_WR_SH | CO_FL_DATA_WR_SH)) {
+		/* if the output is closed, we can't do anything */
+		conn->flags |= CO_FL_ERROR;
+		chk_report_conn_err(conn, 0, 0);
+		goto out_wakeup;
+	}
+
+	/* here, we know that the connection is established. That's enough for
+	 * a pure TCP check.
+	 */
+	if (!check->type)
+		goto out_wakeup;
+
+	if (check->type == PR_O2_TCPCHK_CHK) {
+		tcpcheck_main(conn);
+		return;
+	}
+
+	if (check->bo->o) {
+		conn->xprt->snd_buf(conn, check->bo, MSG_DONTWAIT | MSG_NOSIGNAL);
+		if (conn->flags & CO_FL_ERROR) {
+			chk_report_conn_err(conn, errno, 0);
+			__conn_data_stop_both(conn);
+			goto out_wakeup;
+		}
+		if (check->bo->o)
+			return;
+	}
+
+	/* full request sent, we allow up to <timeout.check> if nonzero for a response */
+	if (s->proxy->timeout.check) {
+		t->expire = tick_add_ifset(now_ms, s->proxy->timeout.check);
+		task_queue(t);
+	}
+	goto out_nowake;
+
  out_wakeup:
 	task_wakeup(t, TASK_WOKEN_IO);
  out_nowake:
 	__conn_data_stop_send(conn);   /* nothing more to write */
- out_incomplete:
-	return;
- out_error:
-	conn->flags |= CO_FL_ERROR;
-	goto out_wakeup;
 }
 
 /*
@@ -862,15 +1004,16 @@ static void event_srv_chk_r(struct connection *conn)
 	int done;
 	unsigned short msglen;
 
-	if (unlikely((check->result & SRV_CHK_FAILED) || (conn->flags & CO_FL_ERROR))) {
-		/* in case of TCP only, this tells us if the connection failed */
-		if (!(check->result & SRV_CHK_FAILED))
-			set_server_check_status(check, HCHK_STATUS_SOCKERR, NULL);
+	if (unlikely(check->result & SRV_CHK_FAILED))
 		goto out_wakeup;
-	}
 
 	if (conn->flags & (CO_FL_HANDSHAKE | CO_FL_WAIT_RD))
 		return;
+
+	if (check->type == PR_O2_TCPCHK_CHK) {
+		tcpcheck_main(conn);
+		return;
+	}
 
 	/* Warning! Linux returns EAGAIN on SO_ERROR if data are still available
 	 * but the connection was closed on the remote end. Fortunately, recv still
@@ -893,11 +1036,11 @@ static void event_srv_chk_r(struct connection *conn)
 			 * or not. It is very common that an RST sent by the server is
 			 * reported as an error just after the last data chunk.
 			 */
-			if (!(check->result & SRV_CHK_FAILED))
-				set_server_check_status(check, HCHK_STATUS_SOCKERR, NULL);
+			chk_report_conn_err(conn, errno, 0);
 			goto out_wakeup;
 		}
 	}
+
 
 	/* Intermediate or complete response received.
 	 * Terminate string in check->bi->data buffer.
@@ -1227,14 +1370,14 @@ static void event_srv_chk_r(struct connection *conn)
 		break;
 
 	default:
-		/* other checks are valid if the connection succeeded anyway */
-		set_server_check_status(check, HCHK_STATUS_L4OK, NULL);
+		/* for other checks (eg: pure TCP), delegate to the main task */
 		break;
 	} /* switch */
 
  out_wakeup:
-	if (check->result & SRV_CHK_FAILED)
-		conn->flags |= CO_FL_ERROR;
+	/* collect possible new errors */
+	if (conn->flags & CO_FL_ERROR)
+		chk_report_conn_err(conn, 0, 0);
 
 	/* Reset the check buffer... */
 	*check->bi->data = '\0';
@@ -1249,11 +1392,10 @@ static void event_srv_chk_r(struct connection *conn)
 	if (conn->xprt && conn->xprt->shutw)
 		conn->xprt->shutw(conn, 0);
 
-	if (conn->ctrl && !(conn->flags & CO_FL_SOCK_RD_SH)) {
-		if (conn->flags & CO_FL_WAIT_RD || !conn->ctrl->drain || !conn->ctrl->drain(conn->t.sock.fd))
-			setsockopt(conn->t.sock.fd, SOL_SOCKET, SO_LINGER,
-			           (struct linger *) &nolinger, sizeof(struct linger));
-	}
+	/* OK, let's not stay here forever */
+	if (check->result & SRV_CHK_FAILED)
+		conn->flags |= CO_FL_ERROR;
+
 	__conn_data_stop_both(conn);
 	task_wakeup(t, TASK_WOKEN_IO);
 	return;
@@ -1272,15 +1414,29 @@ static int wake_srv_chk(struct connection *conn)
 	struct check *check = conn->owner;
 
 	if (unlikely(conn->flags & CO_FL_ERROR)) {
-		/* Note that we might as well have been woken up by a handshake handler */
-		if (check->result == SRV_CHK_UNKNOWN)
-			check->result |= SRV_CHK_FAILED;
+		/* We may get error reports bypassing the I/O handlers, typically
+		 * the case when sending a pure TCP check which fails, then the I/O
+		 * handlers above are not called. This is completely handled by the
+		 * main processing task so let's simply wake it up. If we get here,
+		 * we expect errno to still be valid.
+		 */
+		chk_report_conn_err(conn, errno, 0);
+
 		__conn_data_stop_both(conn);
 		task_wakeup(check->task, TASK_WOKEN_IO);
 	}
 
-	if (check->result & (SRV_CHK_FAILED|SRV_CHK_PASSED))
-		conn_full_close(conn);
+	if (check->result & (SRV_CHK_FAILED|SRV_CHK_PASSED)) {
+		/* We're here because nobody wants to handle the error, so we
+		 * sure want to abort the hard way.
+		 */
+		if ((conn->flags & CO_FL_CTRL_READY) && !(conn->flags & CO_FL_SOCK_RD_SH)) {
+			if (conn->flags & CO_FL_WAIT_RD || !conn->ctrl->drain || !conn->ctrl->drain(conn->t.sock.fd))
+				setsockopt(conn->t.sock.fd, SOL_SOCKET, SO_LINGER,
+				           (struct linger *) &nolinger, sizeof(struct linger));
+		}
+		conn_force_close(conn);
+	}
 	return 0;
 }
 
@@ -1354,11 +1510,17 @@ static struct task *process_chk(struct task *t)
 		check->bo->p = check->bo->data;
 		check->bo->o = 0;
 
-	       /* prepare the check buffer
-	        * This should not be used if check is the secondary agent check
-	        * of a server as s->proxy->check_req will relate to the
-	        * configuration of the primary check */
-	       if (check->type && check != &s->agent) {
+		/* tcpcheck send/expect initialisation */
+		if (check->type == PR_O2_TCPCHK_CHK)
+			check->current_step = NULL;
+
+		/* prepare the check buffer.
+		 * This should not be used if check is the secondary agent check
+		 * of a server as s->proxy->check_req will relate to the
+		 * configuration of the primary check. Similarly, tcp-check uses
+		 * its own strings.
+		 */
+		if (check->type && check->type != PR_O2_TCPCHK_CHK && check != &s->agent) {
 			bo_putblk(check->bo, s->proxy->check_req, s->proxy->check_len);
 
 			/* we want to check if this host replies to HTTP or SSLv3 requests
@@ -1378,10 +1540,10 @@ static struct task *process_chk(struct task *t)
 		}
 
 		/* prepare a new connection */
-		conn->flags = CO_FL_NONE;
-		conn->err_code = CO_ER_NONE;
+		conn_init(conn);
+		conn_prepare(conn, s->check_common.proto, s->check_common.xprt);
+		conn_attach(conn, check, &check_conn_cb);
 		conn->target = &s->obj_type;
-		conn_prepare(conn, &check_conn_cb, s->check_common.proto, s->check_common.xprt, check);
 
 		/* no client address */
 		clear_addr(&conn->addr.from);
@@ -1408,11 +1570,12 @@ static struct task *process_chk(struct task *t)
 		 */
 		ret = SN_ERR_INTERNAL;
 		if (s->check_common.proto->connect)
-			ret = s->check_common.proto->connect(conn, check->type,
-							     s->check.send_proxy ? 1 : (check->type) ? 0 : 2);
+			ret = s->check_common.proto->connect(conn, check->type, (check->type) ? 0 : 2);
 		conn->flags |= CO_FL_WAKE_DATA;
-		if (check->send_proxy)
-			conn->flags |= CO_FL_LOCAL_SPROXY;
+		if (s->check.send_proxy) {
+			conn->send_proxy_ofs = 1;
+			conn->flags |= CO_FL_SEND_PROXY;
+		}
 
 		switch (ret) {
 		case SN_ERR_NONE:
@@ -1426,7 +1589,10 @@ static struct task *process_chk(struct task *t)
 				int t_con = tick_add(now_ms, s->proxy->timeout.connect);
 				t->expire = tick_first(t->expire, t_con);
 			}
-			conn_data_poll_recv(conn);   /* prepare for reading a possible reply */
+
+			if (check->type)
+				conn_data_want_recv(conn);   /* prepare for reading a possible reply */
+
 			goto reschedule;
 
 		case SN_ERR_SRVTO: /* ETIMEDOUT */
@@ -1465,34 +1631,15 @@ static struct task *process_chk(struct task *t)
 		 * which can happen on connect timeout or error.
 		 */
 		if (s->check.result == SRV_CHK_UNKNOWN) {
-			if ((conn->flags & (CO_FL_CONNECTED|CO_FL_WAIT_L4_CONN)) == CO_FL_WAIT_L4_CONN) {
-				/* L4 not established (yet) */
-				if (conn->flags & CO_FL_ERROR)
-					set_server_check_status(check, HCHK_STATUS_L4CON, NULL);
-				else if (expired)
-					set_server_check_status(check, HCHK_STATUS_L4TOUT, NULL);
-			}
-			else if ((conn->flags & (CO_FL_CONNECTED|CO_FL_WAIT_L6_CONN)) == CO_FL_WAIT_L6_CONN) {
-				/* L6 not established (yet) */
-				if (conn->flags & CO_FL_ERROR)
-					set_server_check_status(check, HCHK_STATUS_L6RSP, NULL);
-				else if (expired)
-					set_server_check_status(check, HCHK_STATUS_L6TOUT, NULL);
-			}
-			else if (!check->type) {
-				/* good connection is enough for pure TCP check */
+			/* good connection is enough for pure TCP check */
+			if ((conn->flags & CO_FL_CONNECTED) && !check->type) {
 				if (check->use_ssl)
 					set_server_check_status(check, HCHK_STATUS_L6OK, NULL);
 				else
 					set_server_check_status(check, HCHK_STATUS_L4OK, NULL);
 			}
-			else if (expired) {
-				/* connection established but expired check */
-				if (check->type == PR_O2_SSL3_CHK)
-					set_server_check_status(check, HCHK_STATUS_L6TOUT, NULL);
-				else	/* HTTP, SMTP, ... */
-					set_server_check_status(check, HCHK_STATUS_L7TOUT, NULL);
-
+			else if ((conn->flags & CO_FL_ERROR) || expired) {
+				chk_report_conn_err(conn, 0, expired);
 			}
 			else
 				goto out_wait; /* timeout not reached, wait again */
@@ -1505,10 +1652,12 @@ static struct task *process_chk(struct task *t)
 			 * as a failed response coupled with "observe layer7" caused the
 			 * server state to be suddenly changed.
 			 */
-			if (conn->ctrl)
-				setsockopt(conn->t.sock.fd, SOL_SOCKET, SO_LINGER,
-					   (struct linger *) &nolinger, sizeof(struct linger));
-			conn_full_close(conn);
+			if ((conn->flags & CO_FL_CTRL_READY) && !(conn->flags & CO_FL_SOCK_RD_SH)) {
+				if (conn->flags & CO_FL_WAIT_RD || !conn->ctrl->drain || !conn->ctrl->drain(conn->t.sock.fd))
+					setsockopt(conn->t.sock.fd, SOL_SOCKET, SO_LINGER,
+					           (struct linger *) &nolinger, sizeof(struct linger));
+			}
+			conn_force_close(conn);
 		}
 
 		if (check->result & SRV_CHK_FAILED)  /* a failure or timeout detected */
@@ -1749,6 +1898,304 @@ static int httpchk_expect(struct server *s, int done)
 	}
 	return 1;
 }
+
+/*
+ * return the id of a step in a send/expect session
+ */
+static int tcpcheck_get_step_id(struct server *s)
+{
+	struct tcpcheck_rule *cur = NULL, *next = NULL;
+	int i = 0;
+
+	cur = s->check.current_step;
+
+	/* no step => first step */
+	if (cur == NULL)
+		return 1;
+
+	/* increment i until current step */
+	list_for_each_entry(next, &s->proxy->tcpcheck_rules, list) {
+		if (next->list.p == &cur->list)
+			break;
+		++i;
+	}
+
+	return i;
+}
+
+static void tcpcheck_main(struct connection *conn)
+{
+	char *contentptr;
+	unsigned int contentlen;
+	struct list *head = NULL;
+	struct tcpcheck_rule *cur = NULL;
+	int done = 0, ret = 0;
+
+	struct check *check = conn->owner;
+	struct server *s = check->server;
+	struct task *t = check->task;
+
+	/* don't do anything until the connection is established */
+	if (!(conn->flags & CO_FL_CONNECTED)) {
+		/* update expire time, should be done by process_chk */
+		/* we allow up to min(inter, timeout.connect) for a connection
+		 * to establish but only when timeout.check is set
+		 * as it may be to short for a full check otherwise
+		 */
+		while (tick_is_expired(t->expire, now_ms)) {
+			int t_con;
+
+			t_con = tick_add(t->expire, s->proxy->timeout.connect);
+			t->expire = tick_add(t->expire, MS_TO_TICKS(check->inter));
+
+			if (s->proxy->timeout.check)
+				t->expire = tick_first(t->expire, t_con);
+		}
+		return;
+	}
+
+	/* here, we know that the connection is established */
+	if (check->result & (SRV_CHK_FAILED | SRV_CHK_PASSED)) {
+		goto out_end_tcpcheck;
+	}
+
+	/* head is be the first element of the double chained list */
+	head = &s->proxy->tcpcheck_rules;
+
+	/* no step means first step
+	 * initialisation */
+	if (check->current_step == NULL) {
+		check->bo->p = check->bo->data;
+		check->bo->o = 0;
+		check->bi->p = check->bi->data;
+		check->bi->i = 0;
+		cur = check->current_step = LIST_ELEM(head->n, struct tcpcheck_rule *, list);
+		t->expire = tick_add(now_ms, MS_TO_TICKS(check->inter));
+		if (s->proxy->timeout.check)
+			t->expire = tick_add_ifset(now_ms, s->proxy->timeout.check);
+	}
+	/* keep on processing step */
+	else {
+		cur = check->current_step;
+	}
+
+	if (conn->flags & CO_FL_HANDSHAKE)
+		return;
+
+	/* It's only the rules which will enable send/recv */
+	__conn_data_stop_both(conn);
+
+	while (1) {
+		/* we have to try to flush the output buffer before reading, at the end,
+		 * or if we're about to send a string that does not fit in the remaining space.
+		 */
+		if (check->bo->o &&
+		    (&cur->list == head ||
+		     check->current_step->action != TCPCHK_ACT_SEND ||
+		     check->current_step->string_len >= buffer_total_space(check->bo))) {
+
+			if ((conn->flags & CO_FL_WAIT_WR) ||
+			    conn->xprt->snd_buf(conn, check->bo, MSG_DONTWAIT | MSG_NOSIGNAL) <= 0) {
+				if (conn->flags & CO_FL_ERROR) {
+					chk_report_conn_err(conn, errno, 0);
+					__conn_data_stop_both(conn);
+					goto out_end_tcpcheck;
+				}
+				goto out_need_io;
+			}
+		}
+
+		/* did we reach the end ? If so, let's check that everything was sent */
+		if (&cur->list == head) {
+			if (check->bo->o)
+				goto out_need_io;
+			break;
+		}
+
+		if (check->current_step->action == TCPCHK_ACT_SEND) {
+			/* reset the read buffer */
+			if (*check->bi->data != '\0') {
+				*check->bi->data = '\0';
+				check->bi->i = 0;
+			}
+
+			if (conn->flags & (CO_FL_SOCK_WR_SH | CO_FL_DATA_WR_SH)) {
+				conn->flags |= CO_FL_ERROR;
+				chk_report_conn_err(conn, 0, 0);
+				goto out_end_tcpcheck;
+			}
+
+			if (check->current_step->string_len >= check->bo->size) {
+				chunk_printf(&trash, "tcp-check send : string too large (%d) for buffer size (%d) at step %d",
+					     check->current_step->string_len, check->bo->size,
+					     tcpcheck_get_step_id(s));
+				set_server_check_status(check, HCHK_STATUS_L7RSP, trash.str);
+				goto out_end_tcpcheck;
+			}
+
+			/* do not try to send if there is no space */
+			if (check->current_step->string_len >= buffer_total_space(check->bo))
+				continue;
+
+			bo_putblk(check->bo, check->current_step->string, check->current_step->string_len);
+			*check->bo->p = '\0'; /* to make gdb output easier to read */
+
+			/* go to next rule and try to send */
+			cur = (struct tcpcheck_rule *)cur->list.n;
+			check->current_step = cur;
+		} /* end 'send' */
+		else if (check->current_step->action == TCPCHK_ACT_EXPECT) {
+			if (unlikely(check->result & SRV_CHK_FAILED))
+				goto out_end_tcpcheck;
+
+			if ((conn->flags & CO_FL_WAIT_RD) ||
+			    conn->xprt->rcv_buf(conn, check->bi, buffer_total_space(check->bi)) <= 0) {
+				if (conn->flags & (CO_FL_ERROR | CO_FL_SOCK_RD_SH | CO_FL_DATA_RD_SH)) {
+					done = 1;
+					if ((conn->flags & CO_FL_ERROR) && !check->bi->i) {
+						/* Report network errors only if we got no other data. Otherwise
+						 * we'll let the upper layers decide whether the response is OK
+						 * or not. It is very common that an RST sent by the server is
+						 * reported as an error just after the last data chunk.
+						 */
+						chk_report_conn_err(conn, errno, 0);
+						goto out_end_tcpcheck;
+					}
+				}
+				else
+					goto out_need_io;
+			}
+
+			/* Intermediate or complete response received.
+			 * Terminate string in check->bi->data buffer.
+			 */
+			if (check->bi->i < check->bi->size) {
+				check->bi->data[check->bi->i] = '\0';
+			}
+			else {
+				check->bi->data[check->bi->i - 1] = '\0';
+				done = 1; /* buffer full, don't wait for more data */
+			}
+
+			contentptr = check->bi->data;
+			contentlen = check->bi->i;
+
+			/* Check that response body is not empty... */
+			if (*contentptr == '\0') {
+				if (!done)
+					continue;
+
+				/* empty response */
+				chunk_printf(&trash, "TCPCHK got an empty response at step %d",
+						tcpcheck_get_step_id(s));
+				set_server_check_status(check, HCHK_STATUS_L7RSP, trash.str);
+
+				goto out_end_tcpcheck;
+			}
+
+			if (!done && (cur->string != NULL) && (check->bi->i < cur->string_len) )
+				continue; /* try to read more */
+
+		tcpcheck_expect:
+			if (cur->string != NULL)
+				ret = my_memmem(contentptr, contentlen, cur->string, cur->string_len) != NULL;
+			else if (cur->expect_regex != NULL)
+				ret = regexec(cur->expect_regex, contentptr, MAX_MATCH, pmatch, 0) == 0;
+
+			if (!ret && !done)
+				continue; /* try to read more */
+
+			/* matched */
+			if (ret) {
+				/* matched but we did not want to => ERROR */
+				if (cur->inverse) {
+					/* we were looking for a string */
+					if (cur->string != NULL) {
+						chunk_printf(&trash, "TCPCHK matched unwanted content '%s' at step %d",
+								cur->string, tcpcheck_get_step_id(s));
+					}
+					else {
+					/* we were looking for a regex */
+						chunk_printf(&trash, "TCPCHK matched unwanted content (regex) at step %d",
+								tcpcheck_get_step_id(s));
+					}
+					set_server_check_status(check, HCHK_STATUS_L7RSP, trash.str);
+					goto out_end_tcpcheck;
+				}
+				/* matched and was supposed to => OK, next step */
+				else {
+					cur = (struct tcpcheck_rule*)cur->list.n;
+					check->current_step = cur;
+					if (check->current_step->action == TCPCHK_ACT_EXPECT)
+						goto tcpcheck_expect;
+					__conn_data_stop_recv(conn);
+				}
+			}
+			else {
+			/* not matched */
+				/* not matched and was not supposed to => OK, next step */
+				if (cur->inverse) {
+					cur = (struct tcpcheck_rule*)cur->list.n;
+					check->current_step = cur;
+					if (check->current_step->action == TCPCHK_ACT_EXPECT)
+						goto tcpcheck_expect;
+					__conn_data_stop_recv(conn);
+				}
+				/* not matched but was supposed to => ERROR */
+				else {
+					/* we were looking for a string */
+					if (cur->string != NULL) {
+						chunk_printf(&trash, "TCPCHK did not match content '%s' at step %d",
+								cur->string, tcpcheck_get_step_id(s));
+					}
+					else {
+					/* we were looking for a regex */
+						chunk_printf(&trash, "TCPCHK did not match content (regex) at step %d",
+								tcpcheck_get_step_id(s));
+					}
+					set_server_check_status(check, HCHK_STATUS_L7RSP, trash.str);
+					goto out_end_tcpcheck;
+				}
+			}
+		} /* end expect */
+	} /* end loop over double chained step list */
+
+	set_server_check_status(check, HCHK_STATUS_L7OKD, "(tcp-check)");
+	goto out_end_tcpcheck;
+
+ out_need_io:
+	if (check->bo->o)
+		__conn_data_want_send(conn);
+
+	if (check->current_step->action == TCPCHK_ACT_EXPECT)
+		__conn_data_want_recv(conn);
+	return;
+
+ out_end_tcpcheck:
+	/* collect possible new errors */
+	if (conn->flags & CO_FL_ERROR)
+		chk_report_conn_err(conn, 0, 0);
+
+	/* Close the connection... We absolutely want to perform a hard close
+	 * and reset the connection if some data are pending, otherwise we end
+	 * up with many TIME_WAITs and eat all the source port range quickly.
+	 * To avoid sending RSTs all the time, we first try to drain pending
+	 * data.
+	 */
+	if (conn->xprt && conn->xprt->shutw)
+		conn->xprt->shutw(conn, 0);
+
+	check->current_step = NULL;
+
+	if (check->result & SRV_CHK_FAILED)
+		conn->flags |= CO_FL_ERROR;
+
+	__conn_data_stop_both(conn);
+	task_wakeup(t, TASK_WOKEN_IO);
+
+	return;
+}
+
 
 /*
  * Local variables:

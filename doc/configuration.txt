@@ -1144,6 +1144,9 @@ http-check expect                         -          -         X         X
 http-check send-state                     X          -         X         X
 http-request                              -          X         X         X
 http-response                             -          X         X         X
+tcp-check expect                          -          -         X         X
+tcp-check send                            -          -         X         X
+tcp-check send-binary                     -          -         X         X
 http-send-name-header                     -          -         X         X
 id                                        -          X         X         X
 ignore-persist                            -          X         X         X
@@ -1165,6 +1168,7 @@ option dontlognull                   (*)  X          X         X         -
 option forceclose                    (*)  X          X         X         X
 -- keyword -------------------------- defaults - frontend - listen -- backend -
 option forwardfor                         X          X         X         X
+option tcp-check                          X          -         X         X
 option http-no-delay                 (*)  X          X         X         X
 option http-pretend-keepalive        (*)  X          X         X         X
 option http-server-close             (*)  X          X         X         X
@@ -2768,7 +2772,8 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
     - "redirect" : this performs an HTTP redirection based on a redirect rule.
       This is exactly the same as the "redirect" statement except that it
       inserts a redirect rule which can be processed in the middle of other
-      "http-request" rules. See the "redirect" keyword for the rule's syntax.
+      "http-request" rules and that these rules use the "log-format" strings.
+      See the "redirect" keyword for the rule's syntax.
 
     - "add-header" appends an HTTP header field whose name is specified in
       <name> and whose value is defined by <fmt> which follows the log-format
@@ -2934,6 +2939,132 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
 
   See also : "http-request", section 3.4 about userlists and section 7 about
              ACL usage.
+
+
+tcp-check expect [!] <match> <pattern>
+  Specify data to be collected and analysed during a generic health check
+  May be used in sections:   defaults | frontend | listen | backend
+                               no     |    no    |   yes  |   yes
+
+  Arguments :
+    <match>   is a keyword indicating how to look for a specific pattern in the
+              response. The keyword may be one of "string", "rstring" or
+              binary.
+              The keyword may be preceded by an exclamation mark ("!") to negate
+              the match. Spaces are allowed between the exclamation mark and the
+              keyword. See below for more details on the supported keywords.
+
+    <pattern> is the pattern to look for. It may be a string or a regular
+              expression. If the pattern contains spaces, they must be escaped
+              with the usual backslash ('\').
+              If the match is set to binary, then the pattern must be passed as
+              a serie of hexadecimal digits in an even number. Each sequence of
+              two digits will represent a byte. The hexadecimal digits may be
+              used upper or lower case.
+
+
+  The available matches are intentionally similar to their http-check cousins :
+
+    string <string> : test the exact string matches in the response buffer.
+                      A health check response will be considered valid if the
+                      response's buffer contains this exact string. If the
+                      "string" keyword is prefixed with "!", then the response
+                      will be considered invalid if the body contains this
+                      string. This can be used to look for a mandatory pattern
+                      in a protocol response, or to detect a failure when a
+                      specific error appears in a protocol banner.
+
+    rstring <regex> : test a regular expression on the response buffer.
+                      A health check response will be considered valid if the
+                      response's buffer matches this expression. If the
+                      "rstring" keyword is prefixed with "!", then the response
+                      will be considered invalid if the body matches the
+                      expression.
+
+    binary <hexstring> : test the exact string in its hexadecimal form matches
+                         in the response buffer. A health check response will
+                         be considered valid if the response's buffer contains
+                         this exact hexadecimal string.
+                         Purpose is to match data on binary protocols.
+
+  It is important to note that the responses will be limited to a certain size
+  defined by the global "tune.chksize" option, which defaults to 16384 bytes.
+  Thus, too large responses may not contain the mandatory pattern when using
+  "string", "rstring" or binary. If a large response is absolutely required, it
+  is possible to change the default max size by setting the global variable.
+  However, it is worth keeping in mind that parsing very large responses can
+  waste some CPU cycles, especially when regular expressions are used, and that
+  it is always better to focus the checks on smaller resources. Also, in its
+  current state, the check will not find any string nor regex past a null
+  character in the response. Similarly it is not possible to request matching
+  the null character.
+
+  Examples :
+         # perform a POP check
+         option tcp-check
+         tcp-check expect string +OK\ POP3\ ready
+
+         # perform an IMAP check
+         option tcp-check
+         tcp-check expect string *\ OK\ IMAP4\ ready
+
+         # look for the redis master server
+         option tcp-check
+         tcp-check send PING\r\n
+         tcp-check expect +PONG
+         tcp-check send info\ replication\r\n
+         tcp-check expect string role:master
+         tcp-check send QUIT\r\n
+         tcp-check expect string +OK
+
+
+  See also : "option tcp-check", "tcp-check send", "http-check expect",
+             tune.chksize
+
+
+tcp-check send <data>
+  Specify a string to be sent as a question during a generic health check
+  May be used in sections:   defaults | frontend | listen | backend
+                               no     |    no    |   yes  |   yes
+
+    <data> : the data to be sent as a question during a generic health check
+             session. For now, <data> must be a string.
+
+  Examples :
+         # look for the redis master server
+         option tcp-check
+         tcp-check send info\ replication\r\n
+         tcp-check expect string role:master
+
+  See also : "option tcp-check", "tcp-check expect", "tcp-check send-binary",
+             tune.chksize
+
+
+tcp-check send-binary <hexastring>
+  Specify an hexa digits string to be sent as a binary question during a raw
+  tcp health check
+  May be used in sections:   defaults | frontend | listen | backend
+                               no     |    no    |   yes  |   yes
+
+    <data> : the data to be sent as a question during a generic health check
+             session. For now, <data> must be a string.
+    <hexastring> : test the exact string in its hexadecimal form matches in the
+                   response buffer. A health check response will be considered
+                   valid if the response's buffer contains this exact
+                   hexadecimal string.
+                   Purpose is to send binary data to ask on binary protocols.
+
+  Examples :
+         # redis check in binary
+         option tcp-check
+         tcp-check send-binary 50494e470d0a # PING\r\n
+         tcp-check expect binary 2b504F4e47 # +PONG
+
+
+  See also : "option tcp-check", "tcp-check expect", "tcp-check send",
+             tune.chksize
+
+
 
 http-send-name-header [<header>]
   Add the server name to a request. Use the header string given by <header>
@@ -3628,6 +3759,75 @@ option forwardfor [ except <network> ] [ header <name> ] [ if-none ]
 
   See also : "option httpclose", "option http-server-close",
              "option forceclose"
+
+
+option tcp-check
+  Perform health checks using tcp-check send/expect sequences
+  May be used in sections:   defaults | frontend | listen | backend
+                               yes    |    no    |   yes  |   yes
+
+  This health check method is intended to be combined with "tcp-check" command
+  lists in order to support send/expect types of health check sequences.
+
+  TCP checks currently support 4 modes of operations :
+    - no "tcp-check" directive : the health check only consists in a connection
+      attempt, which remains the default mode.
+
+    - "tcp-check send" or "tcp-check send-binary" only is mentionned : this is
+      used to send a string along with a connection opening. With some
+      protocols, it helps sending a "QUIT" message for example that prevents
+      the server from logging a connection error for each health check. The
+      check result will still be based on the ability to open the connection
+      only.
+
+    - "tcp-check expect" only is mentionned : this is used to test a banner.
+      The connection is opened and haproxy waits for the server to present some
+      contents which must validate some rules. The check result will be based
+      on the matching between the contents and the rules. This is suited for
+      POP, IMAP, SMTP, FTP, SSH, TELNET.
+
+    - both "tcp-check send" and "tcp-check expect" are mentionned : this is
+      used to test a hello-type protocol. Haproxy sends a message, the server
+      responds and its response is analysed. the check result will be based on
+      the maching between the response contents and the rules. This is often
+      suited for protocols which require a binding or a request/response model.
+      LDAP, MySQL, Redis and SSL are example of such protocols, though they
+      already all have their dedicated checks with a deeper understanding of
+      the respective protocols.
+      In this mode, many questions may be sent and many answers may be
+      analysed.
+
+  Examples :
+         # perform a POP check (analyse only server's banner)
+         option tcp-check
+         tcp-check expect string +OK\ POP3\ ready
+
+         # perform an IMAP check (analyse only server's banner)
+         option tcp-check
+         tcp-check expect string *\ OK\ IMAP4\ ready
+
+         # look for the redis master server after ensuring it speaks well
+         # redis protocol, then it exits properly.
+         # (send a command then analyse the response 3 tims)
+         option tcp-check
+         tcp-check send PING\r\n
+         tcp-check expect +PONG
+         tcp-check send info\ replication\r\n
+         tcp-check expect string role:master
+         tcp-check send QUIT\r\n
+         tcp-check expect string +OK
+
+         forge a HTTP request, then analyse the response
+         (send many headers before analyzing)
+         option tcp-check
+         tcp-check send HEAD\ /\ HTTP/1.1\r\n
+         tcp-check send Host:\ www.mydomain.com\r\n
+         tcp-check send User-Agent:\ HAProxy\ tcpcheck\r\n
+         tcp-check send \r\n
+         tcp-check expect rstring HTTP/1\..\ (2..|3..)
+
+
+  See also : "tcp-check expect", "tcp-check send"
 
 
 option http-no-delay
@@ -4709,14 +4909,19 @@ redirect scheme   <sch> [code <code>] <option> [{if | unless} <condition>]
 
   Arguments :
     <loc>     With "redirect location", the exact value in <loc> is placed into
-              the HTTP "Location" header.
+              the HTTP "Location" header. When used in an "http-request" rule,
+              <loc> value follows the log-format rules and can include some
+              dynamic values (see Custom Log Format in section 8.2.4).
 
     <pfx>     With "redirect prefix", the "Location" header is built from the
               concatenation of <pfx> and the complete URI path, including the
               query string, unless the "drop-query" option is specified (see
               below). As a special case, if <pfx> equals exactly "/", then
               nothing is inserted before the original URI. It allows one to
-              redirect to the same URL (for instance, to insert a cookie).
+              redirect to the same URL (for instance, to insert a cookie). When
+              used in an "http-request" rule, <pfx> value follows the log-format
+              rules and can include some dynamic values (see Custom Log Format
+              in section 8.2.4).
 
     <sch>     With "redirect scheme", then the "Location" header is built by
               concatenating <sch> with "://" then the first occurrence of the
@@ -4726,7 +4931,9 @@ redirect scheme   <sch> [code <code>] <option> [{if | unless} <condition>]
               no "Host" header is found, then an empty host component will be
               returned, which most recent browsers interprete as redirecting to
               the same host. This directive is mostly used to redirect HTTP to
-              HTTPS.
+              HTTPS. When used in an "http-request" rule, <sch> value follows
+              the log-format rules and can include some dynamic values (see
+              Custom Log Format in section 8.2.4).
 
     <code>    The code is optional. It indicates which type of HTTP redirection
               is desired. Only codes 301, 302, 303, 307 and 308 are supported,
@@ -4789,6 +4996,10 @@ redirect scheme   <sch> [code <code>] <option> [{if | unless} <condition>]
 
   Example: redirect all HTTP traffic to HTTPS when SSL is handled by haproxy.
         redirect scheme https if !{ ssl_fc }
+
+  Example: append 'www.' prefix in front of all hosts not having it
+        http-request redirect code 301 location www.%[hdr(host)]%[req.uri] \
+          unless { hdr_beg(host) -i www }
 
   See section 7 about ACL usage.
 
@@ -6086,7 +6297,12 @@ stick store-request <pattern> [table <table>] [{if | unless} <condition>]
   request or the response, regardless of the number of rules. Only the 8 first
   ones which match will be kept. Using this, it is possible to feed multiple
   tables at once in the hope to increase the chance to recognize a user on
-  another protocol or access method.
+  another protocol or access method. Using multiple store-request rules with
+  the same table is possible and may be used to find the best criterion to rely
+  on, by arranging the rules by decreasing preference order. Only the first
+  extracted criterion for a given table will be stored. All subsequent store-
+  request rules referencing the same table will be skipped and their ACLs will
+  not be evaluated.
 
   The "store-request" rules are evaluated once the server connection has been
   established, so that the table will contain the real server that processed
@@ -6121,7 +6337,7 @@ stick store-request <pattern> [table <table>] [{if | unless} <condition>]
 stick-table type {ip | integer | string [len <length>] | binary [len <length>]}
             size <size> [expire <expire>] [nopurge] [peers <peersect>]
             [store <data_type>]*
-  Configure the stickiness table for the current backend
+  Configure the stickiness table for the current section
   May be used in sections :   defaults | frontend | listen | backend
                                  no    |    yes   |   yes  |   yes
 
@@ -6390,7 +6606,15 @@ stick store-response <pattern> [table <table>] [{if | unless} <condition>]
   request or the response, regardless of the number of rules. Only the 8 first
   ones which match will be kept. Using this, it is possible to feed multiple
   tables at once in the hope to increase the chance to recognize a user on
-  another protocol or access method.
+  another protocol or access method. Using multiple store-response rules with
+  the same table is possible and may be used to find the best criterion to rely
+  on, by arranging the rules by decreasing preference order. Only the first
+  extracted criterion for a given table will be stored. All subsequent store-
+  response rules referencing the same table will be skipped and their ACLs will
+  not be evaluated. However, even if a store-request rule references a table, a
+  store-response rule may also use the same table. This means that each table
+  may learn exactly one element from the request and one element from the
+  response at once.
 
   The table will contain the real server that processed the request.
 
@@ -8334,6 +8558,7 @@ from the request, the response or any environmental status. The principle is
 simple :
 
   - extract a data sample from a stream, table or the environment
+  - optionally apply some format conversion to the extracted sample
   - apply one or multiple pattern matching methods on this sample
   - perform actions only when a pattern matches the sample
 
@@ -8347,8 +8572,10 @@ In order to define a test, the "acl" keyword is used. The syntax is :
 This creates a new ACL <aclname> or completes an existing one with new tests.
 Those tests apply to the portion of request/response specified in <criterion>
 and may be adjusted with optional flags [flags]. Some criteria also support
-an operator which may be specified before the set of values. The values are
-of the type supported by the criterion, and are separated by spaces.
+an operator which may be specified before the set of values. Optionally some
+conversion operators may be applied to the sample, and they will be specified
+as a comma-delimited list of keywords just after the first keyword. The values
+are of the type supported by the criterion, and are separated by spaces.
 
 ACL names must be formed from upper and lower case letters, digits, '-' (dash),
 '_' (underscore) , '.' (dot) and ':' (colon). ACL names are case-sensitive,
@@ -8360,7 +8587,8 @@ performance, they just consume a small amount of memory.
 The criterion generally is the name of a sample fetch method, or one of its ACL
 specific declinations. The default test method is implied by the output type of
 this sample fetch method. The ACL declinations can describe alternate matching
-methods of a same sample fetch method.
+methods of a same sample fetch method. The sample fetch methods are the only
+ones supporting a conversion.
 
 Sample fetch methods return data which can be of the following types :
   - boolean
@@ -8368,6 +8596,12 @@ Sample fetch methods return data which can be of the following types :
   - IPv4 or IPv6 address
   - string
   - data block
+
+Converters transform any of these data into any of these. For example, some
+converters might convert a string to a lower-case string while other ones
+would turn a string to an IPv4 address, or apply a netmask to an IP address.
+The resulting sample is of the type of the last converter applied to the list,
+which defaults to the type of the sample fetch method.
 
 The ACL engine can match these types against patterns of the following types :
   - boolean
@@ -8476,6 +8710,11 @@ buffer, one would use the following acl :
 
     acl script_tag payload(0,500) -m reg -i <script>
 
+On systems where the regex library is much slower when using "-i", it is
+possible to convert the sample to lowercase before matching, like this :
+
+    acl script_tag payload(0,500),lower -m reg <script>
+
 All ACL-specific criteria imply a default matching method. Most often, these
 criteria are composed by concatenating the name of the original sample fetch
 method and the matching method. For example, "hdr_beg" applies the "beg" match
@@ -8493,7 +8732,7 @@ example, all ACLs below are exact equivalent :
     acl alternate3  hdr(host)     -m beg www.
 
 
-The table below summarizes the compatibility matrix between sample fetch types
+The table below summarizes the compatibility matrix between sample types
 and the pattern types to fetch against. It indicates for each compatible
 combination the name of the matching method to be used, prefixed with "*" when
 the method is implicit and will work by default without "-m".
@@ -8789,15 +9028,17 @@ Thus, the syntax of a standard sample fetch method is one of the following :
    - name(arg1)
    - name(arg1,arg2)
 
-At the moment, the stickiness features are the most advanced users of the
-sample fetch system. The "stick on", and "stick store-request" directives
-support sample fetch rules which allow a list of transformations to be applied
-on top of the fetched sample, and the finaly result is automatically converted
-to the type of the table. These transformations are enumerated as a series
-of specific keywords after the sample fetch method. These keywords may equally
-be appended immediately after the fetch keyword's argument, delimited by a
-comma. These keywords can also support some arguments (eg: a netmask) which
-must be passed in parenthesis.
+Sample fetch methods may be combined with transformations to be applied on top
+of the fetched sample (also called "converters"). These combinations form what
+is called "sample expressions" and the result is a "sample". Initially this
+was only supported by "stick on" and "stick store-request" directives but this
+has now be extended to all places where samples may be used (acls, log-format,
+unique-id-format, add-header, ...).
+
+These transformations are enumerated as a series of specific keywords after the
+sample fetch method. These keywords may equally be appended immediately after
+the fetch keyword's argument, delimited by a comma. These keywords can also
+support some arguments (eg: a netmask) which must be passed in parenthesis.
 
 The currently available list of transformation keywords include :
 
@@ -8824,6 +9065,59 @@ The currently available list of transformation keywords include :
                  Date header fields, Expires values in responses when combined
                  with a positive offset, or Last-Modified values when the
                  offset is negative.
+
+  map(<map_file>[,<default_value>])
+  map_<match_type>(<map_file>[,<default_value>])
+  map_<match_type>_<output_type>(<map_file>[,<default_value>])
+                 Search the input value from <map_file> using the <match_type>
+                 matching method, and return the associated value converted to
+                 the type <output_type>. If the input value cannot be found in
+                 the <map_file>, the converter returns the <default_value>. If
+                 the <default_value> is not set, the converter fails and acts
+                 as if no input value could be fetched. If the <match_type> is
+                 not set, it defaults to "str". Likewise, if the <output_type>
+                 is not set, it defaults to "str". For convenience, the "map"
+                 keyword is an alias for "map_str" and maps a string to another
+                 string. The following array contains contains the list of all
+                 the map* converters.
+
+                 It is important to avoid overlapping between the keys : IP
+                 addresses and strings are stored in trees, so the first of the
+                 finest match will be used. Other keys are stored in lists, so
+                 the first matching occurrence will be used.
+
+                 +----+----------+---------+-------------+------------+
+                 |     `-_   out |         |             |            |
+                 | input  `-_    |   str   |     int     |     ip     |
+                 | / match   `-_ |         |             |            |
+                 +---------------+---------+-------------+------------+
+                 | str   / str   | map_str | map_str_int | map_str_ip |
+                 | str   / sub   | map_sub | map_sub_int | map_sub_ip |
+                 | str   / dir   | map_dir | map_dir_int | map_dir_ip |
+                 | str   / dom   | map_dom | map_dom_int | map_dom_ip |
+                 | str   / end   | map_end | map_end_int | map_end_ip |
+                 | str   / reg   | map_reg | map_reg_int | map_reg_ip |
+                 | int   / int   | map_int | map_int_int | map_int_ip |
+                 | ip    / ip    | map_ip  | map_ip_int  | map_ip_ip  |
+                 +---------------+---------+-------------+------------+
+
+                 The file contains one key + value per line. Lines which start
+                 with '#' are ignored, just like empty lines. Leading tabs and
+                 spaces are stripped. The key is then the first "word" (series
+                 of non-space/tabs characters), and the value is what follows
+                 this series of space/tab till the end of the line excluding
+                 trailing spaces/tabs.
+
+                 Example :
+
+                 # this is a comment and is ignored
+                    2.22.246.0/23    United Kingdom      \n
+                 <-><-----------><--><------------><---->
+                  |       |      |         |         `- trailing spaces ignored
+                  |       |      |         `----------- value
+                  |       |      `--------------------- middle spaces ignored
+                  |       `---------------------------- key
+                  `------------------------------------ leading spaces ignored
 
 7.3.1. Fetching samples from internal states
 --------------------------------------------
@@ -9272,6 +9566,10 @@ src : ip
   behind a proxy. However if the "accept-proxy" bind directive is used, it can
   be the address of a client behind another PROXY-protocol compatible component
   for all rule sets except "tcp-request connection" which sees the real address.
+
+  Example:
+       # add an HTTP header in requests with the originating address' country
+       http-request set-header X-Country %[src,map_ip(geoip.lst)]
 
 src_bytes_in_rate([<table>]) : integer
   Returns the average bytes rate from the incoming connection's source address
@@ -10975,7 +11273,8 @@ less common information such as the client's SSL certificate's DN, or to log
 the key that would be used to store an entry into a stick table.
 
 Note: spaces must be escaped. A space character is considered as a separator.
-HAproxy will automatically merge consecutive separators.
+In order to emit a verbatim '%', it must be preceeded by another '%' resulting
+in '%%'. HAProxy will automatically merge consecutive separators.
 
 Flags are :
   * Q: quote a string

@@ -1356,6 +1356,48 @@ const char *parse_size_err(const char *text, unsigned *ret) {
 	return NULL;
 }
 
+/*
+ * Parse binary string written in hexadecimal (source) and store the decoded
+ * result into binstr and set binstrlen to the lengh of binstr. Memory for
+ * binstr is allocated by the function. In case of error, returns 0 with an
+ * error message in err.
+ */
+int parse_binary(const char *source, char **binstr, int *binstrlen, char **err)
+{
+	int len;
+	const char *p = source;
+	int i,j;
+
+	len = strlen(source);
+	if (len % 2) {
+		memprintf(err, "an even number of hex digit is expected");
+		return 0;
+	}
+
+	len = len >> 1;
+	*binstrlen = len;
+	*binstr = calloc(len, sizeof(char));
+	if (!*binstr) {
+		memprintf(err, "out of memory while loading string pattern");
+		return 0;
+	}
+
+	i = j = 0;
+	while (j < len) {
+		if (!ishex(p[i++]))
+			goto bad_input;
+		if (!ishex(p[i++]))
+			goto bad_input;
+		(*binstr)[j++] =  (hex2i(p[i-2]) << 4) + hex2i(p[i-1]);
+	}
+	return len;
+
+bad_input:
+	memprintf(err, "an hex digit is expected (found '%c')", p[i-1]);
+	free(binstr);
+	return 0;
+}
+
 /* copies at most <n> characters from <src> and always terminates with '\0' */
 char *my_strndup(const char *src, int n)
 {
@@ -1371,6 +1413,31 @@ char *my_strndup(const char *src, int n)
 	memcpy(ret, src, len);
 	ret[len] = '\0';
 	return ret;
+}
+
+/*
+ * search needle in haystack
+ * returns the pointer if found, returns NULL otherwise
+ */
+const void *my_memmem(const void *haystack, size_t haystacklen, const void *needle, size_t needlelen)
+{
+	const void *c = NULL;
+	unsigned char f;
+
+	if ((haystack == NULL) || (needle == NULL) || (haystacklen < needlelen))
+		return NULL;
+
+	f = *(char *)needle;
+	c = haystack;
+	while ((c = memchr(c, f, haystacklen - (c - haystack))) != NULL) {
+		if ((haystacklen - (c - haystack)) < needlelen)
+			return NULL;
+
+		if (memcmp(c, needle, needlelen) == 0)
+			return c;
+		++c;
+	}
+	return NULL;
 }
 
 /* This function returns the first unused key greater than or equal to <key> in
@@ -1623,6 +1690,27 @@ int buf2ip(const char *buf, size_t len, struct in_addr *dst)
 
 	memcpy(&dst->s_addr, tmp, 4);
 	return addr - cp;
+}
+
+/* This function converts the string in <buf> of the len <len> to
+ * struct in6_addr <dst> which must be allocated by the caller.
+ * This function returns 1 in success case, otherwise zero.
+ */
+#define MAX_IP6_LEN 45
+int buf2ip6(const char *buf, size_t len, struct in6_addr *dst)
+{
+	char null_term_ip6[MAX_IP6_LEN + 1];
+
+	if (len > MAX_IP6_LEN)
+		return 0;
+
+	memcpy(null_term_ip6, buf, len);
+	null_term_ip6[len] = '\0';
+
+	if (!inet_pton(AF_INET6, null_term_ip6, dst))
+		return 0;
+
+	return 1;
 }
 
 /* To be used to quote config arg positions. Returns the short string at <ptr>

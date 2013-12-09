@@ -72,6 +72,7 @@ struct data_cb sess_conn_cb = {
  */
 int session_accept(struct listener *l, int cfd, struct sockaddr_storage *addr)
 {
+	struct connection *cli_conn;
 	struct proxy *p = l->frontend;
 	struct session *s;
 	struct task *t;
@@ -80,14 +81,18 @@ int session_accept(struct listener *l, int cfd, struct sockaddr_storage *addr)
 
 	ret = -1; /* assume unrecoverable error by default */
 
-	if (unlikely((s = pool_alloc2(pool2_session)) == NULL))
+	if (unlikely((cli_conn = conn_new()) == NULL))
 		goto out_close;
 
-	if (unlikely((s->si[0].conn = pool_alloc2(pool2_connection)) == NULL))
-		goto out_fail_conn0;
+	conn_prepare(cli_conn, l->proto, l->xprt);
 
-	if (unlikely((s->si[1].conn = pool_alloc2(pool2_connection)) == NULL))
-		goto out_fail_conn1;
+	cli_conn->t.sock.fd = cfd;
+	cli_conn->addr.from = *addr;
+	cli_conn->flags |= CO_FL_ADDR_FROM_SET;
+	cli_conn->target = &l->obj_type;
+
+	if (unlikely((s = pool_alloc2(pool2_session)) == NULL))
+		goto out_free_conn;
 
 	/* minimum session initialization required for an embryonic session is
 	 * fairly low. We need very little to execute L4 ACLs, then we need a
@@ -104,13 +109,13 @@ int session_accept(struct listener *l, int cfd, struct sockaddr_storage *addr)
 	s->listener = l;
 	s->fe  = p;
 
-	/* OK, we're keeping the session, so let's properly initialize the session */
-	s->si[0].conn->t.sock.fd = cfd;
-	s->si[0].conn->ctrl = l->proto;
-	s->si[0].conn->flags = CO_FL_NONE | CO_FL_ADDR_FROM_SET;
-	s->si[0].conn->err_code = CO_ER_NONE;
-	s->si[0].conn->addr.from = *addr;
-	s->si[0].conn->target = &l->obj_type;
+	/* On a mini-session, the connection is directly attached to the
+	 * session's target so that we don't need to initialize the stream
+	 * interfaces. Another benefit is that it's easy to detect a mini-
+	 * session in dumps using this : it's the only one which has a
+	 * connection in s->target.
+	 */
+	s->target = &cli_conn->obj_type;
 
 	s->logs.accept_date = date; /* user-visible date for logging */
 	s->logs.tv_accept = now;  /* corrected date for internal use */
@@ -169,11 +174,10 @@ int session_accept(struct listener *l, int cfd, struct sockaddr_storage *addr)
 		goto out_free_session;
 	}
 
-
 	/* wait for a PROXY protocol header */
 	if (l->options & LI_O_ACC_PROXY) {
-		s->si[0].conn->flags |= CO_FL_ACCEPT_PROXY;
-		conn_sock_want_recv(s->si[0].conn);
+		cli_conn->flags |= CO_FL_ACCEPT_PROXY;
+		conn_sock_want_recv(cli_conn);
 	}
 
 	if (unlikely((t = task_new()) == NULL))
@@ -187,14 +191,13 @@ int session_accept(struct listener *l, int cfd, struct sockaddr_storage *addr)
 	 * but not initialized. Also note we need to be careful as the stream
 	 * int is not initialized yet.
 	 */
-	conn_prepare(s->si[0].conn, &sess_conn_cb, l->proto, l->xprt, s);
+	conn_attach(cli_conn, s, &sess_conn_cb);
 
 	/* finish initialization of the accepted file descriptor */
-	fd_insert(cfd);
-	fdtab[cfd].owner = s->si[0].conn;
-	fdtab[cfd].iocb = conn_fd_handler;
-	conn_data_want_recv(s->si[0].conn);
-	if (conn_xprt_init(s->si[0].conn) < 0)
+	conn_ctrl_init(cli_conn);
+
+	conn_data_want_recv(cli_conn);
+	if (conn_xprt_init(cli_conn) < 0)
 		goto out_free_task;
 
 	/* OK, now either we have a pending handshake to execute with and
@@ -203,16 +206,16 @@ int session_accept(struct listener *l, int cfd, struct sockaddr_storage *addr)
 	 * set the I/O timeout to the frontend's client timeout.
 	 */
 
-	if (s->si[0].conn->flags & CO_FL_HANDSHAKE) {
+	if (cli_conn->flags & CO_FL_HANDSHAKE) {
 		t->process = expire_mini_session;
 		t->expire = tick_add_ifset(now_ms, p->timeout.client);
 		task_queue(t);
-		s->si[0].conn->flags |= CO_FL_INIT_DATA | CO_FL_WAKE_DATA;
+		cli_conn->flags |= CO_FL_INIT_DATA | CO_FL_WAKE_DATA;
 		return 1;
 	}
 
 	/* OK let's complete session initialization since there is no handshake */
-	s->si[0].conn->flags |= CO_FL_CONNECTED;
+	cli_conn->flags |= CO_FL_CONNECTED;
 	ret = session_complete(s);
 	if (ret > 0)
 		return ret;
@@ -224,11 +227,11 @@ int session_accept(struct listener *l, int cfd, struct sockaddr_storage *addr)
 	p->feconn--;
 	if (s->stkctr[0].entry || s->stkctr[1].entry)
 		session_store_counters(s);
-	pool_free2(pool2_connection, s->si[1].conn);
- out_fail_conn1:
-	pool_free2(pool2_connection, s->si[0].conn);
- out_fail_conn0:
 	pool_free2(pool2_session, s);
+ out_free_conn:
+	cli_conn->flags &= ~CO_FL_XPRT_TRACKED;
+	conn_xprt_close(cli_conn);
+	conn_free(cli_conn);
  out_close:
 	if (ret < 0 && l->xprt == &raw_sock && p->mode == PR_MODE_HTTP) {
 		/* critical error, no more memory, try to emit a 500 response */
@@ -246,21 +249,24 @@ int session_accept(struct listener *l, int cfd, struct sockaddr_storage *addr)
 }
 
 
-/* prepare the trash with a log prefix for session <s> */
+/* prepare the trash with a log prefix for session <s>. It only works with
+ * embryonic sessions based on a real connection.
+ */
 static void prepare_mini_sess_log_prefix(struct session *s)
 {
 	struct tm tm;
 	char pn[INET6_ADDRSTRLEN];
 	int ret;
 	char *end;
+	struct connection *cli_conn = __objt_conn(s->target);
 
-	ret = addr_to_str(&s->si[0].conn->addr.from, pn, sizeof(pn));
+	ret = addr_to_str(&cli_conn->addr.from, pn, sizeof(pn));
 	if (ret <= 0)
 		chunk_printf(&trash, "unknown [");
 	else if (ret == AF_UNIX)
 		chunk_printf(&trash, "%s:%d [", pn, s->listener->luid);
 	else
-		chunk_printf(&trash, "%s:%d [", pn, get_host_port(&s->si[0].conn->addr.from));
+		chunk_printf(&trash, "%s:%d [", pn, get_host_port(&cli_conn->addr.from));
 
 	get_localtime(s->logs.accept_date.tv_sec, &tm);
 	end = date2str_log(trash.str + trash.len, &tm, &(s->logs.accept_date), trash.size - trash.len);
@@ -278,7 +284,7 @@ static void prepare_mini_sess_log_prefix(struct session *s)
 static void kill_mini_session(struct session *s)
 {
 	int level = LOG_INFO;
-	struct connection *conn = s->si[0].conn;
+	struct connection *conn = __objt_conn(s->target);
 	unsigned int log = s->logs.logwait;
 	const char *err_msg;
 
@@ -311,7 +317,7 @@ static void kill_mini_session(struct session *s)
 	}
 
 	/* kill the connection now */
-	conn_full_close(s->si[0].conn);
+	conn_force_close(conn);
 
 	s->fe->feconn--;
 	session_store_counters(s);
@@ -334,8 +340,7 @@ static void kill_mini_session(struct session *s)
 	task_delete(s->task);
 	task_free(s->task);
 
-	pool_free2(pool2_connection, s->si[1].conn);
-	pool_free2(pool2_connection, s->si[0].conn);
+	pool_free2(pool2_connection, conn);
 	pool_free2(pool2_session, s);
 }
 
@@ -387,6 +392,7 @@ static struct task *expire_mini_session(struct task *t)
  * be called with an embryonic session. It returns a positive value upon
  * success, 0 if the connection can be ignored, or a negative value upon
  * critical failure. The accepted file descriptor is closed if we return <= 0.
+ * The client-side end point is assumed to be a connection.
  */
 int session_complete(struct session *s)
 {
@@ -394,6 +400,7 @@ int session_complete(struct session *s)
 	struct proxy *p = s->fe;
 	struct http_txn *txn;
 	struct task *t = s->task;
+	struct connection *conn = __objt_conn(s->target);
 	int ret;
 	int i;
 
@@ -402,9 +409,8 @@ int session_complete(struct session *s)
 	/* OK, we're keeping the session, so let's properly initialize the session */
 	LIST_ADDQ(&sessions, &s->list);
 	LIST_INIT(&s->back_refs);
-	si_takeover_conn(&s->si[0], l->proto, l->xprt);
-	s->flags |= SN_INITIALIZED;
 
+	s->flags |= SN_INITIALIZED;
 	s->unique_id = NULL;
 
 	t->process = l->handler;
@@ -439,14 +445,11 @@ int session_complete(struct session *s)
 	}
 
 	/* this part should be common with other protocols */
-	s->si[0].owner     = t;
-	s->si[0].state     = s->si[0].prev_state = SI_ST_EST;
-	s->si[0].err_type  = SI_ET_NONE;
-	s->si[0].err_loc   = NULL;
-	s->si[0].release   = NULL;
-	s->si[0].send_proxy_ofs = 0;
-	s->si[0].exp       = TICK_ETERNITY;
-	s->si[0].flags     = SI_FL_NONE;
+	si_reset(&s->si[0], t);
+	si_set_state(&s->si[0], SI_ST_EST);
+
+	/* attach the incoming connection to the stream interface now */
+	si_attach_conn(&s->si[0], conn);
 
 	if (likely(s->fe->options2 & PR_O2_INDEPSTR))
 		s->si[0].flags |= SI_FL_INDEP_STR;
@@ -454,20 +457,8 @@ int session_complete(struct session *s)
 	/* pre-initialize the other side's stream interface to an INIT state. The
 	 * callbacks will be initialized before attempting to connect.
 	 */
-	s->si[1].conn->t.sock.fd = -1; /* just to help with debugging */
-	s->si[1].conn->flags = CO_FL_NONE;
-	s->si[1].conn->err_code = CO_ER_NONE;
-	s->si[1].owner     = t;
-	s->si[1].state     = s->si[1].prev_state = SI_ST_INI;
-	s->si[1].err_type  = SI_ET_NONE;
-	s->si[1].conn_retries = 0;  /* used for logging too */
-	s->si[1].err_loc   = NULL;
-	s->si[1].release   = NULL;
-	s->si[1].send_proxy_ofs = 0;
-	s->si[1].conn->target = NULL;
-	si_prepare_embedded(&s->si[1]);
-	s->si[1].exp       = TICK_ETERNITY;
-	s->si[1].flags     = SI_FL_NONE;
+	si_reset(&s->si[1], t);
+	si_detach(&s->si[1]);
 
 	if (likely(s->fe->options2 & PR_O2_INDEPSTR))
 		s->si[1].flags |= SI_FL_INDEP_STR;
@@ -547,7 +538,7 @@ int session_complete(struct session *s)
 	txn->rsp.chn = s->rep;
 
 	/* finish initialization of the accepted file descriptor */
-	conn_data_want_recv(s->si[0].conn);
+	conn_data_want_recv(conn);
 
 	if (p->accept && (ret = p->accept(s)) <= 0) {
 		/* Either we had an unrecoverable error (<0) or work is
@@ -559,10 +550,10 @@ int session_complete(struct session *s)
 
 	/* if logs require transport layer information, note it on the connection */
 	if (s->logs.logwait & LW_XPRT)
-		s->si[0].conn->flags |= CO_FL_XPRT_TRACKED;
+		conn->flags |= CO_FL_XPRT_TRACKED;
 
 	/* we want the connection handler to notify the stream interface about updates. */
-	s->si[0].conn->flags |= CO_FL_WAKE_DATA;
+	conn->flags |= CO_FL_WAKE_DATA;
 
 	/* it is important not to call the wakeup function directly but to
 	 * pass through task_wakeup(), because this one knows how to apply
@@ -592,6 +583,7 @@ static void session_free(struct session *s)
 	struct http_txn *txn = &s->txn;
 	struct proxy *fe = s->fe;
 	struct bref *bref, *back;
+	struct connection *cli_conn = objt_conn(s->si[0].end);
 	int i;
 
 	if (s->pend_pos)
@@ -634,8 +626,8 @@ static void session_free(struct session *s)
 	http_end_txn(s);
 
 	/* ensure the client-side transport layer is destroyed */
-	s->si[0].conn->flags &= ~CO_FL_XPRT_TRACKED;
-	conn_full_close(s->si[0].conn);
+	if (cli_conn)
+		conn_force_close(cli_conn);
 
 	for (i = 0; i < s->store_count; i++) {
 		if (!s->store[i].ts)
@@ -663,8 +655,8 @@ static void session_free(struct session *s)
 		bref->ref = s->list.n;
 	}
 	LIST_DEL(&s->list);
-	pool_free2(pool2_connection, s->si[1].conn);
-	pool_free2(pool2_connection, s->si[0].conn);
+	si_release_endpoint(&s->si[1]);
+	si_release_endpoint(&s->si[0]);
 	pool_free2(pool2_session, s);
 
 	/* We may want to free the maximum amount of pools if the proxy is stopping */
@@ -769,12 +761,13 @@ void session_process_counters(struct session *s)
  * We must check for establishment, error and abort. Possible output states
  * are SI_ST_EST (established), SI_ST_CER (error), SI_ST_DIS (abort), and
  * SI_ST_CON (no change). The function returns 0 if it switches to SI_ST_CER,
- * otherwise 1.
+ * otherwise 1. This only works with connection-based sessions.
  */
 static int sess_update_st_con_tcp(struct session *s, struct stream_interface *si)
 {
 	struct channel *req = si->ob;
 	struct channel *rep = si->ib;
+	struct connection *srv_conn = __objt_conn(si->end);
 
 	/* If we got an error, or if nothing happened and the connection timed
 	 * out, we must give up. The CER state handler will take care of retry
@@ -791,22 +784,16 @@ static int sess_update_st_con_tcp(struct session *s, struct stream_interface *si
 			si->state    = SI_ST_EST;
 			si->err_type = SI_ET_DATA_ERR;
 			si->ib->flags |= CF_READ_ERROR | CF_WRITE_ERROR;
-			si->err_loc = objt_server(s->target);
 			return 1;
 		}
 		si->exp   = TICK_ETERNITY;
 		si->state = SI_ST_CER;
 
-		si->conn->flags &= ~CO_FL_XPRT_TRACKED;
-		conn_full_close(si->conn);
-
-		if (si->release)
-			si->release(si);
+		conn_force_close(srv_conn);
 
 		if (si->err_type)
 			return 0;
 
-		si->err_loc = objt_server(s->target);
 		if (si->flags & SI_FL_ERR)
 			si->err_type = SI_ET_CONN_ERR;
 		else
@@ -823,7 +810,6 @@ static int sess_update_st_con_tcp(struct session *s, struct stream_interface *si
 		/* give up */
 		si_shutw(si);
 		si->err_type |= SI_ET_CONN_ABRT;
-		si->err_loc  = objt_server(s->target);
 		if (s->srv_error)
 			s->srv_error(s, si);
 		return 1;
@@ -840,7 +826,6 @@ static int sess_update_st_con_tcp(struct session *s, struct stream_interface *si
 	si->exp      = TICK_ETERNITY;
 	si->state    = SI_ST_EST;
 	si->err_type = SI_ET_NONE;
-	si->err_loc  = NULL;
 	return 1;
 }
 
@@ -870,7 +855,6 @@ static int sess_update_st_cer(struct session *s, struct stream_interface *si)
 	if (si->conn_retries < 0) {
 		if (!si->err_type) {
 			si->err_type = SI_ET_CONN_ERR;
-			si->err_loc = objt_server(s->target);
 		}
 
 		if (objt_server(s->target))
@@ -960,7 +944,7 @@ static void sess_establish(struct session *s, struct stream_interface *si)
 
 	rep->analysers |= s->fe->fe_rsp_ana | s->be->be_rsp_ana;
 	rep->flags |= CF_READ_ATTACHED; /* producer is now attached */
-	if (si_ctrl(si)) {
+	if (objt_conn(si->end)) {
 		/* real connections have timeouts */
 		req->wto = s->be->timeout.server;
 		rep->rto = s->be->timeout.server;
@@ -1005,7 +989,6 @@ static void sess_update_stream_int(struct session *s, struct stream_interface *s
 		if (conn_err == SN_ERR_INTERNAL) {
 			if (!si->err_type) {
 				si->err_type = SI_ET_CONN_OTHER;
-				si->err_loc  = srv;
 			}
 
 			if (srv)
@@ -1159,9 +1142,10 @@ static void sess_set_term_flags(struct session *s)
 }
 
 /* This function initiates a server connection request on a stream interface
- * already in SI_ST_REQ state. Upon success, the state goes to SI_ST_ASS,
- * indicating that a server has been assigned. It may also return SI_ST_QUE,
- * or SI_ST_CLO upon error.
+ * already in SI_ST_REQ state. Upon success, the state goes to SI_ST_ASS for
+ * a real connection to a server, indicating that a server has been assigned,
+ * or SI_ST_EST for a successful connection to an applet. It may also return
+ * SI_ST_QUE, or SI_ST_CLO upon error.
  */
 static void sess_prepare_conn_req(struct session *s, struct stream_interface *si)
 {
@@ -1175,6 +1159,39 @@ static void sess_prepare_conn_req(struct session *s, struct stream_interface *si
 
 	if (si->state != SI_ST_REQ)
 		return;
+
+	if (unlikely(obj_type(s->target) == OBJ_TYPE_APPLET)) {
+		/* the applet directly goes to the EST state */
+		struct appctx *appctx = objt_appctx(si->end);
+
+		if (!appctx || appctx->applet != __objt_applet(s->target))
+			appctx = stream_int_register_handler(si, objt_applet(s->target));
+
+		if (!appctx) {
+			/* No more memory, let's immediately abort. Force the
+			 * error code to ignore the ERR_LOCAL which is not a
+			 * real error.
+			 */
+			s->flags &= ~(SN_ERR_MASK | SN_FINST_MASK);
+
+			si_shutr(si);
+			si_shutw(si);
+			si->ob->flags |= CF_WRITE_ERROR;
+			si->err_type = SI_ET_CONN_RES;
+			si->state = SI_ST_CLO;
+			if (s->srv_error)
+				s->srv_error(s, si);
+			return;
+		}
+
+		s->logs.t_queue   = tv_ms_elapsed(&s->logs.tv_accept, &now);
+		s->logs.t_connect = tv_ms_elapsed(&s->logs.tv_accept, &now);
+		si->state         = SI_ST_EST;
+		si->err_type      = SI_ET_NONE;
+		si->exp           = TICK_ETERNITY;
+		/* let sess_establish() finish the job */
+		return;
+	}
 
 	/* Try to assign a server */
 	if (srv_redispatch_connect(s) != 0) {
@@ -1371,6 +1388,13 @@ static int process_sticking_rules(struct session *s, struct channel *req, int an
 		int ret = 1 ;
 		int i;
 
+		/* Only the first stick store-request of each table is applied
+		 * and other ones are ignored. The purpose is to allow complex
+		 * configurations which look for multiple entries by decreasing
+		 * order of precision and to stop at the first which matches.
+		 * An example could be a store of the IP address from an HTTP
+		 * header first, then from the source if not found.
+		 */
 		for (i = 0; i < s->store_count; i++) {
 			if (rule->table.t == s->store[i].table)
 				break;
@@ -1447,6 +1471,7 @@ static int process_store_rules(struct session *s, struct channel *rep, int an_bi
 	struct proxy    *px   = s->be;
 	struct sticking_rule  *rule;
 	int i;
+	int nbreq = s->store_count;
 
 	DPRINTF(stderr,"[%u] %s: session=%p b=%p, exp(r,w)=%u,%u bf=%08x bh=%d analysers=%02x\n",
 		now_ms, __FUNCTION__,
@@ -1459,17 +1484,26 @@ static int process_store_rules(struct session *s, struct channel *rep, int an_bi
 
 	list_for_each_entry(rule, &px->storersp_rules, list) {
 		int ret = 1 ;
-		int storereqidx = -1;
 
-		for (i = 0; i < s->store_count; i++) {
-			if (rule->table.t == s->store[i].table) {
-				if (!(s->store[i].flags))
-					storereqidx = i;
+		/* Only the first stick store-response of each table is applied
+		 * and other ones are ignored. The purpose is to allow complex
+		 * configurations which look for multiple entries by decreasing
+		 * order of precision and to stop at the first which matches.
+		 * An example could be a store of a set-cookie value, with a
+		 * fallback to a parameter found in a 302 redirect.
+		 *
+		 * The store-response rules are not allowed to override the
+		 * store-request rules for the same table, but they may coexist.
+		 * Thus we can have up to one store-request entry and one store-
+		 * response entry for the same table at any time.
+		 */
+		for (i = nbreq; i < s->store_count; i++) {
+			if (rule->table.t == s->store[i].table)
 				break;
-			}
 		}
 
-		if ((i !=  s->store_count) && (storereqidx == -1))
+		/* skip existing entries for this table */
+		if (i < s->store_count)
 			continue;
 
 		if (rule->cond) {
@@ -1486,17 +1520,12 @@ static int process_store_rules(struct session *s, struct channel *rep, int an_bi
 			if (!key)
 				continue;
 
-			if (storereqidx != -1) {
-				stksess_setkey(s->store[storereqidx].table, s->store[storereqidx].ts, key);
-				s->store[storereqidx].flags = 1;
-			}
-			else if (s->store_count < (sizeof(s->store) / sizeof(s->store[0]))) {
+			if (s->store_count < (sizeof(s->store) / sizeof(s->store[0]))) {
 				struct stksess *ts;
 
 				ts = stksess_new(rule->table.t, key);
 				if (ts) {
 					s->store[s->store_count].table = rule->table.t;
-					s->store[s->store_count].flags = 1;
 					s->store[s->store_count++].ts = ts;
 				}
 			}
@@ -2113,8 +2142,8 @@ struct task *process_session(struct task *t)
 	if (!(s->req->flags & (CF_KERN_SPLICING|CF_SHUTR)) &&
 	    s->req->to_forward &&
 	    (global.tune.options & GTUNE_USE_SPLICE) &&
-	    (s->si[0].conn->xprt && s->si[0].conn->xprt->rcv_pipe && s->si[0].conn->xprt->snd_pipe) &&
-	    (s->si[1].conn->xprt && s->si[1].conn->xprt->rcv_pipe && s->si[1].conn->xprt->snd_pipe) &&
+	    (objt_conn(s->si[0].end) && __objt_conn(s->si[0].end)->xprt && __objt_conn(s->si[0].end)->xprt->rcv_pipe) &&
+	    (objt_conn(s->si[1].end) && __objt_conn(s->si[1].end)->xprt && __objt_conn(s->si[1].end)->xprt->snd_pipe) &&
 	    (pipes_used < global.maxpipes) &&
 	    (((s->fe->options2|s->be->options2) & PR_O2_SPLIC_REQ) ||
 	     (((s->fe->options2|s->be->options2) & PR_O2_SPLIC_AUT) &&
@@ -2165,18 +2194,12 @@ struct task *process_session(struct task *t)
 	if (s->req->cons->state == SI_ST_INI) {
 		if (!(s->req->flags & CF_SHUTW)) {
 			if ((s->req->flags & CF_AUTO_CONNECT) || !channel_is_empty(s->req)) {
-				/* If we have an applet without a connect method, we immediately
-				 * switch to the connected state, otherwise we perform a connection
-				 * request.
+				/* If we have an appctx, there is no connect method, so we
+				 * immediately switch to the connected state, otherwise we
+				 * perform a connection request.
 				 */
 				s->req->cons->state = SI_ST_REQ; /* new connection requested */
 				s->req->cons->conn_retries = s->be->conn_retries;
-				if (unlikely(obj_type(s->req->cons->conn->target) == OBJ_TYPE_APPLET &&
-					     !(si_ctrl(s->req->cons) && si_ctrl(s->req->cons)->connect))) {
-					s->req->cons->state = SI_ST_EST; /* connection established */
-					s->rep->flags |= CF_READ_ATTACHED; /* producer is now attached */
-					s->req->wex = TICK_ETERNITY;
-				}
 			}
 		}
 		else {
@@ -2200,11 +2223,15 @@ struct task *process_session(struct task *t)
 			if (s->si[1].state == SI_ST_REQ) {
 				sess_prepare_conn_req(s, &s->si[1]);
 
+				/* applets directly go to the ESTABLISHED state */
+				if (unlikely(s->si[1].state == SI_ST_EST))
+					sess_establish(s, &s->si[1]);
+
 				/* Now we can add the server name to a header (if requested) */
 				/* check for HTTP mode and proxy server_name_hdr_name != NULL */
 				if ((s->flags & SN_BE_ASSIGNED) &&
 				    (s->be->mode == PR_MODE_HTTP) &&
-				    (s->be->server_id_hdr_name != NULL && s->target)) {
+				    (s->be->server_id_hdr_name != NULL && objt_server(s->target))) {
 					http_send_name_header(&s->txn, s->be, objt_server(s->target)->id);
 				}
 			}
@@ -2263,8 +2290,8 @@ struct task *process_session(struct task *t)
 	if (!(s->rep->flags & (CF_KERN_SPLICING|CF_SHUTR)) &&
 	    s->rep->to_forward &&
 	    (global.tune.options & GTUNE_USE_SPLICE) &&
-	    (s->si[0].conn->xprt && s->si[0].conn->xprt->rcv_pipe && s->si[0].conn->xprt->snd_pipe) &&
-	    (s->si[1].conn->xprt && s->si[1].conn->xprt->rcv_pipe && s->si[1].conn->xprt->snd_pipe) &&
+	    (objt_conn(s->si[0].end) && __objt_conn(s->si[0].end)->xprt && __objt_conn(s->si[0].end)->xprt->snd_pipe) &&
+	    (objt_conn(s->si[1].end) && __objt_conn(s->si[1].end)->xprt && __objt_conn(s->si[1].end)->xprt->rcv_pipe) &&
 	    (pipes_used < global.maxpipes) &&
 	    (((s->fe->options2|s->be->options2) & PR_O2_SPLIC_RTR) ||
 	     (((s->fe->options2|s->be->options2) & PR_O2_SPLIC_AUT) &&
@@ -2330,8 +2357,8 @@ struct task *process_session(struct task *t)
 		    s->si[1].prev_state == SI_ST_EST) {
 			chunk_printf(&trash, "%08x:%s.srvcls[%04x:%04x]\n",
 				      s->uniq_id, s->be->id,
-				      (unsigned short)s->si[0].conn->t.sock.fd,
-				      (unsigned short)s->si[1].conn->t.sock.fd);
+			              objt_conn(s->si[0].end) ? (unsigned short)objt_conn(s->si[0].end)->t.sock.fd : -1,
+			              objt_conn(s->si[1].end) ? (unsigned short)objt_conn(s->si[1].end)->t.sock.fd : -1);
 			if (write(1, trash.str, trash.len) < 0) /* shut gcc warning */;
 		}
 
@@ -2339,8 +2366,8 @@ struct task *process_session(struct task *t)
 		    s->si[0].prev_state == SI_ST_EST) {
 			chunk_printf(&trash, "%08x:%s.clicls[%04x:%04x]\n",
 				      s->uniq_id, s->be->id,
-				      (unsigned short)s->si[0].conn->t.sock.fd,
-				      (unsigned short)s->si[1].conn->t.sock.fd);
+			              objt_conn(s->si[0].end) ? (unsigned short)objt_conn(s->si[0].end)->t.sock.fd : -1,
+			              objt_conn(s->si[1].end) ? (unsigned short)objt_conn(s->si[1].end)->t.sock.fd : -1);
 			if (write(1, trash.str, trash.len) < 0) /* shut gcc warning */;
 		}
 	}
@@ -2351,10 +2378,10 @@ struct task *process_session(struct task *t)
 		if ((s->fe->options & PR_O_CONTSTATS) && (s->flags & SN_BE_ASSIGNED))
 			session_process_counters(s);
 
-		if (s->rep->cons->state == SI_ST_EST && obj_type(s->rep->cons->conn->target) != OBJ_TYPE_APPLET)
+		if (s->rep->cons->state == SI_ST_EST && obj_type(s->rep->cons->end) != OBJ_TYPE_APPCTX)
 			si_update(s->rep->cons);
 
-		if (s->req->cons->state == SI_ST_EST && obj_type(s->req->cons->conn->target) != OBJ_TYPE_APPLET)
+		if (s->req->cons->state == SI_ST_EST && obj_type(s->req->cons->end) != OBJ_TYPE_APPCTX)
 			si_update(s->req->cons);
 
 		s->req->flags &= ~(CF_READ_NULL|CF_READ_PARTIAL|CF_WRITE_NULL|CF_WRITE_PARTIAL|CF_READ_ATTACHED);
@@ -2378,20 +2405,17 @@ struct task *process_session(struct task *t)
 			s->req->rex = TICK_ETERNITY;
 		}
 
-		/* Call the stream interfaces' I/O handlers when embedded.
-		 * Note that this one may wake the task up again.
+		/* When any of the stream interfaces is attached to an applet,
+		 * we have to call it here. Note that this one may wake the
+		 * task up again. If at least one applet was called, the current
+		 * task might have been woken up, in which case we don't want it
+		 * to be requeued to the wait queue but rather to the run queue
+		 * to run ASAP. The bitwise "or" in the condition ensures that
+		 * both functions are always called and that we wake up if at
+		 * least one did something.
 		 */
-		if (obj_type(s->req->cons->conn->target) == OBJ_TYPE_APPLET ||
-		    obj_type(s->rep->cons->conn->target) == OBJ_TYPE_APPLET) {
-			if (objt_applet(s->req->cons->conn->target))
-				objt_applet(s->req->cons->conn->target)->fct(s->req->cons);
-			if (objt_applet(s->rep->cons->conn->target))
-				objt_applet(s->rep->cons->conn->target)->fct(s->rep->cons);
+		if ((si_applet_call(s->req->cons) | si_applet_call(s->rep->cons)) != 0) {
 			if (task_in_rq(t)) {
-				/* If we woke up, we don't want to requeue the
-				 * task to the wait queue, but rather requeue
-				 * it into the runqueue ASAP.
-				 */
 				t->expire = TICK_ETERNITY;
 				return t;
 			}
@@ -2447,8 +2471,8 @@ struct task *process_session(struct task *t)
 		     (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)))) {
 		chunk_printf(&trash, "%08x:%s.closed[%04x:%04x]\n",
 			      s->uniq_id, s->be->id,
-			      (unsigned short)s->req->prod->conn->t.sock.fd,
-			      (unsigned short)s->req->cons->conn->t.sock.fd);
+		              objt_conn(s->si[0].end) ? (unsigned short)objt_conn(s->si[0].end)->t.sock.fd : -1,
+		              objt_conn(s->si[1].end) ? (unsigned short)objt_conn(s->si[1].end)->t.sock.fd : -1);
 		if (write(1, trash.str, trash.len) < 0) /* shut gcc warning */;
 	}
 
@@ -2551,6 +2575,10 @@ void default_srv_error(struct session *s, struct stream_interface *si)
 		err = SN_ERR_SRVCL;
 		fin = SN_FINST_C;
 	}
+	else if (err_type & SI_ET_CONN_RES) {
+		err = SN_ERR_RESOURCE;
+		fin = SN_FINST_C;
+	}
 	else /* SI_ET_CONN_OTHER and others */ {
 		err = SN_ERR_INTERNAL;
 		fin = SN_FINST_C;
@@ -2607,10 +2635,16 @@ smp_fetch_sc_stkctr(struct session *l4, const struct arg *args, const char *kw)
 			return NULL;
 	}
 	else if (num > 9) { /* src_* variant, args[0] = table */
-		struct stktable_key *key = addr_to_stktable_key(&l4->si[0].conn->addr.from);
+		struct stktable_key *key;
+		struct connection *conn = objt_conn(l4->si[0].end);
 
+		if (!conn)
+			return NULL;
+
+		key = addr_to_stktable_key(&conn->addr.from);
 		if (!key)
 			return NULL;
+
 		stkctr.table = &args->data.prx->table;
 		stkctr.entry = stktable_lookup_key(stkctr.table, key);
 		return &stkctr;
@@ -2819,11 +2853,15 @@ static int
 smp_fetch_src_updt_conn_cnt(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
                             const struct arg *args, struct sample *smp, const char *kw)
 {
+	struct connection *conn = objt_conn(l4->si[0].end);
 	struct stksess *ts;
 	struct stktable_key *key;
 	void *ptr;
 
-	key = addr_to_stktable_key(&l4->si[0].conn->addr.from);
+	if (!conn)
+		return 0;
+
+	key = addr_to_stktable_key(&conn->addr.from);
 	if (!key)
 		return 0;
 

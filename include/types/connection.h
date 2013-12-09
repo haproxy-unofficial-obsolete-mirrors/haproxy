@@ -82,6 +82,10 @@ enum {
 	CO_FL_CURR_WR_ENA   = 0x00000040,  /* sending is currently desired */
 	CO_FL_WAIT_WR       = 0x00000080,  /* sending needs to poll first */
 
+	/* These flags indicate whether the Control and Transport layers are initialized */
+	CO_FL_CTRL_READY    = 0x00000100, /* FD was registered, fd_delete() needed */
+	CO_FL_XPRT_READY    = 0x00000200, /* xprt_init() done, xprt_close() needed */
+
 	/* These flags are used by data layers to indicate they had to stop
 	 * sending data because a buffer was empty (WAIT_DATA) or stop receiving
 	 * data because a buffer was full (WAIT_ROOM). The connection handler
@@ -117,13 +121,13 @@ enum {
 	 * handshake should be added after this point, and CO_FL_HANDSHAKE
 	 * should be updated.
 	 */
-	CO_FL_SI_SEND_PROXY = 0x01000000,  /* send a valid PROXY protocol header */
+	CO_FL_SEND_PROXY    = 0x01000000,  /* send a valid PROXY protocol header */
 	CO_FL_SSL_WAIT_HS   = 0x02000000,  /* wait for an SSL handshake to complete */
 	CO_FL_ACCEPT_PROXY  = 0x04000000,  /* receive a valid PROXY protocol header */
-	CO_FL_LOCAL_SPROXY  = 0x08000000,  /* send a valid local PROXY protocol header */
+	/* unused : 0x08000000 */
 
 	/* below we have all handshake flags grouped into one */
-	CO_FL_HANDSHAKE     = CO_FL_SI_SEND_PROXY | CO_FL_SSL_WAIT_HS | CO_FL_ACCEPT_PROXY | CO_FL_LOCAL_SPROXY,
+	CO_FL_HANDSHAKE     = CO_FL_SEND_PROXY | CO_FL_SSL_WAIT_HS | CO_FL_ACCEPT_PROXY,
 
 	/* when any of these flags is set, polling is defined by socket-layer
 	 * operations, as opposed to data-layer. Transport is explicitly not
@@ -131,6 +135,8 @@ enum {
 	 * as DATA or SOCK on some implementations.
 	 */
 	CO_FL_POLL_SOCK     = CO_FL_HANDSHAKE | CO_FL_WAIT_L4_CONN | CO_FL_WAIT_L6_CONN,
+
+	/* unused : 0x10000000, 0x20000000, 0x40000000 */
 
 	/* This last flag indicates that the transport layer is used (for instance
 	 * by logs) and must not be cleared yet. The last call to conn_xprt_close()
@@ -230,24 +236,27 @@ struct conn_src {
 /* This structure describes a connection with its methods and data.
  * A connection may be performed to proxy or server via a local or remote
  * socket, and can also be made to an internal applet. It can support
- * several transport schemes (applet, raw, ssl, ...). It can support several
+ * several transport schemes (raw, ssl, ...). It can support several
  * connection control schemes, generally a protocol for socket-oriented
  * connections, but other methods for applets.
  */
 struct connection {
+	enum obj_type obj_type;       /* differentiates connection from applet context */
+	unsigned char err_code;       /* CO_ER_* */
+	signed short send_proxy_ofs;  /* <0 = offset to (re)send from the end, >0 = send all */
+	unsigned int flags;           /* CO_FL_* */
 	const struct protocol *ctrl;  /* operations at the socket layer */
 	const struct xprt_ops *xprt;  /* operations at the transport layer */
-	const struct data_cb  *data;  /* data layer callbacks */
-	unsigned int flags;           /* CO_FL_* */
-	int xprt_st;                  /* transport layer state, initialized to zero */
+	const struct data_cb  *data;  /* data layer callbacks. Must be set before xprt->init() */
 	void *xprt_ctx;               /* general purpose pointer, initialized to NULL */
 	void *owner;                  /* pointer to upper layer's entity (eg: stream interface) */
+	int xprt_st;                  /* transport layer state, initialized to zero */
+
 	union {                       /* definitions which depend on connection type */
 		struct {              /*** information used by socket-based connections ***/
 			int fd;       /* file descriptor for a stream driver when known */
 		} sock;
 	} t;
-	unsigned int err_code;        /* CO_ER_* */
 	enum obj_type *target;        /* the target to connect to (server, proxy, applet, ...) */
 	struct {
 		struct sockaddr_storage from;	/* client address, or address to spoof when connecting to the server */

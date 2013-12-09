@@ -266,6 +266,23 @@ static const char *fetch_ckp_names[SMP_CKP_ENTRIES] = {
 	[SMP_CKP_FE_LOG_END] = "logs",
 };
 
+/* This function returns the type of the data returned by the sample_expr.
+ * It assumes that the <expr> and all of its converters are properly
+ * initialized.
+ */
+inline
+int smp_expr_output_type(struct sample_expr *expr)
+{
+	struct sample_conv_expr *smp_expr;
+
+	if (!LIST_ISEMPTY(&expr->conv_exprs)) {
+		smp_expr = LIST_PREV(&expr->conv_exprs, struct sample_conv_expr *, list);
+		return smp_expr->conv->out_type;
+	}
+	return expr->fetch->out_type;
+}
+
+
 /* fill the trash with a comma-delimited list of source names for the <use> bit
  * field which must be composed of a non-null set of SMP_USE_* flags. The return
  * value is the pointer to the string in the trash buffer.
@@ -380,6 +397,7 @@ struct sample_conv *find_sample_conv(const char *kw, int len)
 static int c_ip2int(struct sample *smp)
 {
 	smp->data.uint = ntohl(smp->data.ipv4.s_addr);
+	smp->type = SMP_T_UINT;
 	return 1;
 }
 
@@ -392,6 +410,7 @@ static int c_ip2str(struct sample *smp)
 
 	trash->len = strlen(trash->str);
 	smp->data.str = *trash;
+	smp->type = SMP_T_STR;
 
 	return 1;
 }
@@ -399,6 +418,7 @@ static int c_ip2str(struct sample *smp)
 static int c_ip2ipv6(struct sample *smp)
 {
 	v4tov6(&smp->data.ipv6, &smp->data.ipv4);
+	smp->type = SMP_T_IPV6;
 	return 1;
 }
 
@@ -411,6 +431,7 @@ static int c_ipv62str(struct sample *smp)
 
 	trash->len = strlen(trash->str);
 	smp->data.str = *trash;
+	smp->type = SMP_T_STR;
 	return 1;
 }
 
@@ -424,6 +445,21 @@ static int c_ipv62ip(struct sample *smp)
 static int c_int2ip(struct sample *smp)
 {
 	smp->data.ipv4.s_addr = htonl(smp->data.uint);
+	smp->type = SMP_T_IPV4;
+	return 1;
+}
+
+static int c_str2addr(struct sample *smp)
+{
+	int ret;
+
+	if (!buf2ip(smp->data.str.str, smp->data.str.len, &smp->data.ipv4)) {
+		ret = inet_pton(AF_INET6, smp->data.str.str, &smp->data.ipv6);
+		if (ret)
+			smp->type = SMP_T_IPV6;
+		return ret;
+	}
+	smp->type = SMP_T_IPV4;
 	return 1;
 }
 
@@ -431,12 +467,18 @@ static int c_str2ip(struct sample *smp)
 {
 	if (!buf2ip(smp->data.str.str, smp->data.str.len, &smp->data.ipv4))
 		return 0;
+	smp->type = SMP_T_IPV4;
 	return 1;
 }
 
 static int c_str2ipv6(struct sample *smp)
 {
-	return inet_pton(AF_INET6, smp->data.str.str, &smp->data.ipv6);
+	int ret;
+
+	ret = inet_pton(AF_INET6, smp->data.str.str, &smp->data.ipv6);
+	if (ret)
+		smp->type = SMP_T_IPV6;
+	return ret;
 }
 
 static int c_bin2str(struct sample *smp)
@@ -452,6 +494,7 @@ static int c_bin2str(struct sample *smp)
 		trash->str[trash->len++] = hextab[c & 0xF];
 	}
 	smp->data.str = *trash;
+	smp->type = SMP_T_STR;
 	return 1;
 }
 
@@ -469,16 +512,33 @@ static int c_int2str(struct sample *smp)
 	trash->str = pos;
 	trash->len = strlen(pos);
 	smp->data.str = *trash;
+	smp->type = SMP_T_STR;
 	return 1;
 }
 
-static int c_datadup(struct sample *smp)
+static inline void _c_datadup(struct sample *smp)
 {
 	struct chunk *trash = get_trash_chunk();
 
 	trash->len = smp->data.str.len < trash->size ? smp->data.str.len : trash->size;
 	memcpy(trash->str, smp->data.str.str, trash->len);
 	smp->data.str = *trash;
+}
+
+static int c_datadup(struct sample *smp)
+{
+	_c_datadup(smp);
+	if (smp->type == SMP_T_CSTR)
+		smp->type = SMP_T_STR;
+	else
+		smp->type = SMP_T_BIN;
+	return 1;
+}
+
+static int c_bindup(struct sample *smp)
+{
+	_c_datadup(smp);
+	smp->type = SMP_T_BIN;
 	return 1;
 }
 
@@ -503,6 +563,7 @@ static int c_str2int(struct sample *smp)
 	}
 
 	smp->data.uint = ret;
+	smp->type = SMP_T_UINT;
 	return 1;
 }
 
@@ -512,18 +573,18 @@ static int c_str2int(struct sample *smp)
 /*           NULL pointer used for impossible sample casts       */
 /*****************************************************************/
 
-typedef int (*sample_cast_fct)(struct sample *smp);
-static sample_cast_fct sample_casts[SMP_TYPES][SMP_TYPES] = {
-/*            to:  BOOL       UINT       SINT       IPV4      IPV6        STR         BIN        CSTR        CBIN   */
-/* from: BOOL */ { c_none,    c_none,    c_none,    NULL,     NULL,       c_int2str,  NULL,      c_int2str,  NULL   },
-/*       UINT */ { c_none,    c_none,    c_none,    c_int2ip, NULL,       c_int2str,  NULL,      c_int2str,  NULL   },
-/*       SINT */ { c_none,    c_none,    c_none,    c_int2ip, NULL,       c_int2str,  NULL,      c_int2str,  NULL   },
-/*       IPV4 */ { NULL,      c_ip2int,  c_ip2int,  c_none,   c_ip2ipv6,  c_ip2str,   NULL,      c_ip2str,   NULL   },
-/*       IPV6 */ { NULL,      NULL,      NULL,      NULL,     c_none,     c_ipv62str, NULL,      c_ipv62str, NULL   },
-/*        STR */ { c_str2int, c_str2int, c_str2int, c_str2ip, c_str2ipv6, c_none,     c_none,    c_none,     c_none },
-/*        BIN */ { NULL,      NULL,      NULL,      NULL,     NULL,       c_bin2str,  c_none,    c_bin2str,  c_none },
-/*       CSTR */ { c_str2int, c_str2int, c_str2int, c_str2ip, c_str2ipv6, c_datadup,  c_datadup, c_none,     c_none },
-/*       CBIN */ { NULL,      NULL,      NULL,      NULL,     NULL,       c_bin2str,  c_datadup, c_bin2str,  c_none },
+sample_cast_fct sample_casts[SMP_TYPES][SMP_TYPES] = {
+/*            to:  BOOL       UINT       SINT       ADDR        IPV4      IPV6        STR         BIN        CSTR        CBIN    */
+/* from: BOOL */ { c_none,    c_none,    c_none,    NULL,       NULL,     NULL,       c_int2str,  NULL,      c_int2str,  NULL,   },
+/*       UINT */ { c_none,    c_none,    c_none,    c_int2ip,   c_int2ip, NULL,       c_int2str,  NULL,      c_int2str,  NULL,   },
+/*       SINT */ { c_none,    c_none,    c_none,    c_int2ip,   c_int2ip, NULL,       c_int2str,  NULL,      c_int2str,  NULL,   },
+/*       ADDR */ { NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       NULL,       NULL,      NULL,       NULL,   },
+/*       IPV4 */ { NULL,      c_ip2int,  c_ip2int,  c_none,     c_none,   c_ip2ipv6,  c_ip2str,   NULL,      c_ip2str,   NULL,   },
+/*       IPV6 */ { NULL,      NULL,      NULL,      c_none,     NULL,     c_none,     c_ipv62str, NULL,      c_ipv62str, NULL,   },
+/*        STR */ { c_str2int, c_str2int, c_str2int, c_str2addr, c_str2ip, c_str2ipv6, c_none,     c_none,    c_none,     c_none, },
+/*        BIN */ { NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       c_bin2str,  c_none,    c_bin2str,  c_none, },
+/*       CSTR */ { c_str2int, c_str2int, c_str2int, c_str2addr, c_str2ip, c_str2ipv6, c_datadup,  c_bindup,  c_none,     c_none, },
+/*       CBIN */ { NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       c_bin2str,  c_datadup, c_bin2str,  c_none, },
 };
 
 /*
@@ -551,7 +612,7 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 	for (endw = begw; *endw && *endw != '(' && *endw != ','; endw++);
 
 	if (endw == begw) {
-		snprintf(err, err_size, "missing fetch method.");
+		snprintf(err, err_size, "missing fetch method");
 		goto out_error;
 	}
 
@@ -560,7 +621,7 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 
 	fetch = find_sample_fetch(begw, endw - begw);
 	if (!fetch) {
-		snprintf(err, err_size, "unknown fetch method '%s'.", fkw);
+		snprintf(err, err_size, "unknown fetch method '%s'", fkw);
 		goto out_error;
 	}
 
@@ -570,7 +631,7 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 		while (*endt && *endt != ')')
 			endt++;
 		if (*endt != ')') {
-			snprintf(err, err_size, "syntax error: missing ')' after fetch keyword '%s'.", fkw);
+			snprintf(err, err_size, "syntax error: missing ')' after fetch keyword '%s'", fkw);
 			goto out_error;
 		}
 	}
@@ -582,7 +643,7 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 	 */
 
 	if (fetch->out_type >= SMP_TYPES) {
-		snprintf(err, err_size, "returns type of fetch method '%s' is unknown.", fkw);
+		snprintf(err, err_size, "returns type of fetch method '%s' is unknown", fkw);
 		goto out_error;
 	}
 	prev_type = fetch->out_type;
@@ -600,14 +661,14 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 		int err_arg;
 
 		if (!fetch->arg_mask) {
-			snprintf(err, err_size, "fetch method '%s' does not support any args.", fkw);
+			snprintf(err, err_size, "fetch method '%s' does not support any args", fkw);
 			goto out_error;
 		}
 
 		al->kw = expr->fetch->kw;
 		al->conv = NULL;
 		if (make_arg_list(endw + 1, endt - endw - 1, fetch->arg_mask, &expr->arg_p, &err_msg, NULL, &err_arg, al) < 0) {
-			snprintf(err, err_size, "invalid arg %d in fetch method '%s' : %s.", err_arg+1, fkw, err_msg);
+			snprintf(err, err_size, "invalid arg %d in fetch method '%s' : %s", err_arg+1, fkw, err_msg);
 			free(err_msg);
 			goto out_error;
 		}
@@ -616,13 +677,13 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 			expr->arg_p = empty_arg_list;
 
 		if (fetch->val_args && !fetch->val_args(expr->arg_p, &err_msg)) {
-			snprintf(err, err_size, "invalid args in fetch method '%s' : %s.", fkw, err_msg);
+			snprintf(err, err_size, "invalid args in fetch method '%s' : %s", fkw, err_msg);
 			free(err_msg);
 			goto out_error;
 		}
 	}
 	else if (ARGM(fetch->arg_mask)) {
-		snprintf(err, err_size, "missing args for fetch method '%s'.", fkw);
+		snprintf(err, err_size, "missing args for fetch method '%s'", fkw);
 		goto out_error;
 	}
 
@@ -646,9 +707,9 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 
 		if (*endt && *endt != ',') {
 			if (ckw)
-				snprintf(err, err_size, "missing comma after conv keyword '%s'.", ckw);
+				snprintf(err, err_size, "missing comma after conv keyword '%s'", ckw);
 			else
-				snprintf(err, err_size, "missing comma after fetch keyword '%s'.", fkw);
+				snprintf(err, err_size, "missing comma after fetch keyword '%s'", fkw);
 			goto out_error;
 		}
 
@@ -675,7 +736,7 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 			/* we found an isolated keyword that we don't know, it's not ours */
 			if (begw == str[*idx])
 				break;
-			snprintf(err, err_size, "unknown conv method '%s'.", ckw);
+			snprintf(err, err_size, "unknown conv method '%s'", ckw);
 			goto out_error;
 		}
 
@@ -685,19 +746,19 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 			while (*endt && *endt != ')')
 				endt++;
 			if (*endt != ')') {
-				snprintf(err, err_size, "syntax error: missing ')' after conv keyword '%s'.", ckw);
+				snprintf(err, err_size, "syntax error: missing ')' after conv keyword '%s'", ckw);
 				goto out_error;
 			}
 		}
 
 		if (conv->in_type >= SMP_TYPES || conv->out_type >= SMP_TYPES) {
-			snprintf(err, err_size, "returns type of conv method '%s' is unknown.", ckw);
+			snprintf(err, err_size, "returns type of conv method '%s' is unknown", ckw);
 			goto out_error;
 		}
 
 		/* If impossible type conversion */
 		if (!sample_casts[prev_type][conv->in_type]) {
-			snprintf(err, err_size, "conv method '%s' cannot be applied.", ckw);
+			snprintf(err, err_size, "conv method '%s' cannot be applied", ckw);
 			goto out_error;
 		}
 
@@ -714,14 +775,14 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 			int err_arg;
 
 			if (!conv->arg_mask) {
-				snprintf(err, err_size, "conv method '%s' does not support any args.", ckw);
+				snprintf(err, err_size, "conv method '%s' does not support any args", ckw);
 				goto out_error;
 			}
 
 			al->kw = expr->fetch->kw;
 			al->conv = conv_expr->conv->kw;
 			if (make_arg_list(endw + 1, endt - endw - 1, conv->arg_mask, &conv_expr->arg_p, &err_msg, NULL, &err_arg, al) < 0) {
-				snprintf(err, err_size, "invalid arg %d in conv method '%s' : %s.", err_arg+1, ckw, err_msg);
+				snprintf(err, err_size, "invalid arg %d in conv method '%s' : %s", err_arg+1, ckw, err_msg);
 				free(err_msg);
 				goto out_error;
 			}
@@ -729,14 +790,14 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 			if (!conv_expr->arg_p)
 				conv_expr->arg_p = empty_arg_list;
 
-			if (conv->val_args && !conv->val_args(conv_expr->arg_p, &err_msg)) {
-				snprintf(err, err_size, "invalid args in conv method '%s' : %s.", ckw, err_msg);
+			if (conv->val_args && !conv->val_args(conv_expr->arg_p, conv, &err_msg)) {
+				snprintf(err, err_size, "invalid args in conv method '%s' : %s", ckw, err_msg);
 				free(err_msg);
 				goto out_error;
 			}
 		}
 		else if (ARGM(conv->arg_mask)) {
-			snprintf(err, err_size, "missing args for conv method '%s'.", ckw);
+			snprintf(err, err_size, "missing args for conv method '%s'", ckw);
 			goto out_error;
 		}
 	}
@@ -778,9 +839,6 @@ struct sample *sample_process(struct proxy *px, struct session *l4, void *l7,
 	if (!expr->fetch->process(px, l4, l7, opt, expr->arg_p, p, expr->fetch->kw))
 		return NULL;
 
-	if ((p->flags & SMP_F_MAY_CHANGE) && !(opt & SMP_OPT_FINAL))
-		return NULL; /* we can only use stable samples */
-
 	list_for_each_entry(conv_expr, &expr->conv_exprs, list) {
 		/* we want to ensure that p->type can be casted into
 		 * conv_expr->conv->in_type. We have 3 possibilities :
@@ -797,8 +855,6 @@ struct sample *sample_process(struct proxy *px, struct session *l4, void *l7,
 
 		/* OK cast succeeded */
 
-		/* force the output type after a cast */
-		p->type = conv_expr->conv->in_type;
 		if (!conv_expr->conv->process(conv_expr->arg_p, p))
 			return NULL;
 	}
@@ -842,6 +898,7 @@ int smp_resolve_args(struct proxy *p)
 		case ARGC_HRQ: where = "in http-request header format string in"; break;
 		case ARGC_HRS: where = "in http-response header format string in"; break;
 		case ARGC_UIF: where = "in unique-id-format string in"; break;
+		case ARGC_RDR: where = "in redirect format string in"; break;
 		case ARGC_ACL: ctx = "ACL keyword"; break;
 		}
 

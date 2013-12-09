@@ -35,6 +35,7 @@ enum {
 	SMP_T_BOOL = 0,  /* boolean */
 	SMP_T_UINT,      /* unsigned 32bits integer type */
 	SMP_T_SINT,      /* signed 32bits integer type */
+	SMP_T_ADDR,      /* ipv4 or ipv6, only used for input type compatibility */
 	SMP_T_IPV4,      /* ipv4 type */
 	SMP_T_IPV6,      /* ipv6 type */
 	SMP_T_STR,       /* char string type */
@@ -236,6 +237,18 @@ struct sample {
 	union smp_ctx ctx;
 };
 
+/* Used to store sample constant */
+struct sample_storage {
+	int type;                 /* SMP_T_* */
+	union {
+		unsigned int    uint;  /* used for unsigned 32bits integers and booleans */
+		int             sint;  /* used for signed 32bits integers */
+		struct in_addr  ipv4;  /* used for ipv4 addresses */
+		struct in6_addr ipv6;  /* used for ipv6 addresses */
+		struct chunk    str;   /* used for char strings or buffers */
+	} data;                        /* sample data */
+};
+
 /* Descriptor for a sample conversion */
 struct sample_conv {
 	const char *kw;                           /* configuration keyword  */
@@ -243,9 +256,11 @@ struct sample_conv {
 		       struct sample *smp);       /* process function */
 	unsigned int arg_mask;                    /* arguments (ARG*()) */
 	int (*val_args)(struct arg *arg_p,
+	                struct sample_conv *smp_conv,
 			char **err_msg);          /* argument validation function */
 	unsigned int in_type;                     /* expected input sample type */
 	unsigned int out_type;                    /* output sample type */
+	unsigned int private;                     /* private values. only used by maps */
 };
 
 /* sample conversion expression */
@@ -292,5 +307,8 @@ struct sample_conv_kw_list {
 	struct list list;                         /* head of sample conversion keyword list */
 	struct sample_conv kw[VAR_ARRAY];         /* array of sample conversion descriptors */
 };
+
+typedef int (*sample_cast_fct)(struct sample *smp);
+extern sample_cast_fct sample_casts[SMP_TYPES][SMP_TYPES];
 
 #endif /* _TYPES_SAMPLE_H */

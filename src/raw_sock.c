@@ -74,6 +74,12 @@ int raw_sock_to_pipe(struct connection *conn, struct pipe *pipe, unsigned int co
 	int ret;
 	int retval = 0;
 
+
+	if (!(conn->flags & CO_FL_CTRL_READY))
+		return 0;
+
+	errno = 0;
+
 	/* Under Linux, if FD_POLL_HUP is set, we have reached the end.
 	 * Since older splice() implementations were buggy and returned
 	 * EAGAIN on end of read, let's bypass the call to splice() now.
@@ -85,7 +91,8 @@ int raw_sock_to_pipe(struct connection *conn, struct pipe *pipe, unsigned int co
 
 		/* report error on POLL_ERR before connection establishment */
 		if ((fdtab[conn->t.sock.fd].ev & FD_POLL_ERR) && (conn->flags & CO_FL_WAIT_L4_CONN)) {
-			conn->flags |= CO_FL_ERROR;
+			conn->flags |= CO_FL_ERROR | CO_FL_SOCK_RD_SH | CO_FL_SOCK_WR_SH;
+			errno = 0; /* let the caller do a getsockopt() if it wants it */
 			return retval;
 		}
 	}
@@ -186,6 +193,9 @@ int raw_sock_from_pipe(struct connection *conn, struct pipe *pipe)
 {
 	int ret, done;
 
+	if (!(conn->flags & CO_FL_CTRL_READY))
+		return 0;
+
 	done = 0;
 	while (pipe->data) {
 		ret = splice(pipe->cons, NULL, conn->t.sock.fd, NULL, pipe->data,
@@ -223,11 +233,18 @@ int raw_sock_from_pipe(struct connection *conn, struct pipe *pipe)
  * empty). The caller is responsible for taking care of those events and
  * avoiding the call if inappropriate. The function does not call the
  * connection's polling update function, so the caller is responsible for this.
+ * errno is cleared before starting so that the caller knows that if it spots an
+ * error without errno, it's pending and can be retrieved via getsockopt(SO_ERROR).
  */
 static int raw_sock_to_buf(struct connection *conn, struct buffer *buf, int count)
 {
 	int ret, done = 0;
 	int try = count;
+
+	if (!(conn->flags & CO_FL_CTRL_READY))
+		return 0;
+
+	errno = 0;
 
 	if (unlikely(!(fdtab[conn->t.sock.fd].ev & FD_POLL_IN))) {
 		/* stop here if we reached the end of data */
@@ -236,7 +253,7 @@ static int raw_sock_to_buf(struct connection *conn, struct buffer *buf, int coun
 
 		/* report error on POLL_ERR before connection establishment */
 		if ((fdtab[conn->t.sock.fd].ev & FD_POLL_ERR) && (conn->flags & CO_FL_WAIT_L4_CONN)) {
-			conn->flags |= CO_FL_ERROR;
+			conn->flags |= CO_FL_ERROR | CO_FL_SOCK_RD_SH | CO_FL_SOCK_WR_SH;
 			return done;
 		}
 	}
@@ -284,7 +301,7 @@ static int raw_sock_to_buf(struct connection *conn, struct buffer *buf, int coun
 			break;
 		}
 		else if (errno != EINTR) {
-			conn->flags |= CO_FL_ERROR;
+			conn->flags |= CO_FL_ERROR | CO_FL_SOCK_RD_SH | CO_FL_SOCK_WR_SH;
 			break;
 		}
 	}
@@ -305,7 +322,7 @@ static int raw_sock_to_buf(struct connection *conn, struct buffer *buf, int coun
 	 * an error without checking.
 	 */
 	if (unlikely(fdtab[conn->t.sock.fd].ev & FD_POLL_ERR))
-		conn->flags |= CO_FL_ERROR;
+		conn->flags |= CO_FL_ERROR | CO_FL_SOCK_RD_SH | CO_FL_SOCK_WR_SH;
 	return done;
 }
 
@@ -323,6 +340,9 @@ static int raw_sock_to_buf(struct connection *conn, struct buffer *buf, int coun
 static int raw_sock_from_buf(struct connection *conn, struct buffer *buf, int flags)
 {
 	int ret, try, done, send_flag;
+
+	if (!(conn->flags & CO_FL_CTRL_READY))
+		return 0;
 
 	done = 0;
 	/* send the largest possible block. For this we perform only one call
@@ -359,7 +379,7 @@ static int raw_sock_from_buf(struct connection *conn, struct buffer *buf, int fl
 			break;
 		}
 		else if (errno != EINTR) {
-			conn->flags |= CO_FL_ERROR;
+			conn->flags |= CO_FL_ERROR | CO_FL_SOCK_RD_SH | CO_FL_SOCK_WR_SH;
 			break;
 		}
 	}

@@ -117,71 +117,66 @@
  */
 
 /* Possible states while parsing HTTP messages (request|response) */
-#define HTTP_MSG_RQBEFORE      0 // request: leading LF, before start line
-#define HTTP_MSG_RQBEFORE_CR   1 // request: leading CRLF, before start line
+enum ht_state {
+	HTTP_MSG_RQBEFORE     =  0, // request: leading LF, before start line
+	HTTP_MSG_RQBEFORE_CR  =  1, // request: leading CRLF, before start line
+	/* these ones define a request start line */
+	HTTP_MSG_RQMETH       =  2, // parsing the Method
+	HTTP_MSG_RQMETH_SP    =  3, // space(s) after the Method
+	HTTP_MSG_RQURI        =  4, // parsing the Request URI
+	HTTP_MSG_RQURI_SP     =  5, // space(s) after the Request URI
+	HTTP_MSG_RQVER        =  6, // parsing the Request Version
+	HTTP_MSG_RQLINE_END   =  7, // end of request line (CR or LF)
 
-/* these ones define a request start line */
-#define HTTP_MSG_RQMETH        2 // parsing the Method
-#define HTTP_MSG_RQMETH_SP     3 // space(s) after the Method
-#define HTTP_MSG_RQURI         4 // parsing the Request URI
-#define HTTP_MSG_RQURI_SP      5 // space(s) after the Request URI
-#define HTTP_MSG_RQVER         6 // parsing the Request Version
-#define HTTP_MSG_RQLINE_END    7 // end of request line (CR or LF)
+	HTTP_MSG_RPBEFORE     =  8, // response: leading LF, before start line
+	HTTP_MSG_RPBEFORE_CR  =  9, // response: leading CRLF, before start line
 
-#define HTTP_MSG_RPBEFORE      8 // response: leading LF, before start line
-#define HTTP_MSG_RPBEFORE_CR   9 // response: leading CRLF, before start line
+	/* these ones define a response start line */
+	HTTP_MSG_RPVER        = 10, // parsing the Response Version
+	HTTP_MSG_RPVER_SP     = 11, // space(s) after the Response Version
+	HTTP_MSG_RPCODE       = 12, // response code
+	HTTP_MSG_RPCODE_SP    = 13, // space(s) after the response code
+	HTTP_MSG_RPREASON     = 14, // response reason
+	HTTP_MSG_RPLINE_END   = 15, // end of response line (CR or LF)
 
-/* these ones define a response start line */
-#define HTTP_MSG_RPVER        10 // parsing the Response Version
-#define HTTP_MSG_RPVER_SP     11 // space(s) after the Response Version
-#define HTTP_MSG_RPCODE       12 // response code
-#define HTTP_MSG_RPCODE_SP    13 // space(s) after the response code
-#define HTTP_MSG_RPREASON     14 // response reason
-#define HTTP_MSG_RPLINE_END   15 // end of response line (CR or LF)
+	/* common header processing */
+	HTTP_MSG_HDR_FIRST    = 16, // waiting for first header or last CRLF (no LWS possible)
+	HTTP_MSG_HDR_NAME     = 17, // parsing header name
+	HTTP_MSG_HDR_COL      = 18, // parsing header colon
+	HTTP_MSG_HDR_L1_SP    = 19, // parsing header LWS (SP|HT) before value
+	HTTP_MSG_HDR_L1_LF    = 20, // parsing header LWS (LF) before value
+	HTTP_MSG_HDR_L1_LWS   = 21, // checking whether it's a new header or an LWS
+	HTTP_MSG_HDR_VAL      = 22, // parsing header value
+	HTTP_MSG_HDR_L2_LF    = 23, // parsing header LWS (LF) inside/after value
+	HTTP_MSG_HDR_L2_LWS   = 24, // checking whether it's a new header or an LWS
 
-/* common header processing */
+	HTTP_MSG_LAST_LF      = 25, // parsing last LF
 
-#define HTTP_MSG_HDR_FIRST    16 // waiting for first header or last CRLF (no LWS possible)
-#define HTTP_MSG_HDR_NAME     17 // parsing header name
-#define HTTP_MSG_HDR_COL      18 // parsing header colon
-#define HTTP_MSG_HDR_L1_SP    19 // parsing header LWS (SP|HT) before value
-#define HTTP_MSG_HDR_L1_LF    20 // parsing header LWS (LF) before value
-#define HTTP_MSG_HDR_L1_LWS   21 // checking whether it's a new header or an LWS
-#define HTTP_MSG_HDR_VAL      22 // parsing header value
-#define HTTP_MSG_HDR_L2_LF    23 // parsing header LWS (LF) inside/after value
-#define HTTP_MSG_HDR_L2_LWS   24 // checking whether it's a new header or an LWS
-
-#define HTTP_MSG_LAST_LF      25 // parsing last LF
-
-/* error state : must be before HTTP_MSG_BODY so that (>=BODY) always indicates
- * that data are being processed.
- */
-
-#define HTTP_MSG_ERROR        26 // an error occurred
-
-/* Body processing.
- * The state HTTP_MSG_BODY is a delimiter to know if we're waiting for headers
- * or body. All the sub-states below also indicate we're processing the body,
- * with some additional information.
- */
-#define HTTP_MSG_BODY         27 // parsing body at end of headers
-#define HTTP_MSG_100_SENT     28 // parsing body after a 100-Continue was sent
-#define HTTP_MSG_CHUNK_SIZE   29 // parsing the chunk size (RFC2616 #3.6.1)
-#define HTTP_MSG_DATA         30 // skipping data chunk / content-length data
-#define HTTP_MSG_CHUNK_CRLF   31 // skipping CRLF after data chunk
-#define HTTP_MSG_TRAILERS     32 // trailers (post-data entity headers)
-
-/* we enter this state when we've received the end of the current message */
-#define HTTP_MSG_DONE         33 // message end received, waiting for resync or close
-#define HTTP_MSG_CLOSING      34 // shutdown_w done, not all bytes sent yet
-#define HTTP_MSG_CLOSED       35 // shutdown_w done, all bytes sent
-#define HTTP_MSG_TUNNEL       36 // tunneled data after DONE
-
+	/* error state : must be before HTTP_MSG_BODY so that (>=BODY) always indicates
+	 * that data are being processed.
+	 */
+	HTTP_MSG_ERROR        = 26, // an error occurred
+	/* Body processing.
+	 * The state HTTP_MSG_BODY is a delimiter to know if we're waiting for headers
+	 * or body. All the sub-states below also indicate we're processing the body,
+	 * with some additional information.
+	 */
+	HTTP_MSG_BODY         = 27, // parsing body at end of headers
+	HTTP_MSG_100_SENT     = 28, // parsing body after a 100-Continue was sent
+	HTTP_MSG_CHUNK_SIZE   = 29, // parsing the chunk size (RFC2616 #3.6.1)
+	HTTP_MSG_DATA         = 30, // skipping data chunk / content-length data
+	HTTP_MSG_CHUNK_CRLF   = 31, // skipping CRLF after data chunk
+	HTTP_MSG_TRAILERS     = 32, // trailers (post-data entity headers)
+	/* we enter this state when we've received the end of the current message */
+	HTTP_MSG_DONE         = 33, // message end received, waiting for resync or close
+	HTTP_MSG_CLOSING      = 34, // shutdown_w done, not all bytes sent yet
+	HTTP_MSG_CLOSED       = 35, // shutdown_w done, all bytes sent
+	HTTP_MSG_TUNNEL       = 36, // tunneled data after DONE
+} __attribute__((packed));
 
 /*
  * HTTP message status flags (msg->flags)
  */
-
 #define HTTP_MSGF_CNT_LEN     0x00000001  /* content-length was found in the message */
 #define HTTP_MSGF_TE_CHNK     0x00000002  /* transfer-encoding: chunked was found */
 
@@ -217,7 +212,7 @@ enum {
 };
 
 /* Known HTTP methods */
-typedef enum {
+enum http_meth_t {
 	HTTP_METH_NONE = 0,
 	HTTP_METH_OPTIONS,
 	HTTP_METH_GET,
@@ -228,14 +223,14 @@ typedef enum {
 	HTTP_METH_TRACE,
 	HTTP_METH_CONNECT,
 	HTTP_METH_OTHER,
-} http_meth_t;
+} __attribute__((packed));
 
-enum {
+enum ht_auth_m {
 	HTTP_AUTH_WRONG		= -1,		/* missing or unknown */
 	HTTP_AUTH_UNKNOWN	= 0,
 	HTTP_AUTH_BASIC,
 	HTTP_AUTH_DIGEST,
-};
+} __attribute__((packed));
 
 /* actions for "http-request" */
 enum {
@@ -329,8 +324,9 @@ enum {
  * care for wrapping (no addition overflow nor subtract underflow).
  */
 struct http_msg {
-	unsigned int msg_state;                /* where we are in the current message parsing */
-	unsigned int flags;                    /* flags describing the message (HTTP version, ...) */
+	enum ht_state msg_state;               /* where we are in the current message parsing */
+	unsigned char flags;                   /* flags describing the message (HTTP version, ...) */
+	/* 6 bytes unused here */
 	struct channel *chn;                   /* pointer to the channel transporting the message */
 	unsigned int next;                     /* pointer to next byte to parse, relative to buf->p */
 	unsigned int sov;                      /* current header: start of value */
@@ -358,9 +354,10 @@ struct http_msg {
 };
 
 struct http_auth_data {
-	int method;			/* one of HTTP_AUTH_* */
-	struct chunk method_data;	/* points to the creditial part from 'Authorization:' header */
-	char *user, *pass;		/* extracted username & password */
+	enum ht_auth_m method;                /* one of HTTP_AUTH_* */
+	/* 7 bytes unused here */
+	struct chunk method_data;             /* points to the creditial part from 'Authorization:' header */
+	char *user, *pass;                    /* extracted username & password */
 };
 
 struct http_req_rule {
@@ -405,13 +402,13 @@ struct http_res_rule {
  * response message (which can be empty).
  */
 struct http_txn {
-	struct http_msg req;            /* HTTP request message */
 	struct hdr_idx hdr_idx;         /* array of header indexes (max: global.tune.max_http_hdr) */
-	unsigned int flags;             /* transaction flags */
-	http_meth_t meth;               /* HTTP method */
-
-	int status;                     /* HTTP status from the server, negative if from proxy */
 	struct http_msg rsp;            /* HTTP response message */
+	struct http_msg req;            /* HTTP request message */
+	unsigned int flags;             /* transaction flags */
+	enum http_meth_t meth;          /* HTTP method */
+	/* 1 unused byte here */
+	short status;                   /* HTTP status from the server, negative if from proxy */
 
 	char *uri;                      /* first line if log needed, NULL otherwise */
 	char *cli_cookie;               /* cookie presented by the client, in capture mode */
