@@ -61,12 +61,20 @@ enum pat_match_res {
 	PAT_MATCH = 3,           /* sample matched at least one pattern */
 };
 
+/* This enum describe the running mode of the function pat_parse_*().
+ * The lookup mode does not allocate memory. The compile mode allocate
+ * memory and create any data
+ */
+enum pat_usage {
+	PAT_U_LOOKUP,
+	PAT_U_COMPILE,
+};
+
 /* possible flags for expressions or patterns */
 enum {
 	PAT_F_IGNORE_CASE = 1 << 0,       /* ignore case */
 	PAT_F_FROM_FILE   = 1 << 1,       /* pattern comes from a file */
-	PAT_F_TREE_OK     = 1 << 2,       /* the pattern parser is allowed to build a tree */
-	PAT_F_TREE        = 1 << 3,       /* some patterns are arranged in a tree */
+	PAT_F_TREE        = 1 << 2,       /* some patterns are arranged in a tree */
 };
 
 /* ACL match methods */
@@ -113,6 +121,7 @@ struct pat_idx_elt {
 struct pattern {
 	struct list list;                       /* chaining */
 	int type;                               /* type of the ACL pattern (SMP_T_*) */
+	int expect_type;                        /* type of the expected sample (SMP_T_*) */
 	union {
 		int i;                          /* integer value */
 		struct {
@@ -135,7 +144,7 @@ struct pattern {
 	union {
 		void *ptr;              /* any data */
 		char *str;              /* any string  */
-		regex *reg;             /* a compiled regex */
+		struct my_regex *reg;   /* a compiled regex */
 	} ptr;                          /* indirect values, allocated */
 	void(*freeptrbuf)(void *ptr);	/* a destructor able to free objects from the ptr */
 	int len;                        /* data length when required  */
@@ -151,14 +160,15 @@ struct pattern {
  * are grouped together in order to optimize caching.
  */
 struct pattern_expr {
-	int (*parse)(const char **text, struct pattern *pattern, struct sample_storage *smp, int *opaque, char **err);
+	int (*parse)(const char **text, struct pattern *pattern, enum pat_usage usage, int *opaque, char **err);
 	enum pat_match_res (*match)(struct sample *smp, struct pattern *pattern);
 	struct list patterns;         /* list of acl_patterns */
 	struct eb_root pattern_tree;  /* may be used for lookup in large datasets */
 };
 
 extern char *pat_match_names[PAT_MATCH_NUM];
-extern int (*pat_parse_fcts[PAT_MATCH_NUM])(const char **, struct pattern *, struct sample_storage *, int *, char **);
+extern int (*pat_parse_fcts[PAT_MATCH_NUM])(const char **, struct pattern *, enum pat_usage, int *, char **);
 extern enum pat_match_res (*pat_match_fcts[PAT_MATCH_NUM])(struct sample *, struct pattern *);
+extern int pat_match_types[PAT_MATCH_NUM];
 
 #endif /* _TYPES_PATTERN_H */

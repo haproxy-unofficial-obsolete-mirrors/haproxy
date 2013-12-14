@@ -609,6 +609,7 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		if (global.tune.maxrewrite >= global.tune.bufsize / 2)
 			global.tune.maxrewrite = global.tune.bufsize / 2;
 		chunk_init(&trash, realloc(trash.str, global.tune.bufsize), global.tune.bufsize);
+		alloc_trash_buffers(global.tune.bufsize);
 	}
 	else if (!strcmp(args[0], "tune.maxrewrite")) {
 		if (*(args[1]) == 0) {
@@ -3110,9 +3111,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		}
 
 		curproxy->conf.args.ctx = ARGC_STK;
-		expr = sample_parse_expr(args, &myidx, trash.str, trash.size, &curproxy->conf.args);
+		expr = sample_parse_expr(args, &myidx, &errmsg, &curproxy->conf.args);
 		if (!expr) {
-			Alert("parsing [%s:%d] : '%s': %s\n", file, linenum, args[0], trash.str);
+			Alert("parsing [%s:%d] : '%s': %s\n", file, linenum, args[0], errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
@@ -4720,6 +4721,7 @@ stats_error_parsing:
 			else if (!defsrv && !strcmp(args[cur_arg], "disabled")) {
 				newsrv->state |= SRV_MAINTAIN;
 				newsrv->state &= ~SRV_RUNNING;
+				newsrv->check.state |= CHK_ST_PAUSED;
 				newsrv->check.health = 0;
 				newsrv->agent.health = 0;
 				cur_arg += 1;
@@ -5122,7 +5124,7 @@ stats_error_parsing:
 				goto out;
 			}
 
-			newsrv->state |= SRV_CHECKED;
+			newsrv->check.state |= CHK_ST_CONFIGURED | CHK_ST_ENABLED;
 		}
 
 		if (do_agent) {
@@ -5144,7 +5146,7 @@ stats_error_parsing:
 				goto out;
 			}
 
-			newsrv->state |= SRV_AGENT_CHECKED;
+			newsrv->agent.state |= CHK_ST_CONFIGURED | CHK_ST_ENABLED | CHK_ST_AGENT;
 		}
 
 		if (!defsrv) {
@@ -7015,7 +7017,7 @@ out_uri_auth_compat:
 					goto next_srv;
 				}
 
-				if (!(srv->state & SRV_CHECKED)) {
+				if (!(srv->check.state & CHK_ST_CONFIGURED)) {
 					Alert("config : %s '%s', server '%s': unable to use %s/%s for "
 						"tracking as it does not have checks enabled.\n",
 						proxy_type_str(curproxy), curproxy->id,
@@ -7036,15 +7038,14 @@ out_uri_auth_compat:
 
 				/* if the other server is forced disabled, we have to do the same here */
 				if (srv->state & SRV_MAINTAIN) {
-					newsrv->state |= SRV_MAINTAIN;
 					newsrv->state &= ~SRV_RUNNING;
 					newsrv->check.health = 0;
 					newsrv->agent.health = 0;
 				}
 
 				newsrv->track = srv;
-				newsrv->tracknext = srv->tracknext;
-				srv->tracknext = newsrv;
+				newsrv->tracknext = srv->trackers;
+				srv->trackers = newsrv;
 
 				free(newsrv->trackit);
 				newsrv->trackit = NULL;

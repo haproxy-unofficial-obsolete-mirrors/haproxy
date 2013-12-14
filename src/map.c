@@ -19,13 +19,14 @@
 #include <types/map.h>
 
 #include <proto/arg.h>
+#include <proto/map.h>
 #include <proto/pattern.h>
 #include <proto/sample.h>
 
 struct list maps = LIST_HEAD_INIT(maps); /* list of struct map_reference */
 
 /* This function return existing map reference or return NULL. */
-static struct map_reference *map_get_reference(const char *reference)
+struct map_reference *map_get_reference(const char *reference)
 {
 	struct map_reference *ref;
 
@@ -39,7 +40,7 @@ static struct map_reference *map_get_reference(const char *reference)
 /* Parse an IPv4 address and store it into the sample.
  * The output type is IPV4.
  */
-static int map_parse_ip(const char *text, struct sample_storage *smp)
+int map_parse_ip(const char *text, struct sample_storage *smp)
 {
 	if (!buf2ip(text, strlen(text), &smp->data.ipv4))
 		return 0;
@@ -50,7 +51,7 @@ static int map_parse_ip(const char *text, struct sample_storage *smp)
 /* Parse an IPv6 address and store it into the sample.
  * The output type is IPV6.
  */
-static int map_parse_ip6(const char *text, struct sample_storage *smp)
+int map_parse_ip6(const char *text, struct sample_storage *smp)
 {
 	if (!buf2ip6(text, strlen(text), &smp->data.ipv6))
 		return 0;
@@ -62,7 +63,7 @@ static int map_parse_ip6(const char *text, struct sample_storage *smp)
  * string must be left in memory because we return a direct memory reference.
  * The output type is CSTR.
  */
-static int map_parse_str(const char *text, struct sample_storage *smp)
+int map_parse_str(const char *text, struct sample_storage *smp)
 {
 	/* The loose of the "const" is balanced by the SMP_T_CSTR type */
 	smp->data.str.str = (char *)text;
@@ -76,7 +77,7 @@ static int map_parse_str(const char *text, struct sample_storage *smp)
  * number is negative, or UINT if it is positive or null. The function returns
  * zero (error) if the number is too large.
  */
-static int map_parse_int(const char *text, struct sample_storage *smp)
+int map_parse_int(const char *text, struct sample_storage *smp)
 {
 	long long int value;
 	char *error;
@@ -306,6 +307,7 @@ static int map_parse_and_index(struct map_descriptor *desc,
                                char **err)
 {
 	struct sample_storage *smp;
+	const char *args[2];
 
 	/* use new smp for storing value */
 	smp = calloc(1, sizeof(*smp));
@@ -319,8 +321,10 @@ static int map_parse_and_index(struct map_descriptor *desc,
 		return 0;
 	}
 
-	/* read and convert key */
-	if (!pattern_register(desc->pat, ent->key, smp, pattern, patflags, err))
+	/* register key */
+	args[0] = ent->key;
+	args[1] = "";
+	if (!pattern_register(desc->pat, args, smp, pattern, patflags, err))
 		return 0;
 
 	return 1;
@@ -368,7 +372,8 @@ static int sample_load_map(struct arg *arg, struct sample_conv *conv, char **err
 	else {
 		list_for_each_entry(desc, &ref->maps, list)
 			if (desc->conv->in_type == conv->in_type &&
-			    desc->conv->out_type == conv->out_type)
+			    desc->conv->out_type == conv->out_type &&
+			    desc->conv->private == conv->private)
 				break;
 		if (&desc->list !=  &ref->maps)
 			pat = desc->pat;
@@ -409,17 +414,7 @@ static int sample_load_map(struct arg *arg, struct sample_conv *conv, char **err
 
 		/* set the match method */
 		desc->pat->match = pat_match_fcts[conv->private];
-
-		/* set the input parse method */
-		switch (desc->conv->in_type) {
-		case SMP_T_STR:  desc->pat->parse = pat_parse_fcts[PAT_MATCH_STR]; break;
-		case SMP_T_UINT: desc->pat->parse = pat_parse_fcts[PAT_MATCH_INT]; break;
-		case SMP_T_ADDR: desc->pat->parse = pat_parse_fcts[PAT_MATCH_IP];  break;
-		default:
-			memprintf(err, "map: internal haproxy error: no default parse case for the input type <%d>.",
-			          conv->in_type);
-			return 0;
-		}
+		desc->pat->parse = pat_parse_fcts[conv->private];
 
 		/* parse each line of the file */
 		pattern = NULL;
@@ -473,7 +468,7 @@ static int sample_conv_map(const struct arg *arg_p, struct sample *smp)
 	desc = arg_p[0].data.map;
 
 	/* Execute the match function. */
-	ret = pattern_exec_match(desc->pat, smp, &sample);
+	ret = pattern_exec_match(desc->pat, smp, &sample, NULL, NULL);
 	if (ret != PAT_MATCH) {
 		if (!desc->def)
 			return 0;

@@ -451,13 +451,11 @@ static int c_int2ip(struct sample *smp)
 
 static int c_str2addr(struct sample *smp)
 {
-	int ret;
-
 	if (!buf2ip(smp->data.str.str, smp->data.str.len, &smp->data.ipv4)) {
-		ret = inet_pton(AF_INET6, smp->data.str.str, &smp->data.ipv6);
-		if (ret)
-			smp->type = SMP_T_IPV6;
-		return ret;
+		if (!buf2ip6(smp->data.str.str, smp->data.str.len, &smp->data.ipv6))
+			return 0;
+		smp->type = SMP_T_IPV6;
+		return 1;
 	}
 	smp->type = SMP_T_IPV4;
 	return 1;
@@ -473,12 +471,10 @@ static int c_str2ip(struct sample *smp)
 
 static int c_str2ipv6(struct sample *smp)
 {
-	int ret;
-
-	ret = inet_pton(AF_INET6, smp->data.str.str, &smp->data.ipv6);
-	if (ret)
-		smp->type = SMP_T_IPV6;
-	return ret;
+	if (!buf2ip6(smp->data.str.str, smp->data.str.len, &smp->data.ipv6))
+		return 0;
+	smp->type = SMP_T_IPV6;
+	return 1;
 }
 
 static int c_bin2str(struct sample *smp)
@@ -593,7 +589,7 @@ sample_cast_fct sample_casts[SMP_TYPES][SMP_TYPES] = {
  * Returns a pointer on allocated sample expression structure.
  * The caller must have set al->ctx.
  */
-struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_size, struct arg_list *al)
+struct sample_expr *sample_parse_expr(char **str, int *idx, char **err_msg, struct arg_list *al)
 {
 	const char *begw; /* beginning of word */
 	const char *endw; /* end of word */
@@ -604,15 +600,13 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 	unsigned long prev_type;
 	char *fkw = NULL;
 	char *ckw = NULL;
-
-	/* prepare a generic message if any further snprintf() fails */
-	snprintf(err, err_size, "memory error.");
+	int err_arg;
 
 	begw = str[*idx];
 	for (endw = begw; *endw && *endw != '(' && *endw != ','; endw++);
 
 	if (endw == begw) {
-		snprintf(err, err_size, "missing fetch method");
+		memprintf(err_msg, "missing fetch method");
 		goto out_error;
 	}
 
@@ -621,29 +615,32 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 
 	fetch = find_sample_fetch(begw, endw - begw);
 	if (!fetch) {
-		snprintf(err, err_size, "unknown fetch method '%s'", fkw);
+		memprintf(err_msg, "unknown fetch method '%s'", fkw);
 		goto out_error;
 	}
 
 	endt = endw;
 	if (*endt == '(') {
-		/* look for the end of this term */
+		/* look for the end of this term and skip the opening parenthesis */
+		endt = ++endw;
 		while (*endt && *endt != ')')
 			endt++;
 		if (*endt != ')') {
-			snprintf(err, err_size, "syntax error: missing ')' after fetch keyword '%s'", fkw);
+			memprintf(err_msg, "missing closing ')' after arguments to fetch keyword '%s'", fkw);
 			goto out_error;
 		}
 	}
 
 	/* At this point, we have :
 	 *   - begw : beginning of the keyword
-	 *   - endw : end of the keyword (points to next delimiter or '(')
+	 *   - endw : end of the keyword, first character not part of keyword
+	 *            nor the opening parenthesis (so first character of args
+	 *            if present).
 	 *   - endt : end of the term (=endw or last parenthesis if args are present)
 	 */
 
 	if (fetch->out_type >= SMP_TYPES) {
-		snprintf(err, err_size, "returns type of fetch method '%s' is unknown", fkw);
+		memprintf(err_msg, "returns type of fetch method '%s' is unknown", fkw);
 		goto out_error;
 	}
 	prev_type = fetch->out_type;
@@ -656,34 +653,22 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 	expr->fetch = fetch;
 	expr->arg_p = empty_arg_list;
 
-	if (endt != endw) {
-		char *err_msg = NULL;
-		int err_arg;
-
-		if (!fetch->arg_mask) {
-			snprintf(err, err_size, "fetch method '%s' does not support any args", fkw);
-			goto out_error;
-		}
-
-		al->kw = expr->fetch->kw;
-		al->conv = NULL;
-		if (make_arg_list(endw + 1, endt - endw - 1, fetch->arg_mask, &expr->arg_p, &err_msg, NULL, &err_arg, al) < 0) {
-			snprintf(err, err_size, "invalid arg %d in fetch method '%s' : %s", err_arg+1, fkw, err_msg);
-			free(err_msg);
-			goto out_error;
-		}
-
-		if (!expr->arg_p)
-			expr->arg_p = empty_arg_list;
-
-		if (fetch->val_args && !fetch->val_args(expr->arg_p, &err_msg)) {
-			snprintf(err, err_size, "invalid args in fetch method '%s' : %s", fkw, err_msg);
-			free(err_msg);
-			goto out_error;
-		}
+	/* Note that we call the argument parser even with an empty string,
+	 * this allows it to automatically create entries for mandatory
+	 * implicit arguments (eg: local proxy name).
+	 */
+	al->kw = expr->fetch->kw;
+	al->conv = NULL;
+	if (make_arg_list(endw, endt - endw, fetch->arg_mask, &expr->arg_p, err_msg, NULL, &err_arg, al) < 0) {
+		memprintf(err_msg, "fetch method '%s' : %s", fkw, *err_msg);
+		goto out_error;
 	}
-	else if (ARGM(fetch->arg_mask)) {
-		snprintf(err, err_size, "missing args for fetch method '%s'", fkw);
+
+	if (!expr->arg_p) {
+		expr->arg_p = empty_arg_list;
+	}
+	else if (fetch->val_args && !fetch->val_args(expr->arg_p, err_msg)) {
+		memprintf(err_msg, "invalid args in fetch method '%s' : %s", fkw, *err_msg);
 		goto out_error;
 	}
 
@@ -707,9 +692,9 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 
 		if (*endt && *endt != ',') {
 			if (ckw)
-				snprintf(err, err_size, "missing comma after conv keyword '%s'", ckw);
+				memprintf(err_msg, "missing comma after conv keyword '%s'", ckw);
 			else
-				snprintf(err, err_size, "missing comma after fetch keyword '%s'", fkw);
+				memprintf(err_msg, "missing comma after fetch keyword '%s'", fkw);
 			goto out_error;
 		}
 
@@ -736,7 +721,7 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 			/* we found an isolated keyword that we don't know, it's not ours */
 			if (begw == str[*idx])
 				break;
-			snprintf(err, err_size, "unknown conv method '%s'", ckw);
+			memprintf(err_msg, "unknown conv method '%s'", ckw);
 			goto out_error;
 		}
 
@@ -746,19 +731,19 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 			while (*endt && *endt != ')')
 				endt++;
 			if (*endt != ')') {
-				snprintf(err, err_size, "syntax error: missing ')' after conv keyword '%s'", ckw);
+				memprintf(err_msg, "syntax error: missing ')' after conv keyword '%s'", ckw);
 				goto out_error;
 			}
 		}
 
 		if (conv->in_type >= SMP_TYPES || conv->out_type >= SMP_TYPES) {
-			snprintf(err, err_size, "returns type of conv method '%s' is unknown", ckw);
+			memprintf(err_msg, "returns type of conv method '%s' is unknown", ckw);
 			goto out_error;
 		}
 
 		/* If impossible type conversion */
 		if (!sample_casts[prev_type][conv->in_type]) {
-			snprintf(err, err_size, "conv method '%s' cannot be applied", ckw);
+			memprintf(err_msg, "conv method '%s' cannot be applied", ckw);
 			goto out_error;
 		}
 
@@ -771,33 +756,30 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_s
 		conv_expr->conv = conv;
 
 		if (endt != endw) {
-			char *err_msg = NULL;
 			int err_arg;
 
 			if (!conv->arg_mask) {
-				snprintf(err, err_size, "conv method '%s' does not support any args", ckw);
+				memprintf(err_msg, "conv method '%s' does not support any args", ckw);
 				goto out_error;
 			}
 
 			al->kw = expr->fetch->kw;
 			al->conv = conv_expr->conv->kw;
-			if (make_arg_list(endw + 1, endt - endw - 1, conv->arg_mask, &conv_expr->arg_p, &err_msg, NULL, &err_arg, al) < 0) {
-				snprintf(err, err_size, "invalid arg %d in conv method '%s' : %s", err_arg+1, ckw, err_msg);
-				free(err_msg);
+			if (make_arg_list(endw + 1, endt - endw - 1, conv->arg_mask, &conv_expr->arg_p, err_msg, NULL, &err_arg, al) < 0) {
+				memprintf(err_msg, "invalid arg %d in conv method '%s' : %s", err_arg+1, ckw, *err_msg);
 				goto out_error;
 			}
 
 			if (!conv_expr->arg_p)
 				conv_expr->arg_p = empty_arg_list;
 
-			if (conv->val_args && !conv->val_args(conv_expr->arg_p, conv, &err_msg)) {
-				snprintf(err, err_size, "invalid args in conv method '%s' : %s", ckw, err_msg);
-				free(err_msg);
+			if (conv->val_args && !conv->val_args(conv_expr->arg_p, conv, err_msg)) {
+				memprintf(err_msg, "invalid args in conv method '%s' : %s", ckw, *err_msg);
 				goto out_error;
 			}
 		}
 		else if (ARGM(conv->arg_mask)) {
-			snprintf(err, err_size, "missing args for conv method '%s'", ckw);
+			memprintf(err_msg, "missing args for conv method '%s'", ckw);
 			goto out_error;
 		}
 	}

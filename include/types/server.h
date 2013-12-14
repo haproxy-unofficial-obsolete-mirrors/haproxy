@@ -48,7 +48,7 @@
 #define SRV_BACKUP	0x0002	/* this server is a backup server */
 #define SRV_MAPPORTS	0x0004	/* this server uses mapped ports */
 /* unused: 0x0008 */
-#define SRV_CHECKED	0x0010	/* this server needs to be checked */
+/* unused: 0x0010 */
 #define SRV_GOINGDOWN	0x0020	/* this server says that it's going down (404) */
 #define SRV_WARMINGUP	0x0040	/* this server is warming up after a failure */
 #define SRV_MAINTAIN	0x0080	/* this server is in maintenance mode */
@@ -56,9 +56,6 @@
 /* unused: 0x0200, 0x0400 */
 #define SRV_SEND_PROXY	0x0800	/* this server talks the PROXY protocol */
 #define SRV_NON_STICK	0x1000	/* never add connections allocated to this server to a stick table */
-#define SRV_AGENT_CHECKED  0x2000  /* this server needs to be checked using an agent check.
-				    * This is run independently of the main check whose
-				    * presence is indicated by the SRV_CHECKED flag */
 
 /* function which act on servers need to return various errors */
 #define SRV_STATUS_OK       0   /* everything is OK. */
@@ -66,16 +63,6 @@
 #define SRV_STATUS_NOSRV    2   /* no server is available */
 #define SRV_STATUS_FULL     3   /* the/all server(s) are saturated */
 #define SRV_STATUS_QUEUED   4   /* the/all server(s) are saturated but the connection was queued */
-
-/* bits for s->result used for health-checks */
-#define SRV_CHK_UNKNOWN 0x0000   /* initialized to this by default */
-#define SRV_CHK_FAILED  0x0001   /* server check failed, flag has precedence over SRV_CHK_PASSED */
-#define SRV_CHK_PASSED  0x0002   /* server check succeeded unless FAILED is also set */
-#define SRV_CHK_DISABLE 0x0004   /* server returned a "disable" code */
-
-/* check flags */
-#define CHK_STATE_RUNNING	0x0001  /* this check is currently running */
-#define CHK_STATE_DISABLED	0x0002  /* this check is currently administratively disabled */
 
 /* various constants */
 #define SRV_UWGHT_RANGE 256
@@ -110,29 +97,6 @@ struct tree_occ {
 	struct eb32_node node;
 };
 
-struct check {
-	struct connection *conn;		/* connection state for health checks */
-
-	unsigned short port;			/* the port to use for the health checks */
-	struct buffer *bi, *bo;			/* input and output buffers to send/recv check */
-	struct task *task;			/* the task associated to the health check processing, NULL if disabled */
-	struct timeval start;			/* last health check start time */
-	long duration;				/* time in ms took to finish last health check */
-	short status, code;			/* check result, check code */
-	char desc[HCHK_DESC_LEN];		/* health check descritpion */
-	int use_ssl;				/* use SSL for health checks */
-	int send_proxy;				/* send a PROXY protocol header with checks */
-	struct tcpcheck_rule *current_step;     /* current step when using tcpcheck */
-	int inter, fastinter, downinter;        /* checks: time in milliseconds */
-	int result;				/* health-check result : SRV_CHK_* */
-	int state;				/* health-check result : CHK_* */
-	int health;				/* 0 to rise-1 = bad;
-						 * rise to rise+fall-1 = good */
-	int rise, fall;				/* time in iterations */
-	int type;				/* Check type, one of PR_O2_*_CHK */
-	struct server *server;			/* back-pointer to server */
-};
-
 struct server {
 	enum obj_type obj_type;                 /* object type == OBJ_TYPE_SERVER */
 	struct server *next;
@@ -158,7 +122,9 @@ struct server {
 
 	struct conn_src conn_src;               /* connection source settings */
 
-	struct server *tracknext, *track;	/* next server in a tracking list, tracked server */
+	struct server *track;                   /* the server we're currently tracking, if any */
+	struct server *trackers;                /* the list of servers tracking us, if any */
+	struct server *tracknext;               /* next server tracking <track> in <track>'s trackers list */
 	char *trackit;				/* temporary variable to make assignment deferrable */
 	int consecutive_errors;			/* current number of consecutive errors */
 	int consecutive_errors_limit;		/* number of consecutive errors that triggers an event */

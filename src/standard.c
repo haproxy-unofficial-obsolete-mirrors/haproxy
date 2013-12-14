@@ -1367,6 +1367,7 @@ int parse_binary(const char *source, char **binstr, int *binstrlen, char **err)
 	int len;
 	const char *p = source;
 	int i,j;
+	int alloc;
 
 	len = strlen(source);
 	if (len % 2) {
@@ -1375,12 +1376,24 @@ int parse_binary(const char *source, char **binstr, int *binstrlen, char **err)
 	}
 
 	len = len >> 1;
-	*binstrlen = len;
-	*binstr = calloc(len, sizeof(char));
+
 	if (!*binstr) {
-		memprintf(err, "out of memory while loading string pattern");
-		return 0;
+		*binstr = calloc(len, sizeof(char));
+		if (!*binstr) {
+			memprintf(err, "out of memory while loading string pattern");
+			return 0;
+		}
+		alloc = 1;
 	}
+	else {
+		if (*binstrlen < len) {
+			memprintf(err, "no space avalaible in the buffer. expect %d, provides %d",
+			          len, *binstrlen);
+			return 0;
+		}
+		alloc = 0;
+	}
+	*binstrlen = len;
 
 	i = j = 0;
 	while (j < len) {
@@ -1394,7 +1407,8 @@ int parse_binary(const char *source, char **binstr, int *binstrlen, char **err)
 
 bad_input:
 	memprintf(err, "an hex digit is expected (found '%c')", p[i-1]);
-	free(binstr);
+	if (alloc)
+		free(binstr);
 	return 0;
 }
 
@@ -1644,6 +1658,7 @@ unsigned int inetaddr_host_lim_ret(char *text, char *stop, char **ret)
  * or the number of chars read in case of success. Maybe this could be replaced
  * by one of the functions above. Also, apparently this function does not support
  * hosts above 255 and requires exactly 4 octets.
+ * The destination is only modified on success.
  */
 int buf2ip(const char *buf, size_t len, struct in_addr *dst)
 {
@@ -1695,21 +1710,23 @@ int buf2ip(const char *buf, size_t len, struct in_addr *dst)
 /* This function converts the string in <buf> of the len <len> to
  * struct in6_addr <dst> which must be allocated by the caller.
  * This function returns 1 in success case, otherwise zero.
+ * The destination is only modified on success.
  */
-#define MAX_IP6_LEN 45
 int buf2ip6(const char *buf, size_t len, struct in6_addr *dst)
 {
-	char null_term_ip6[MAX_IP6_LEN + 1];
+	char null_term_ip6[INET6_ADDRSTRLEN + 1];
+	struct in6_addr out;
 
-	if (len > MAX_IP6_LEN)
+	if (len > INET6_ADDRSTRLEN)
 		return 0;
 
 	memcpy(null_term_ip6, buf, len);
 	null_term_ip6[len] = '\0';
 
-	if (!inet_pton(AF_INET6, null_term_ip6, dst))
+	if (!inet_pton(AF_INET6, null_term_ip6, &out))
 		return 0;
 
+	*dst = out;
 	return 1;
 }
 

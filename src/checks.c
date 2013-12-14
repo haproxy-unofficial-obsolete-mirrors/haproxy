@@ -56,30 +56,30 @@ static int tcpcheck_get_step_id(struct server *);
 static void tcpcheck_main(struct connection *);
 
 static const struct check_status check_statuses[HCHK_STATUS_SIZE] = {
-	[HCHK_STATUS_UNKNOWN]	= { SRV_CHK_UNKNOWN,                   "UNK",     "Unknown" },
-	[HCHK_STATUS_INI]	= { SRV_CHK_UNKNOWN,                   "INI",     "Initializing" },
+	[HCHK_STATUS_UNKNOWN]	= { CHK_RES_UNKNOWN,  "UNK",     "Unknown" },
+	[HCHK_STATUS_INI]	= { CHK_RES_UNKNOWN,  "INI",     "Initializing" },
 	[HCHK_STATUS_START]	= { /* SPECIAL STATUS*/ },
 
-	[HCHK_STATUS_HANA]	= { SRV_CHK_FAILED,                    "HANA",    "Health analyze" },
+	[HCHK_STATUS_HANA]	= { CHK_RES_FAILED,   "HANA",    "Health analyze" },
 
-	[HCHK_STATUS_SOCKERR]	= { SRV_CHK_FAILED,                    "SOCKERR", "Socket error" },
+	[HCHK_STATUS_SOCKERR]	= { CHK_RES_FAILED,   "SOCKERR", "Socket error" },
 
-	[HCHK_STATUS_L4OK]	= { SRV_CHK_PASSED,                    "L4OK",    "Layer4 check passed" },
-	[HCHK_STATUS_L4TOUT]	= { SRV_CHK_FAILED,                    "L4TOUT",  "Layer4 timeout" },
-	[HCHK_STATUS_L4CON]	= { SRV_CHK_FAILED,                    "L4CON",   "Layer4 connection problem" },
+	[HCHK_STATUS_L4OK]	= { CHK_RES_PASSED,   "L4OK",    "Layer4 check passed" },
+	[HCHK_STATUS_L4TOUT]	= { CHK_RES_FAILED,   "L4TOUT",  "Layer4 timeout" },
+	[HCHK_STATUS_L4CON]	= { CHK_RES_FAILED,   "L4CON",   "Layer4 connection problem" },
 
-	[HCHK_STATUS_L6OK]	= { SRV_CHK_PASSED,                    "L6OK",    "Layer6 check passed" },
-	[HCHK_STATUS_L6TOUT]	= { SRV_CHK_FAILED,                    "L6TOUT",  "Layer6 timeout" },
-	[HCHK_STATUS_L6RSP]	= { SRV_CHK_FAILED,                    "L6RSP",   "Layer6 invalid response" },
+	[HCHK_STATUS_L6OK]	= { CHK_RES_PASSED,   "L6OK",    "Layer6 check passed" },
+	[HCHK_STATUS_L6TOUT]	= { CHK_RES_FAILED,   "L6TOUT",  "Layer6 timeout" },
+	[HCHK_STATUS_L6RSP]	= { CHK_RES_FAILED,   "L6RSP",   "Layer6 invalid response" },
 
-	[HCHK_STATUS_L7TOUT]	= { SRV_CHK_FAILED,                    "L7TOUT",  "Layer7 timeout" },
-	[HCHK_STATUS_L7RSP]	= { SRV_CHK_FAILED,                    "L7RSP",   "Layer7 invalid response" },
+	[HCHK_STATUS_L7TOUT]	= { CHK_RES_FAILED,   "L7TOUT",  "Layer7 timeout" },
+	[HCHK_STATUS_L7RSP]	= { CHK_RES_FAILED,   "L7RSP",   "Layer7 invalid response" },
 
 	[HCHK_STATUS_L57DATA]	= { /* DUMMY STATUS */ },
 
-	[HCHK_STATUS_L7OKD]	= { SRV_CHK_PASSED,                    "L7OK",    "Layer7 check passed" },
-	[HCHK_STATUS_L7OKCD]	= { SRV_CHK_PASSED | SRV_CHK_DISABLE,  "L7OKC",   "Layer7 check conditionally passed" },
-	[HCHK_STATUS_L7STS]	= { SRV_CHK_FAILED,                    "L7STS",   "Layer7 wrong status" },
+	[HCHK_STATUS_L7OKD]	= { CHK_RES_PASSED,   "L7OK",    "Layer7 check passed" },
+	[HCHK_STATUS_L7OKCD]	= { CHK_RES_CONDPASS, "L7OKC",   "Layer7 check conditionally passed" },
+	[HCHK_STATUS_L7STS]	= { CHK_RES_FAILED,   "L7STS",   "Layer7 wrong status" },
 };
 
 static const struct analyze_status analyze_statuses[HANA_STATUS_SIZE] = {		/* 0: ignore, 1: error, 2: OK */
@@ -193,7 +193,7 @@ static void server_status_printf(struct chunk *msg, struct server *s, struct che
 
 /*
  * Set check->status, update check->duration and fill check->result with
- * an adequate SRV_CHK_* value.
+ * an adequate CHK_RES_* value.
  *
  * Show information in logs about failed health check if server is UP
  * or succeeded health checks if server is DOWN.
@@ -203,7 +203,7 @@ static void set_server_check_status(struct check *check, short status, const cha
 	struct server *s = check->server;
 
 	if (status == HCHK_STATUS_START) {
-		check->result = SRV_CHK_UNKNOWN;	/* no result yet */
+		check->result = CHK_RES_UNKNOWN;	/* no result yet */
 		check->desc[0] = '\0';
 		check->start = now;
 		return;
@@ -233,17 +233,17 @@ static void set_server_check_status(struct check *check, short status, const cha
 	/* Failure to connect to the agent as a secondary check should not
 	 * cause the server to be marked down. So only log status changes
 	 * for HCHK_STATUS_* statuses */
-	if (check == &s->agent && check->status < HCHK_STATUS_L7TOUT)
+	if ((check->state & CHK_ST_AGENT) && check->status < HCHK_STATUS_L7TOUT)
 		return;
 
 	if (s->proxy->options2 & PR_O2_LOGHCHKS &&
-	(((check->health != 0) && (check->result & SRV_CHK_FAILED)) ||
+	(((check->health != 0) && (check->result == CHK_RES_FAILED)) ||
 	    (((check->health != check->rise + check->fall - 1) ||
 	      (!s->uweight && !(s->state & SRV_DRAIN)) ||
 	      (s->uweight && (s->state & SRV_DRAIN))) &&
-	     (check->result & SRV_CHK_PASSED)) ||
-	    ((s->state & SRV_GOINGDOWN) && !(check->result & SRV_CHK_DISABLE)) ||
-	    (!(s->state & SRV_GOINGDOWN) && (check->result & SRV_CHK_DISABLE)))) {
+	     (check->result >= CHK_RES_PASSED)) ||
+	    ((s->state & SRV_GOINGDOWN) && (check->result != CHK_RES_CONDPASS)) ||
+	    (!(s->state & SRV_GOINGDOWN) && (check->result == CHK_RES_CONDPASS)))) {
 
 		int health, rise, fall, state;
 
@@ -255,7 +255,8 @@ static void set_server_check_status(struct check *check, short status, const cha
 		fall   = check->fall;
 		state  = s->state;
 
-		if (check->result & SRV_CHK_FAILED) {
+		switch (check->result) {
+		case CHK_RES_FAILED:
 			if (health > rise) {
 				health--; /* still good */
 			} else {
@@ -264,9 +265,10 @@ static void set_server_check_status(struct check *check, short status, const cha
 
 				health = 0;
 			}
-		}
+			break;
 
-		if (check->result & SRV_CHK_PASSED) {
+		case CHK_RES_PASSED:
+		case CHK_RES_CONDPASS:
 			if (health < rise + fall - 1) {
 				health++; /* was bad, stays for a while */
 
@@ -280,15 +282,17 @@ static void set_server_check_status(struct check *check, short status, const cha
 			/* clear consecutive_errors if observing is enabled */
 			if (s->onerror)
 				s->consecutive_errors = 0;
+			break;
+		default:
+			break;
 		}
-		/* FIXME end: calculate local version of the health/rise/fall/state */
 
 		chunk_appendf(&trash,
 		             "Health check for %sserver %s/%s %s%s",
 		             s->state & SRV_BACKUP ? "backup " : "",
 		             s->proxy->id, s->id,
-		             (check->result & SRV_CHK_DISABLE)?"conditionally ":"",
-		             (check->result & SRV_CHK_PASSED)?"succeeded":"failed");
+		             (check->result == CHK_RES_CONDPASS) ? "conditionally ":"",
+		             (check->result >= CHK_RES_PASSED)   ? "succeeded":"failed");
 
 		server_status_printf(&trash, s, check, -1);
 
@@ -455,11 +459,10 @@ void set_server_down(struct check *check)
 
 		s->counters.down_trans++;
 
-		if (s->state & SRV_CHECKED)
-			for (srv = s->tracknext; srv; srv = srv->tracknext)
-				if (!(srv->state & SRV_MAINTAIN))
-					/* Only notify tracking servers that are not already in maintenance. */
-					set_server_down(&srv->check);
+		for (srv = s->trackers; srv; srv = srv->tracknext)
+			if (!(srv->state & SRV_MAINTAIN))
+				/* Only notify tracking servers that are not already in maintenance. */
+				set_server_down(&srv->check);
 	}
 
 	check->health = 0; /* failure */
@@ -476,8 +479,9 @@ void set_server_up(struct check *check) {
 		check->health = check->rise;
 	}
 
-	if ((s->check.health >= s->check.rise && s->agent.health >= s->agent.rise &&
-	     check->health == check->rise) || s->track) {
+	if (s->track ||
+	    (s->check.health == s->check.rise && (s->agent.health >= s->agent.rise || !(s->agent.state & CHK_ST_ENABLED))) ||
+	    (s->agent.health == s->agent.rise && (s->check.health >= s->check.rise || !(s->check.state & CHK_ST_ENABLED)))) {
 		if (s->proxy->srv_bck == 0 && s->proxy->srv_act == 0) {
 			if (s->proxy->last_change < now.tv_sec)		// ignore negative times
 				s->proxy->down_time += now.tv_sec - s->proxy->last_change;
@@ -490,6 +494,7 @@ void set_server_up(struct check *check) {
 		s->last_change = now.tv_sec;
 		s->state |= SRV_RUNNING;
 		s->state &= ~SRV_MAINTAIN;
+		s->check.state &= ~CHK_ST_PAUSED;
 
 		if (s->slowstart > 0) {
 			s->state |= SRV_WARMINGUP;
@@ -531,11 +536,10 @@ void set_server_up(struct check *check) {
 		Warning("%s.\n", trash.str);
 		send_log(s->proxy, LOG_NOTICE, "%s.\n", trash.str);
 
-		if (s->state & SRV_CHECKED)
-			for (srv = s->tracknext; srv; srv = srv->tracknext)
-				if (!(srv->state & SRV_MAINTAIN))
-					/* Only notify tracking servers if they're not in maintenance. */
-					set_server_up(&srv->check);
+		for (srv = s->trackers; srv; srv = srv->tracknext)
+			if (!(srv->state & SRV_MAINTAIN))
+				/* Only notify tracking servers if they're not in maintenance. */
+				set_server_up(&srv->check);
 	}
 
 	if (check->health >= check->rise)
@@ -576,9 +580,8 @@ static void set_server_disabled(struct check *check) {
 	if (!s->proxy->srv_bck && !s->proxy->srv_act)
 		set_backend_down(s->proxy);
 
-	if (s->state & SRV_CHECKED)
-		for(srv = s->tracknext; srv; srv = srv->tracknext)
-			set_server_disabled(&srv->check);
+	for (srv = s->trackers; srv; srv = srv->tracknext)
+		set_server_disabled(&srv->check);
 }
 
 static void set_server_enabled(struct check *check) {
@@ -610,9 +613,8 @@ static void set_server_enabled(struct check *check) {
 	Warning("%s.\n", trash.str);
 	send_log(s->proxy, LOG_NOTICE, "%s.\n", trash.str);
 
-	if (s->state & SRV_CHECKED)
-		for(srv = s->tracknext; srv; srv = srv->tracknext)
-			set_server_enabled(&srv->check);
+	for (srv = s->trackers; srv; srv = srv->tracknext)
+		set_server_enabled(&srv->check);
 }
 
 static void check_failed(struct check *check)
@@ -625,7 +627,7 @@ static void check_failed(struct check *check)
 	 * The implication here is that failure to connect to the agent
 	 * as a secondary check should not cause the server to be marked
 	 * down. */
-	if (check == &s->agent && check->status != HCHK_STATUS_L7STS)
+	if ((check->state & CHK_ST_AGENT) && check->status != HCHK_STATUS_L7STS)
 		return;
 
 	if (check->health > check->rise) {
@@ -736,8 +738,8 @@ static int httpchk_build_status_header(struct server *s, char *buffer)
 	memcpy(buffer + hlen, "X-Haproxy-Server-State: ", 24);
 	hlen += 24;
 
-	if (!(s->state & SRV_CHECKED))
-		sv_state = 6; /* should obviously never happen */
+	if (!(s->check.state & CHK_ST_ENABLED))
+		sv_state = 6;
 	else if (s->state & SRV_RUNNING) {
 		if (s->check.health == s->check.rise + s->check.fall - 1)
 			sv_state = 3; /* UP */
@@ -838,7 +840,7 @@ static void chk_report_conn_err(struct connection *conn, int errno_bck, int expi
 	const char *err_msg;
 	struct chunk *chk;
 
-	if (check->result != SRV_CHK_UNKNOWN)
+	if (check->result != CHK_RES_UNKNOWN)
 		return;
 
 	errno = errno_bck;
@@ -927,7 +929,7 @@ static void event_srv_chk_w(struct connection *conn)
 	struct server *s = check->server;
 	struct task *t = check->task;
 
-	if (unlikely(check->result & SRV_CHK_FAILED))
+	if (unlikely(check->result == CHK_RES_FAILED))
 		goto out_wakeup;
 
 	if (conn->flags & (CO_FL_HANDSHAKE | CO_FL_WAIT_WR))
@@ -1004,7 +1006,7 @@ static void event_srv_chk_r(struct connection *conn)
 	int done;
 	unsigned short msglen;
 
-	if (unlikely(check->result & SRV_CHK_FAILED))
+	if (unlikely(check->result == CHK_RES_FAILED))
 		goto out_wakeup;
 
 	if (conn->flags & (CO_FL_HANDSHAKE | CO_FL_WAIT_RD))
@@ -1138,11 +1140,22 @@ static void event_srv_chk_r(struct connection *conn)
 		const char *desc = "Unknown feedback string";
 		const char *down_cmd = NULL;
 		int disabled;
+		char *p;
 
-		if (!done)
-			goto wait_more_data;
+		/* get a complete line first */
+		p = check->bi->data;
+		while (*p && *p != '\n' && *p != '\r')
+			p++;
 
-		cut_crlf(check->bi->data);
+		if (!*p) {
+			if (!done)
+				goto wait_more_data;
+
+			/* at least inform the admin that the agent is mis-behaving */
+			set_server_check_status(check, check->status, "Ignoring incomplete line from agent");
+			break;
+		}
+		*p = 0;
 
 		/*
 		 * The agent may have been disabled after a check was
@@ -1154,7 +1167,7 @@ static void event_srv_chk_r(struct connection *conn)
 		 * parameter of this function is the agent or check field
 		 * of the server.
 		 */
-		disabled = check->server->agent.state & CHK_STATE_DISABLED;
+		disabled = !(check->server->agent.state & CHK_ST_ENABLED);
 
 		if (strchr(check->bi->data, '%')) {
 			if (disabled)
@@ -1393,7 +1406,7 @@ static void event_srv_chk_r(struct connection *conn)
 		conn->xprt->shutw(conn, 0);
 
 	/* OK, let's not stay here forever */
-	if (check->result & SRV_CHK_FAILED)
+	if (check->result == CHK_RES_FAILED)
 		conn->flags |= CO_FL_ERROR;
 
 	__conn_data_stop_both(conn);
@@ -1426,7 +1439,7 @@ static int wake_srv_chk(struct connection *conn)
 		task_wakeup(check->task, TASK_WOKEN_IO);
 	}
 
-	if (check->result & (SRV_CHK_FAILED|SRV_CHK_PASSED)) {
+	if (check->result != CHK_RES_UNKNOWN) {
 		/* We're here because nobody wants to handle the error, so we
 		 * sure want to abort the hard way.
 		 */
@@ -1486,7 +1499,7 @@ static struct task *process_chk(struct task *t)
 	int ret;
 	int expired = tick_is_expired(t->expire, now_ms);
 
-	if (!(check->state & CHK_STATE_RUNNING)) {
+	if (!(check->state & CHK_ST_INPROGRESS)) {
 		/* no check currently running */
 		if (!expired) /* woke up too early */
 			return t;
@@ -1495,16 +1508,14 @@ static struct task *process_chk(struct task *t)
 		 * stopped, the server should not be checked or the check
 		 * is disabled.
 		 */
-		if (!(s->state & SRV_CHECKED) ||
-		    s->proxy->state == PR_STSTOPPED ||
-		    (s->state & SRV_MAINTAIN) ||
-		    (check->state & CHK_STATE_DISABLED))
+		if (((check->state & (CHK_ST_ENABLED | CHK_ST_PAUSED)) != CHK_ST_ENABLED) ||
+		    s->proxy->state == PR_STSTOPPED)
 			goto reschedule;
 
 		/* we'll initiate a new check */
 		set_server_check_status(check, HCHK_STATUS_START, NULL);
 
-		check->state |= CHK_STATE_RUNNING;
+		check->state |= CHK_ST_INPROGRESS;
 		check->bi->p = check->bi->data;
 		check->bi->i = 0;
 		check->bo->p = check->bo->data;
@@ -1520,7 +1531,7 @@ static struct task *process_chk(struct task *t)
 		 * configuration of the primary check. Similarly, tcp-check uses
 		 * its own strings.
 		 */
-		if (check->type && check->type != PR_O2_TCPCHK_CHK && check != &s->agent) {
+		if (check->type && check->type != PR_O2_TCPCHK_CHK && !(check->state & CHK_ST_AGENT)) {
 			bo_putblk(check->bo, s->proxy->check_req, s->proxy->check_len);
 
 			/* we want to check if this host replies to HTTP or SSLv3 requests
@@ -1608,7 +1619,7 @@ static struct task *process_chk(struct task *t)
 
 		/* here, we have seen a synchronous error, no fd was allocated */
 
-		check->state &= ~CHK_STATE_RUNNING;
+		check->state &= ~CHK_ST_INPROGRESS;
 		check_failed(check);
 
 		/* we allow up to min(inter, timeout.connect) for a connection
@@ -1630,7 +1641,7 @@ static struct task *process_chk(struct task *t)
 		 * First, let's check whether there was an uncaught error,
 		 * which can happen on connect timeout or error.
 		 */
-		if (s->check.result == SRV_CHK_UNKNOWN) {
+		if (s->check.result == CHK_RES_UNKNOWN) {
 			/* good connection is enough for pure TCP check */
 			if ((conn->flags & CO_FL_CONNECTED) && !check->type) {
 				if (check->use_ssl)
@@ -1660,14 +1671,14 @@ static struct task *process_chk(struct task *t)
 			conn_force_close(conn);
 		}
 
-		if (check->result & SRV_CHK_FAILED)  /* a failure or timeout detected */
+		if (check->result == CHK_RES_FAILED)  /* a failure or timeout detected */
 			check_failed(check);
 		else {  /* check was OK */
 			/* we may have to add/remove this server from the LB group */
 			if ((s->state & SRV_RUNNING) && (s->proxy->options & PR_O_DISABLE404)) {
-				if ((s->state & SRV_GOINGDOWN) && !(check->result & SRV_CHK_DISABLE))
+				if ((s->state & SRV_GOINGDOWN) && (check->result != CHK_RES_CONDPASS))
 					set_server_enabled(check);
-				else if (!(s->state & SRV_GOINGDOWN) && (check->result & SRV_CHK_DISABLE))
+				else if (!(s->state & SRV_GOINGDOWN) && (check->result == CHK_RES_CONDPASS))
 					set_server_disabled(check);
 			}
 
@@ -1676,7 +1687,7 @@ static struct task *process_chk(struct task *t)
 				set_server_up(check);
 			}
 		}
-		check->state &= ~CHK_STATE_RUNNING;
+		check->state &= ~CHK_ST_INPROGRESS;
 
 		rv = 0;
 		if (global.spread_checks > 0) {
@@ -1753,14 +1764,19 @@ int start_checks() {
 				t->expire = TICK_ETERNITY;
 			}
 
-			if (!(s->state & SRV_CHECKED))
-				continue;
+			if (s->check.state & CHK_ST_CONFIGURED) {
+				nbcheck++;
+				if ((srv_getinter(&s->check) >= SRV_CHK_INTER_THRES) &&
+				    (!mininter || mininter > srv_getinter(&s->check)))
+					mininter = srv_getinter(&s->check);
+			}
 
-			if ((srv_getinter(&s->check) >= SRV_CHK_INTER_THRES) &&
-			    (!mininter || mininter > srv_getinter(&s->check)))
-				mininter = srv_getinter(&s->check);
-
-			nbcheck++;
+			if (s->agent.state & CHK_ST_CONFIGURED) {
+				nbcheck++;
+				if ((srv_getinter(&s->agent) >= SRV_CHK_INTER_THRES) &&
+				    (!mininter || mininter > srv_getinter(&s->agent)))
+					mininter = srv_getinter(&s->agent);
+			}
 		}
 	}
 
@@ -1777,14 +1793,14 @@ int start_checks() {
 	for (px = proxy; px; px = px->next) {
 		for (s = px->srv; s; s = s->next) {
 			/* A task for the main check */
-			if (s->state & SRV_CHECKED) {
+			if (s->check.state & CHK_ST_CONFIGURED) {
 				if (!start_check_task(&s->check, mininter, nbcheck, srvpos))
 					return -1;
 				srvpos++;
 			}
 
 			/* A task for a auxiliary agent check */
-			if (s->state & SRV_AGENT_CHECKED) {
+			if (s->agent.state & CHK_ST_CONFIGURED) {
 				if (!start_check_task(&s->agent, mininter, nbcheck, srvpos)) {
 					return -1;
 				}
@@ -1955,9 +1971,8 @@ static void tcpcheck_main(struct connection *conn)
 	}
 
 	/* here, we know that the connection is established */
-	if (check->result & (SRV_CHK_FAILED | SRV_CHK_PASSED)) {
+	if (check->result != CHK_RES_UNKNOWN)
 		goto out_end_tcpcheck;
-	}
 
 	/* head is be the first element of the double chained list */
 	head = &s->proxy->tcpcheck_rules;
@@ -2045,7 +2060,7 @@ static void tcpcheck_main(struct connection *conn)
 			check->current_step = cur;
 		} /* end 'send' */
 		else if (check->current_step->action == TCPCHK_ACT_EXPECT) {
-			if (unlikely(check->result & SRV_CHK_FAILED))
+			if (unlikely(check->result == CHK_RES_FAILED))
 				goto out_end_tcpcheck;
 
 			if ((conn->flags & CO_FL_WAIT_RD) ||
@@ -2187,7 +2202,7 @@ static void tcpcheck_main(struct connection *conn)
 
 	check->current_step = NULL;
 
-	if (check->result & SRV_CHK_FAILED)
+	if (check->result == CHK_RES_FAILED)
 		conn->flags |= CO_FL_ERROR;
 
 	__conn_data_stop_both(conn);

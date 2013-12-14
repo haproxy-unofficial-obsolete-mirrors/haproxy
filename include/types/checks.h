@@ -13,6 +13,34 @@
 #ifndef _TYPES_CHECKS_H
 #define _TYPES_CHECKS_H
 
+#include <sys/time.h>
+
+#include <common/config.h>
+#include <common/mini-clist.h>
+#include <common/regex.h>
+
+#include <types/connection.h>
+#include <types/obj_type.h>
+#include <types/task.h>
+#include <types/server.h>
+
+/* enum used by check->result. Must remain in this order, as some code uses
+ * result >= CHK_RES_PASSED to declare success.
+ */
+enum chk_result {
+	CHK_RES_UNKNOWN = 0,            /* initialized to this by default */
+	CHK_RES_FAILED,                 /* check failed */
+	CHK_RES_PASSED,                 /* check succeeded and server is fully up again */
+	CHK_RES_CONDPASS,               /* check reports the server doesn't want new sessions */
+};
+
+/* flags used by check->state */
+#define CHK_ST_INPROGRESS       0x0001  /* a check is currently running */
+#define CHK_ST_CONFIGURED       0x0002  /* this check is configured and may be enabled */
+#define CHK_ST_ENABLED          0x0004  /* this check is currently administratively enabled */
+#define CHK_ST_PAUSED           0x0008  /* checks are paused because of maintenance (health only) */
+#define CHK_ST_AGENT            0x0010  /* check is an agent check (otherwise it's a health check) */
+
 /* check status */
 enum {
 	HCHK_STATUS_UNKNOWN	 = 0,	/* Unknown */
@@ -93,6 +121,28 @@ enum {
 	HANA_OBS_LAYER7,		/* Observe L7 - for example http */
 
 	HANA_OBS_SIZE
+};
+
+struct check {
+	struct connection *conn;		/* connection state for health checks */
+	unsigned short port;			/* the port to use for the health checks */
+	struct buffer *bi, *bo;			/* input and output buffers to send/recv check */
+	struct task *task;			/* the task associated to the health check processing, NULL if disabled */
+	struct timeval start;			/* last health check start time */
+	long duration;				/* time in ms took to finish last health check */
+	short status, code;			/* check result, check code */
+	char desc[HCHK_DESC_LEN];		/* health check descritpion */
+	int use_ssl;				/* use SSL for health checks */
+	int send_proxy;				/* send a PROXY protocol header with checks */
+	struct tcpcheck_rule *current_step;     /* current step when using tcpcheck */
+	int inter, fastinter, downinter;        /* checks: time in milliseconds */
+	enum chk_result result;                 /* health-check result : CHK_RES_* */
+	int state;				/* state of the check : CHK_ST_*   */
+	int health;				/* 0 to rise-1 = bad;
+						 * rise to rise+fall-1 = good */
+	int rise, fall;				/* time in iterations */
+	int type;				/* Check type, one of PR_O2_*_CHK */
+	struct server *server;			/* back-pointer to server */
 };
 
 struct check_status {
