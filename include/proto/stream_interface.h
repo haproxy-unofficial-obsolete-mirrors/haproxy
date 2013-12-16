@@ -149,6 +149,16 @@ static inline void si_attach_conn(struct stream_interface *si, struct connection
 	conn_attach(conn, si, &si_conn_cb);
 }
 
+/* Returns true if a connection is attached to the stream interface <si> and
+ * if this connection is ready.
+ */
+static inline int si_conn_ready(struct stream_interface *si)
+{
+	struct connection *conn = objt_conn(si->end);
+
+	return conn && conn_ctrl_ready(conn) && conn_xprt_ready(conn);
+}
+
 /* Attach appctx <appctx> to the stream interface <si>. The stream interface
  * is configured to work with an applet context. It is left to the caller to
  * call appctx_set_applet() to assign an applet to this context.
@@ -202,11 +212,15 @@ static inline void si_applet_release(struct stream_interface *si)
 		applet->release(si);
 }
 
+/* Try to allocate a new connection and assign it to the interface. If
+ * a connection was previously allocated and the <reuse> flag is set,
+ * it is returned unmodified. Otherwise it is reset.
+ */
 /* Returns the stream interface's existing connection if one such already
  * exists, or tries to allocate and initialize a new one which is then
  * assigned to the stream interface.
  */
-static inline struct connection *si_alloc_conn(struct stream_interface *si)
+static inline struct connection *si_alloc_conn(struct stream_interface *si, int reuse)
 {
 	struct connection *conn;
 
@@ -215,8 +229,13 @@ static inline struct connection *si_alloc_conn(struct stream_interface *si)
 	 */
 	if (si->end) {
 		conn = objt_conn(si->end);
-		if (conn)
+		if (conn) {
+			if (!reuse) {
+				conn_force_close(conn);
+				conn_init(conn);
+			}
 			return conn;
+		}
 		/* it was an applet then */
 		si_release_endpoint(si);
 	}
@@ -279,14 +298,22 @@ static inline void si_chk_snd(struct stream_interface *si)
 static inline int si_connect(struct stream_interface *si)
 {
 	struct connection *conn = objt_conn(si->end);
-	int ret;
+	int ret = SN_ERR_NONE;
 
 	if (unlikely(!conn || !conn->ctrl || !conn->ctrl->connect))
 		return SN_ERR_INTERNAL;
 
-	ret = conn->ctrl->connect(conn, !channel_is_empty(si->ob), 0);
-	if (ret != SN_ERR_NONE)
-		return ret;
+	if (!conn_ctrl_ready(conn) || !conn_xprt_ready(conn)) {
+		ret = conn->ctrl->connect(conn, !channel_is_empty(si->ob), 0);
+		if (ret != SN_ERR_NONE)
+			return ret;
+	}
+	else if (!channel_is_empty(si->ob)) {
+		/* reuse the existing connection, we'll have to send a
+		 * request there.
+		 */
+		conn_data_want_send(conn);
+	}
 
 	/* needs src ip/port for logging */
 	if (si->flags & SI_FL_SRC_ADDR)

@@ -43,6 +43,18 @@ int conn_fd_handler(int fd);
 int conn_recv_proxy(struct connection *conn, int flag);
 int make_proxy_line(char *buf, int buf_len, struct sockaddr_storage *src, struct sockaddr_storage *dst);
 
+/* returns true is the transport layer is ready */
+static inline int conn_xprt_ready(struct connection *conn)
+{
+	return (conn->flags & CO_FL_XPRT_READY) && conn->xprt;
+}
+
+/* returns true is the control layer is ready */
+static inline int conn_ctrl_ready(struct connection *conn)
+{
+	return (conn->flags & CO_FL_CTRL_READY);
+}
+
 /* Calls the init() function of the transport layer if any and if not done yet,
  * and sets the CO_FL_XPRT_READY flag to indicate it was properly initialized.
  * Returns <0 in case of error.
@@ -114,7 +126,8 @@ static inline void conn_full_close(struct connection *conn)
 }
 
 /* Force to close the connection whatever the tracking state. This is mainly
- * used on the error path where the tracking does not make sense.
+ * used on the error path where the tracking does not make sense, or to kill
+ * an idle connection we want to abort immediately.
  */
 static inline void conn_force_close(struct connection *conn)
 {
@@ -422,6 +435,11 @@ static inline void conn_sock_read0(struct connection *c)
 {
 	c->flags |= CO_FL_SOCK_RD_SH;
 	__conn_sock_stop_recv(c);
+	/* we don't risk keeping ports unusable if we found the
+	 * zero from the other side.
+	 */
+	if (c->flags & CO_FL_CTRL_READY)
+		fdtab[c->t.sock.fd].linger_risk = 0;
 }
 
 static inline void conn_data_read0(struct connection *c)

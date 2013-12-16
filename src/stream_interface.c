@@ -389,7 +389,7 @@ int conn_si_send_proxy(struct connection *conn, unsigned int flag)
 	if (conn->flags & CO_FL_SOCK_WR_SH)
 		goto out_error;
 
-	if (!(conn->flags & CO_FL_CTRL_READY))
+	if (!conn_ctrl_ready(conn))
 		goto out_error;
 
 	/* If we have a PROXY line to send, we'll use this to validate the
@@ -812,10 +812,6 @@ static void stream_int_shutw_conn(struct stream_interface *si)
 			/* quick close, the socket is alredy shut anyway */
 		}
 		else if (si->flags & SI_FL_NOLINGER) {
-			if ((conn->flags & CO_FL_CTRL_READY) && conn->ctrl) {
-				setsockopt(conn->t.sock.fd, SOL_SOCKET, SO_LINGER,
-					   (struct linger *) &nolinger, sizeof(struct linger));
-			}
 			/* unclean data-layer shutdown */
 			if (conn->xprt && conn->xprt->shutw)
 				conn->xprt->shutw(conn, 0);
@@ -833,7 +829,7 @@ static void stream_int_shutw_conn(struct stream_interface *si)
 			 */
 			if (!(si->flags & SI_FL_NOHALF) || !(si->ib->flags & (CF_SHUTR|CF_DONT_READ))) {
 				/* We shutdown transport layer */
-				if ((conn->flags & CO_FL_CTRL_READY) && conn->ctrl)
+				if (conn_ctrl_ready(conn))
 					shutdown(conn->t.sock.fd, SHUT_WR);
 
 				if (!(si->ib->flags & (CF_SHUTR|CF_DONT_READ))) {
@@ -931,13 +927,13 @@ static void stream_int_chk_snd_conn(struct stream_interface *si)
 		/* Before calling the data-level operations, we have to prepare
 		 * the polling flags to ensure we properly detect changes.
 		 */
-		if ((conn->flags & CO_FL_CTRL_READY) && conn->ctrl)
+		if (conn_ctrl_ready(conn))
 			fd_want_send(conn->t.sock.fd);
 
 		conn_refresh_polling_flags(conn);
 
 		si_conn_send(conn);
-		if ((conn->flags & CO_FL_CTRL_READY) && (conn->flags & CO_FL_ERROR)) {
+		if (conn_ctrl_ready(conn) && (conn->flags & CO_FL_ERROR)) {
 			/* Write error on the file descriptor */
 			fd_stop_both(conn->t.sock.fd);
 			__conn_data_stop_both(conn);
@@ -1285,12 +1281,6 @@ void stream_sock_read0(struct stream_interface *si)
 
 	if (si->flags & SI_FL_NOHALF) {
 		/* we want to immediately forward this close to the write side */
-		if (si->flags & SI_FL_NOLINGER) {
-			si->flags &= ~SI_FL_NOLINGER;
-			if (conn->flags & CO_FL_CTRL_READY)
-				setsockopt(conn->t.sock.fd, SOL_SOCKET, SO_LINGER,
-				           (struct linger *) &nolinger, sizeof(struct linger));
-		}
 		/* force flag on ssl to keep session in cache */
 		if (conn->xprt->shutw)
 			conn->xprt->shutw(conn, 0);
@@ -1298,6 +1288,8 @@ void stream_sock_read0(struct stream_interface *si)
 	}
 
 	/* otherwise that's just a normal read shutdown */
+	if (conn_ctrl_ready(conn))
+		fdtab[conn->t.sock.fd].linger_risk = 0;
 	__conn_data_stop_recv(conn);
 	return;
 

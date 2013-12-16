@@ -532,8 +532,19 @@ int assign_server(struct session *s)
 
 	srv = NULL;
 	s->target = NULL;
+	conn = objt_conn(s->req->cons->end);
 
-	if (s->be->lbprm.algo & BE_LB_KIND) {
+	if (conn && (s->be->options & PR_O_PREF_LAST) &&
+	    objt_server(conn->target) && __objt_server(conn->target)->proxy == s->be &&
+	    srv_is_usable(__objt_server(conn->target)->state, __objt_server(conn->target)->eweight)) {
+		/* This session was relying on a server in a previous request
+		 * and the proxy has "option prefer-current-server" set, so
+		 * let's try to reuse the same server.
+		 */
+		srv = __objt_server(conn->target);
+		s->target = &srv->obj_type;
+	}
+	else if (s->be->lbprm.algo & BE_LB_KIND) {
 		/* we must check if we have at least one server available */
 		if (!s->be->lbprm.tot_weight) {
 			err = SRV_STATUS_NOSRV;
@@ -982,10 +993,33 @@ static void assign_tproxy_address(struct session *s)
 int connect_server(struct session *s)
 {
 	struct connection *cli_conn;
-	struct connection *srv_conn = si_alloc_conn(s->req->cons);
+	struct connection *srv_conn;
 	struct server *srv;
+	int reuse = 0;
 	int err;
 
+	srv_conn = objt_conn(s->req->cons->end);
+	if (srv_conn)
+		reuse = s->target == srv_conn->target;
+
+	if (reuse) {
+		/* Disable connection reuse if a dynamic source is used.
+		 * As long as we don't share connections between servers,
+		 * we don't need to disable connection reuse on no-idempotent
+		 * requests nor when PROXY protocol is used.
+		 */
+		srv = objt_server(s->target);
+		if (srv && srv->conn_src.opts & CO_SRC_BIND) {
+			if ((srv->conn_src.opts & CO_SRC_TPROXY_MASK) == CO_SRC_TPROXY_DYN)
+				reuse = 0;
+		}
+		else if (s->be->conn_src.opts & CO_SRC_BIND) {
+			if ((s->be->conn_src.opts & CO_SRC_TPROXY_MASK) == CO_SRC_TPROXY_DYN)
+				reuse = 0;
+		}
+	}
+
+	srv_conn = si_alloc_conn(s->req->cons, reuse);
 	if (!srv_conn)
 		return SN_ERR_RESOURCE;
 

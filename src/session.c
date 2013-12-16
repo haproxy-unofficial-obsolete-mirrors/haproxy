@@ -127,6 +127,16 @@ int session_accept(struct listener *l, int cfd, struct sockaddr_storage *addr)
 
 	proxy_inc_fe_conn_ctr(l, p);
 
+	/* Add the minimum callbacks to prepare the connection's control layer.
+	 * We need this so that we can safely execute the ACLs used by the
+	 * "tcp-request connection" ruleset. We also carefully attach the
+	 * connection to the stream interface without initializing the rest,
+	 * so that ACLs can use si[0]->end.
+	 */
+	si_attach_conn(&s->si[0], cli_conn);
+	conn_attach(cli_conn, s, &sess_conn_cb);
+	conn_ctrl_init(cli_conn);
+
 	/* now evaluate the tcp-request layer4 rules. Since we expect to be able
 	 * to abort right here as soon as possible, we check the rules before
 	 * even initializing the stream interfaces.
@@ -187,15 +197,10 @@ int session_accept(struct listener *l, int cfd, struct sockaddr_storage *addr)
 	t->nice = l->nice;
 	s->task = t;
 
-	/* Add the various callbacks. Right now the transport layer is present
+	/* Finish setting the callbacks. Right now the transport layer is present
 	 * but not initialized. Also note we need to be careful as the stream
 	 * int is not initialized yet.
 	 */
-	conn_attach(cli_conn, s, &sess_conn_cb);
-
-	/* finish initialization of the accepted file descriptor */
-	conn_ctrl_init(cli_conn);
-
 	conn_data_want_recv(cli_conn);
 	if (conn_xprt_init(cli_conn) < 0)
 		goto out_free_task;

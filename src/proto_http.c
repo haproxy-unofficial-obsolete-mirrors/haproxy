@@ -913,6 +913,8 @@ void http_perform_server_redirect(struct session *s, struct stream_interface *si
  * logs might explain incomplete retries. All others should avoid
  * being cumulated. It should normally not be possible to have multiple
  * aborts at once, but just in case, the first one in sequence is reported.
+ * Note that connection errors appearing on the second request of a keep-alive
+ * connection are not reported since this allows the client to retry.
  */
 void http_return_srv_error(struct session *s, struct stream_interface *si)
 {
@@ -923,7 +925,8 @@ void http_return_srv_error(struct session *s, struct stream_interface *si)
 				  503, http_error_message(s, HTTP_ERR_503));
 	else if (err_type & SI_ET_CONN_ABRT)
 		http_server_error(s, si, SN_ERR_CLICL, SN_FINST_C,
-				  503, http_error_message(s, HTTP_ERR_503));
+				  503, (s->txn.flags & TX_NOT_FIRST) ? NULL :
+				  http_error_message(s, HTTP_ERR_503));
 	else if (err_type & SI_ET_QUEUE_TO)
 		http_server_error(s, si, SN_ERR_SRVTO, SN_FINST_Q,
 				  503, http_error_message(s, HTTP_ERR_503));
@@ -932,13 +935,16 @@ void http_return_srv_error(struct session *s, struct stream_interface *si)
 				  503, http_error_message(s, HTTP_ERR_503));
 	else if (err_type & SI_ET_CONN_TO)
 		http_server_error(s, si, SN_ERR_SRVTO, SN_FINST_C,
-				  503, http_error_message(s, HTTP_ERR_503));
+				  503, (s->txn.flags & TX_NOT_FIRST) ? NULL :
+				  http_error_message(s, HTTP_ERR_503));
 	else if (err_type & SI_ET_CONN_ERR)
 		http_server_error(s, si, SN_ERR_SRVCL, SN_FINST_C,
-				  503, http_error_message(s, HTTP_ERR_503));
+				  503, (s->txn.flags & TX_NOT_FIRST) ? NULL :
+				  http_error_message(s, HTTP_ERR_503));
 	else if (err_type & SI_ET_CONN_RES)
 		http_server_error(s, si, SN_ERR_RESOURCE, SN_FINST_C,
-				  503, http_error_message(s, HTTP_ERR_503));
+				  503, (s->txn.flags & TX_NOT_FIRST) ? NULL :
+				  http_error_message(s, HTTP_ERR_503));
 	else /* SI_ET_CONN_OTHER and others */
 		http_server_error(s, si, SN_ERR_INTERNAL, SN_FINST_C,
 				  500, http_error_message(s, HTTP_ERR_500));
@@ -3741,8 +3747,10 @@ int http_process_request(struct session *s, struct channel *req, int an_bit)
 	 */
 	if ((s->be->options & PR_O_HTTP_PROXY) && !(s->flags & SN_ADDR_SET)) {
 		struct connection *conn;
+		char *path;
 
-		if (unlikely((conn = si_alloc_conn(req->cons)) == NULL)) {
+		/* Note that for now we don't reuse existing proxy connections */
+		if (unlikely((conn = si_alloc_conn(req->cons, 0)) == NULL)) {
 			txn->req.msg_state = HTTP_MSG_ERROR;
 			txn->status = 500;
 			req->analysers = 0;
@@ -3755,7 +3763,39 @@ int http_process_request(struct session *s, struct channel *req, int an_bit)
 
 			return 0;
 		}
-		url2sa(req->buf->p + msg->sl.rq.u, msg->sl.rq.u_l, &conn->addr.to);
+
+		path = http_get_path(txn);
+		url2sa(req->buf->p + msg->sl.rq.u,
+		       path ? path - (req->buf->p + msg->sl.rq.u) : msg->sl.rq.u_l,
+		       &conn->addr.to);
+		/* if the path was found, we have to remove everything between
+		 * req->buf->p + msg->sl.rq.u and path (excluded). If it was not
+		 * found, we need to replace from req->buf->p + msg->sl.rq.u for
+		 * u_l characters by a single "/".
+		 */
+		if (path) {
+			char *cur_ptr = req->buf->p;
+			char *cur_end = cur_ptr + txn->req.sl.rq.l;
+			int delta;
+
+			delta = buffer_replace2(req->buf, req->buf->p + msg->sl.rq.u, path, NULL, 0);
+			http_msg_move_end(&txn->req, delta);
+			cur_end += delta;
+			if (http_parse_reqline(&txn->req, HTTP_MSG_RQMETH,  cur_ptr, cur_end + 1, NULL, NULL) == NULL)
+				goto return_bad_req;
+		}
+		else {
+			char *cur_ptr = req->buf->p;
+			char *cur_end = cur_ptr + txn->req.sl.rq.l;
+			int delta;
+
+			delta = buffer_replace2(req->buf, req->buf->p + msg->sl.rq.u,
+						req->buf->p + msg->sl.rq.u + msg->sl.rq.u_l, "/", 1);
+			http_msg_move_end(&txn->req, delta);
+			cur_end += delta;
+			if (http_parse_reqline(&txn->req, HTTP_MSG_RQMETH,  cur_ptr, cur_end + 1, NULL, NULL) == NULL)
+				goto return_bad_req;
+		}
 	}
 
 	/*
@@ -4248,9 +4288,15 @@ void http_end_txn_clean_session(struct session *s)
 	 */
 	http_silent_debug(__LINE__, s);
 
-	s->req->cons->flags |= SI_FL_NOLINGER | SI_FL_NOHALF;
-	si_shutr(s->req->cons);
-	si_shutw(s->req->cons);
+	/* unless we're doing keep-alive, we want to quickly close the connection
+	 * to the server.
+	 */
+	if (((s->txn.flags & TX_CON_WANT_MSK) != TX_CON_WANT_KAL) ||
+	    !si_conn_ready(s->req->cons)) {
+		s->req->cons->flags |= SI_FL_NOLINGER | SI_FL_NOHALF;
+		si_shutr(s->req->cons);
+		si_shutw(s->req->cons);
+	}
 
 	http_silent_debug(__LINE__, s);
 
@@ -4323,8 +4369,15 @@ void http_end_txn_clean_session(struct session *s)
 
 	s->target = NULL;
 
+	/* only release our endpoint if we don't intend to reuse the
+	 * connection.
+	 */
+	if (((s->txn.flags & TX_CON_WANT_MSK) != TX_CON_WANT_KAL) ||
+	    !si_conn_ready(s->req->cons)) {
+		si_release_endpoint(s->req->cons);
+	}
+
 	s->req->cons->state     = s->req->cons->prev_state = SI_ST_INI;
-	si_release_endpoint(s->req->cons);
 	s->req->cons->err_type  = SI_ET_NONE;
 	s->req->cons->conn_retries = 0;  /* used for logging too */
 	s->req->cons->exp       = TICK_ETERNITY;
@@ -4453,14 +4506,14 @@ int http_sync_req_state(struct session *s)
 			}
 		}
 		else {
-			/* The last possible modes are keep-alive and tunnel. Since tunnel
-			 * mode does not set the body analyser, we can't reach this place
-			 * in tunnel mode, so we're left with keep-alive only.
-			 * This mode is currently not implemented, we switch to tunnel mode.
+			/* The last possible modes are keep-alive and tunnel. Tunnel mode
+			 * will not have any analyser so it needs to poll for reads.
 			 */
-			channel_auto_read(chn);
-			txn->req.msg_state = HTTP_MSG_TUNNEL;
-			chn->flags |= CF_NEVER_WAIT;
+			if ((txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_TUN) {
+				channel_auto_read(chn);
+				txn->req.msg_state = HTTP_MSG_TUNNEL;
+				chn->flags |= CF_NEVER_WAIT;
+			}
 		}
 
 		if (chn->flags & (CF_SHUTW|CF_SHUTW_NOW)) {
@@ -4496,6 +4549,8 @@ int http_sync_req_state(struct session *s)
 
 	if (txn->req.msg_state == HTTP_MSG_CLOSED) {
 	http_msg_closed:
+		if (!(s->be->options & PR_O_ABRT_CLOSE))
+			channel_dont_read(chn);
 		goto wait_other_side;
 	}
 
@@ -4578,14 +4633,14 @@ int http_sync_res_state(struct session *s)
 			}
 		}
 		else {
-			/* The last possible modes are keep-alive and tunnel. Since tunnel
-			 * mode does not set the body analyser, we can't reach this place
-			 * in tunnel mode, so we're left with keep-alive only.
-			 * This mode is currently not implemented, we switch to tunnel mode.
+			/* The last possible modes are keep-alive and tunnel. Tunnel will
+			 * need to forward remaining data. Keep-alive will need to monitor
+			 * for connection closing.
 			 */
 			channel_auto_read(chn);
-			txn->rsp.msg_state = HTTP_MSG_TUNNEL;
 			chn->flags |= CF_NEVER_WAIT;
+			if ((txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_TUN)
+				txn->rsp.msg_state = HTTP_MSG_TUNNEL;
 		}
 
 		if (chn->flags & (CF_SHUTW|CF_SHUTW_NOW)) {
@@ -4696,11 +4751,14 @@ int http_resync_states(struct session *s)
 		channel_auto_read(s->req);
 		bi_erase(s->req);
 	}
-	else if (txn->req.msg_state == HTTP_MSG_CLOSED &&
+	else if ((txn->req.msg_state == HTTP_MSG_DONE ||
+		  txn->req.msg_state == HTTP_MSG_CLOSED) &&
 		 txn->rsp.msg_state == HTTP_MSG_DONE &&
-		 ((txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_SCL)) {
-		/* server-close: terminate this server connection and
-		 * reinitialize a fresh-new transaction.
+		 ((txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_SCL ||
+		  (txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_KAL)) {
+		/* server-close/keep-alive: terminate this transaction,
+		 * possibly killing the server connection and reinitialize
+		 * a fresh-new transaction.
 		 */
 		http_end_txn_clean_session(s);
 	}
@@ -5117,6 +5175,8 @@ int http_wait_for_response(struct session *s, struct channel *rep, int an_bit)
 		else if (rep->flags & CF_READ_ERROR) {
 			if (msg->err_pos >= 0)
 				http_capture_bad_message(&s->be->invalid_rep, s, msg, msg->msg_state, s->fe);
+			else if (txn->flags & TX_NOT_FIRST)
+				goto abort_keep_alive;
 
 			s->be->be_counters.failed_resp++;
 			if (objt_server(s->target)) {
@@ -5142,6 +5202,8 @@ int http_wait_for_response(struct session *s, struct channel *rep, int an_bit)
 		else if (rep->flags & CF_READ_TIMEOUT) {
 			if (msg->err_pos >= 0)
 				http_capture_bad_message(&s->be->invalid_rep, s, msg, msg->msg_state, s->fe);
+			else if (txn->flags & TX_NOT_FIRST)
+				goto abort_keep_alive;
 
 			s->be->be_counters.failed_resp++;
 			if (objt_server(s->target)) {
@@ -5190,6 +5252,8 @@ int http_wait_for_response(struct session *s, struct channel *rep, int an_bit)
 		else if (rep->flags & CF_SHUTR) {
 			if (msg->msg_state >= HTTP_MSG_RPVER || msg->err_pos >= 0)
 				http_capture_bad_message(&s->be->invalid_rep, s, msg, msg->msg_state, s->fe);
+			else if (txn->flags & TX_NOT_FIRST)
+				goto abort_keep_alive;
 
 			s->be->be_counters.failed_resp++;
 			if (objt_server(s->target)) {
@@ -5215,6 +5279,8 @@ int http_wait_for_response(struct session *s, struct channel *rep, int an_bit)
 		else if (rep->flags & CF_WRITE_ERROR) {
 			if (msg->err_pos >= 0)
 				http_capture_bad_message(&s->be->invalid_rep, s, msg, msg->msg_state, s->fe);
+			else if (txn->flags & TX_NOT_FIRST)
+				goto abort_keep_alive;
 
 			s->be->be_counters.failed_resp++;
 			rep->analysers = 0;
@@ -5230,6 +5296,7 @@ int http_wait_for_response(struct session *s, struct channel *rep, int an_bit)
 		}
 
 		channel_dont_close(rep);
+		rep->flags |= CF_READ_DONTWAIT; /* try to get back here ASAP */
 		return 0;
 	}
 
@@ -5431,6 +5498,22 @@ skip_content_length:
 	rep->analyse_exp = TICK_ETERNITY;
 	channel_auto_close(rep);
 	return 1;
+
+ abort_keep_alive:
+	/* A keep-alive request to the server failed on a network error.
+	 * The client is required to retry. We need to close without returning
+	 * any other information so that the client retries.
+	 */
+	txn->status = 0;
+	rep->analysers = 0;
+	s->req->analysers = 0;
+	channel_auto_close(rep);
+	s->logs.logwait = 0;
+	s->logs.level = 0;
+	s->rep->flags &= ~CF_EXPECT_MORE; /* speed up sending a previous response */
+	bi_erase(rep);
+	stream_int_retnclose(rep->cons, NULL);
+	return 0;
 }
 
 /* This function performs all the processing enabled for the current response.
@@ -9221,6 +9304,7 @@ smp_fetch_path(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
  * that '*' will not be added, resulting in exactly the first Host entry.
  * If no Host header is found, then the path is returned as-is. The returned
  * value is stored in the trash so it does not need to be marked constant.
+ * The returned sample is of type string.
  */
 static int
 smp_fetch_base(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
@@ -9532,6 +9616,7 @@ extract_cookie_value(char *hdr, const char *hdr_end,
  * The cookie name is in args and the name length in args->data.str.len.
  * Accepts exactly 1 argument of type string. If the input options indicate
  * that no iterating is desired, then only last value is fetched if any.
+ * The returned sample is of type CSTR.
  */
 static int
 smp_fetch_cookie(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
@@ -9628,8 +9713,8 @@ smp_fetch_cookie(struct proxy *px, struct session *l4, void *l7, unsigned int op
 
 /* Iterate over all cookies present in a request to count how many occurrences
  * match the name in args and args->data.str.len. If <multi> is non-null, then
- * multiple cookies may be parsed on the same line.
- * Accepts exactly 1 argument of type string.
+ * multiple cookies may be parsed on the same line. The returned sample is of
+ * type UINT. Accepts exactly 1 argument of type string.
  */
 static int
 smp_fetch_cookie_cnt(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
@@ -9688,6 +9773,7 @@ smp_fetch_cookie_cnt(struct proxy *px, struct session *l4, void *l7, unsigned in
 		}
 	}
 
+	smp->type = SMP_T_UINT;
 	smp->data.uint = cnt;
 	smp->flags |= SMP_F_VOL_HDR;
 	return 1;
