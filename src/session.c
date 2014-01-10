@@ -785,8 +785,6 @@ static int sess_update_st_con_tcp(struct session *s, struct stream_interface *si
 			 * so we need to pretend we're established to log correctly
 			 * and let later states handle the failure.
 			 */
-			s->logs.t_connect = tv_ms_elapsed(&s->logs.tv_accept, &now);
-			si->exp      = TICK_ETERNITY;
 			si->state    = SI_ST_EST;
 			si->err_type = SI_ET_DATA_ERR;
 			si->ib->flags |= CF_READ_ERROR | CF_WRITE_ERROR;
@@ -828,8 +826,6 @@ static int sess_update_st_con_tcp(struct session *s, struct stream_interface *si
 	/* OK, this means that a connection succeeded. The caller will be
 	 * responsible for handling the transition from CON to EST.
 	 */
-	s->logs.t_connect = tv_ms_elapsed(&s->logs.tv_accept, &now);
-	si->exp      = TICK_ETERNITY;
 	si->state    = SI_ST_EST;
 	si->err_type = SI_ET_NONE;
 	return 1;
@@ -929,6 +925,10 @@ static void sess_establish(struct session *s, struct stream_interface *si)
 	struct channel *req = si->ob;
 	struct channel *rep = si->ib;
 
+	/* First, centralize the timers information */
+	s->logs.t_connect = tv_ms_elapsed(&s->logs.tv_accept, &now);
+	si->exp      = TICK_ETERNITY;
+
 	if (objt_server(s->target))
 		health_adjust(objt_server(s->target), HANA_STATUS_L4_OK);
 
@@ -942,10 +942,7 @@ static void sess_establish(struct session *s, struct stream_interface *si)
 	}
 	else {
 		s->txn.rsp.msg_state = HTTP_MSG_RPBEFORE;
-		/* reset hdr_idx which was already initialized by the request.
-		 * right now, the http parser does it.
-		 * hdr_idx_init(&s->txn.hdr_idx);
-		 */
+		rep->flags |= CF_READ_DONTWAIT; /* a single read is enough to get response headers */
 	}
 
 	rep->analysers |= s->fe->fe_rsp_ana | s->be->be_rsp_ana;
@@ -960,8 +957,9 @@ static void sess_establish(struct session *s, struct stream_interface *si)
 
 /* Update stream interface status for input states SI_ST_ASS, SI_ST_QUE, SI_ST_TAR.
  * Other input states are simply ignored.
- * Possible output states are SI_ST_CLO, SI_ST_TAR, SI_ST_ASS, SI_ST_REQ, SI_ST_CON.
- * Flags must have previously been updated for timeouts and other conditions.
+ * Possible output states are SI_ST_CLO, SI_ST_TAR, SI_ST_ASS, SI_ST_REQ, SI_ST_CON
+ * and SI_ST_EST. Flags must have previously been updated for timeouts and other
+ * conditions.
  */
 static void sess_update_stream_int(struct session *s, struct stream_interface *si)
 {
@@ -983,7 +981,7 @@ static void sess_update_stream_int(struct session *s, struct stream_interface *s
 		srv = objt_server(s->target);
 
 		if (conn_err == SN_ERR_NONE) {
-			/* state = SI_ST_CON now */
+			/* state = SI_ST_CON or SI_ST_EST now */
 			if (srv)
 				srv_inc_sess_ctr(srv);
 			return;
@@ -1191,10 +1189,8 @@ static void sess_prepare_conn_req(struct session *s, struct stream_interface *si
 		}
 
 		s->logs.t_queue   = tv_ms_elapsed(&s->logs.tv_accept, &now);
-		s->logs.t_connect = tv_ms_elapsed(&s->logs.tv_accept, &now);
 		si->state         = SI_ST_EST;
 		si->err_type      = SI_ET_NONE;
-		si->exp           = TICK_ETERNITY;
 		/* let sess_establish() finish the job */
 		return;
 	}
@@ -1605,7 +1601,8 @@ struct task *process_session(struct task *t)
 	memset(&s->txn.auth, 0, sizeof(s->txn.auth));
 
 	/* This flag must explicitly be set every time */
-	s->req->flags &= ~CF_READ_NOEXP;
+	s->req->flags &= ~(CF_READ_NOEXP|CF_WAKE_WRITE);
+	s->rep->flags &= ~(CF_READ_NOEXP|CF_WAKE_WRITE);
 
 	/* Keep a copy of req/rep flags so that we can detect shutdowns */
 	rqf_last = s->req->flags & ~CF_MASK_ANALYSER;
@@ -2124,10 +2121,10 @@ struct task *process_session(struct task *t)
 	 * Note that we're checking CF_SHUTR_NOW as an indication of a possible
 	 * recent call to channel_abort().
 	 */
-	if (!s->req->analysers &&
+	if (unlikely(!s->req->analysers &&
 	    !(s->req->flags & (CF_SHUTW|CF_SHUTR_NOW)) &&
 	    (s->req->prod->state >= SI_ST_EST) &&
-	    (s->req->to_forward != CHN_INFINITE_FORWARD)) {
+	    (s->req->to_forward != CHN_INFINITE_FORWARD))) {
 		/* This buffer is freewheeling, there's no analyser
 		 * attached to it. If any data are left in, we'll permit them to
 		 * move.
@@ -2226,20 +2223,23 @@ struct task *process_session(struct task *t)
 			 */
 			if (s->si[1].state != SI_ST_REQ)
 				sess_update_stream_int(s, &s->si[1]);
-			if (s->si[1].state == SI_ST_REQ) {
+			if (s->si[1].state == SI_ST_REQ)
 				sess_prepare_conn_req(s, &s->si[1]);
 
-				/* applets directly go to the ESTABLISHED state */
-				if (unlikely(s->si[1].state == SI_ST_EST))
-					sess_establish(s, &s->si[1]);
+			/* applets directly go to the ESTABLISHED state. Similarly,
+			 * servers experience the same fate when their connection
+			 * is reused.
+			 */
+			if (unlikely(s->si[1].state == SI_ST_EST))
+				sess_establish(s, &s->si[1]);
 
-				/* Now we can add the server name to a header (if requested) */
-				/* check for HTTP mode and proxy server_name_hdr_name != NULL */
-				if ((s->flags & SN_BE_ASSIGNED) &&
-				    (s->be->mode == PR_MODE_HTTP) &&
-				    (s->be->server_id_hdr_name != NULL && objt_server(s->target))) {
-					http_send_name_header(&s->txn, s->be, objt_server(s->target)->id);
-				}
+			/* Now we can add the server name to a header (if requested) */
+			/* check for HTTP mode and proxy server_name_hdr_name != NULL */
+			if ((s->si[1].state >= SI_ST_CON) &&
+			    (s->be->server_id_hdr_name != NULL) &&
+			    (s->be->mode == PR_MODE_HTTP) &&
+			    objt_server(s->target)) {
+				http_send_name_header(&s->txn, s->be, objt_server(s->target)->id);
 			}
 
 			srv = objt_server(s->target);
@@ -2263,10 +2263,10 @@ struct task *process_session(struct task *t)
 	 * Note that we're checking CF_SHUTR_NOW as an indication of a possible
 	 * recent call to channel_abort().
 	 */
-	if (!s->rep->analysers &&
+	if (unlikely(!s->rep->analysers &&
 	    !(s->rep->flags & (CF_SHUTW|CF_SHUTR_NOW)) &&
 	    (s->rep->prod->state >= SI_ST_EST) &&
-	    (s->rep->to_forward != CHN_INFINITE_FORWARD)) {
+	    (s->rep->to_forward != CHN_INFINITE_FORWARD))) {
 		/* This buffer is freewheeling, there's no analyser
 		 * attached to it. If any data are left in, we'll permit them to
 		 * move.

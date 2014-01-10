@@ -1965,8 +1965,10 @@ static void cli_io_handler(struct stream_interface *si)
 			/* ensure we have some output room left in the event we
 			 * would want to return some info right after parsing.
 			 */
-			if (buffer_almost_full(si->ib->buf))
+			if (buffer_almost_full(si->ib->buf)) {
+				si->ib->flags |= CF_WAKE_WRITE;
 				break;
+			}
 
 			reql = bo_getline(si->ob, trash.str, trash.size);
 			if (reql <= 0) { /* closed or EOL not found */
@@ -3360,8 +3362,10 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 	case STAT_PX_ST_LI:
 		/* stats.l has been initialized above */
 		for (; appctx->ctx.stats.l != &px->conf.listeners; appctx->ctx.stats.l = l->by_fe.n) {
-			if (buffer_almost_full(rep->buf))
+			if (buffer_almost_full(rep->buf)) {
+				rep->flags |= CF_WAKE_WRITE;
 				return 0;
+			}
 
 			l = LIST_ELEM(appctx->ctx.stats.l, struct listener *, by_fe);
 			if (!l->counters)
@@ -3390,8 +3394,10 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 		for (; appctx->ctx.stats.sv != NULL; appctx->ctx.stats.sv = sv->next) {
 			int sv_state; /* 0=DOWN, 1=going up, 2=going down, 3=UP, 4,5=NOLB, 6=unchecked */
 
-			if (buffer_almost_full(rep->buf))
+			if (buffer_almost_full(rep->buf)) {
+				rep->flags |= CF_WAKE_WRITE;
 				return 0;
+			}
 
 			sv = appctx->ctx.stats.sv;
 
@@ -3874,8 +3880,10 @@ static int stats_dump_stat_to_buffer(struct stream_interface *si, struct uri_aut
 	case STAT_ST_LIST:
 		/* dump proxies */
 		while (appctx->ctx.stats.px) {
-			if (buffer_almost_full(rep->buf))
+			if (buffer_almost_full(rep->buf)) {
+				rep->flags |= CF_WAKE_WRITE;
 				return 0;
+			}
 
 			px = appctx->ctx.stats.px;
 			/* skip the disabled proxies, global frontend and non-networked ones */
@@ -4049,9 +4057,19 @@ static int stats_process_http_post(struct stream_interface *si)
 						break;
 					case ST_ADM_ACTION_ENABLE:
 						if ((px->state != PR_STSTOPPED) && (sv->state & SRV_MAINTAIN)) {
-							/* Already in maintenance, we can change the server state */
-							set_server_up(&sv->check);
-							sv->check.health = sv->check.rise;	/* up, but will fall down at first failure */
+							/* Already in maintenance, we can change the server state.
+							 * If this server tracks the status of another one,
+							 * we must restore the good status.
+							 */
+							if (!sv->track || (sv->track->state & SRV_RUNNING)) {
+								set_server_up(&sv->check);
+								sv->check.health = sv->check.rise;	/* up, but will fall down at first failure */
+							}
+							else {
+								sv->state &= ~SRV_MAINTAIN;
+								sv->check.state &= ~CHK_ST_PAUSED;
+								set_server_down(&sv->check);
+							}
 							altered_servers++;
 							total_servers++;
 						}

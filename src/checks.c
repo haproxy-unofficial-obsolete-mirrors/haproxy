@@ -483,7 +483,8 @@ void set_server_up(struct check *check) {
 	    ((s->check.state & CHK_ST_ENABLED) && (s->check.health == s->check.rise) &&
 	     (s->agent.health >= s->agent.rise || !(s->agent.state & CHK_ST_ENABLED))) ||
 	    ((s->agent.state & CHK_ST_ENABLED) && (s->agent.health == s->agent.rise) &&
-	     (s->check.health >= s->check.rise || !(s->check.state & CHK_ST_ENABLED)))) {
+	     (s->check.health >= s->check.rise || !(s->check.state & CHK_ST_ENABLED))) ||
+	    (!(s->agent.state & CHK_ST_ENABLED) && !(s->check.state & CHK_ST_ENABLED))) {
 		if (s->proxy->srv_bck == 0 && s->proxy->srv_act == 0) {
 			if (s->proxy->last_change < now.tv_sec)		// ignore negative times
 				s->proxy->down_time += now.tv_sec - s->proxy->last_change;
@@ -640,14 +641,13 @@ static void check_failed(struct check *check)
 		set_server_down(check);
 }
 
-void health_adjust(struct server *s, short status)
+/* note: use health_adjust() only, which first checks that the observe mode is
+ * enabled.
+ */
+void __health_adjust(struct server *s, short status)
 {
 	int failed;
 	int expire;
-
-	/* return now if observing nor health check is not enabled */
-	if (!s->observe || !s->check.task)
-		return;
 
 	if (s->observe >= HANA_OBS_SIZE)
 		return;
