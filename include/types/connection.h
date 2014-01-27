@@ -2,7 +2,7 @@
  * include/types/connection.h
  * This file describes the connection struct and associated constants.
  *
- * Copyright (C) 2000-2012 Willy Tarreau - w@1wt.eu
+ * Copyright (C) 2000-2014 Willy Tarreau - w@1wt.eu
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -37,34 +37,17 @@ struct connection;
 struct buffer;
 struct pipe;
 
-/* Polling flags that are manipulated by I/O callbacks and handshake callbacks
- * indicate what they expect from a file descriptor at each layer. For each
- * direction, we have 2 bits, one stating whether any suspected activity on the
- * FD induce a call to the iocb, and another one indicating that the FD has
- * already returned EAGAIN and that polling on it is essential before calling
- * the iocb again :
- *   POL ENA  state
- *    0   0   STOPPED : any activity on this FD is ignored
- *    0   1   ENABLED : any (suspected) activity may call the iocb
- *    1   0   STOPPED : as above
- *    1   1   POLLED  : the FD is being polled for activity
+/* For each direction, we have a CO_FL_{SOCK,DATA}_<DIR>_ENA flag, which
+ * indicates if read or write is desired in that direction for the respective
+ * layers. The current status corresponding to the current layer being used is
+ * remembered in the CO_FL_CURR_<DIR>_ENA flag. The need to poll (ie receipt of
+ * EAGAIN) is remembered at the file descriptor level so that even when the
+ * activity is stopped and restarted, we still remember whether it was needed
+ * to poll before attempting the I/O.
  *
- * - Enabling an I/O event consists in ORing with 1.
- * - Stopping an I/O event consists in ANDing with ~1.
- * - Polling for an I/O event consists in ORing with ~3.
- *
- * The last ENA state is remembered in CO_FL_CURR_* so that differential
- * changes can be applied. After bits are applied, the POLL status bits are
- * cleared so that it is possible to detect when an EAGAIN was encountered. For
- * pollers that do not support speculative I/O, POLLED is the same as ENABLED
- * and the POL flag can safely be ignored. However it makes a difference for
- * the connection handler.
- *
- * The ENA flags are per-layer (one pair for SOCK, another one for DATA). The
- * POL flags are irrelevant to these layers and only reflect the fact that
- * EAGAIN was encountered, they're materialised by the CO_FL_WAIT_* connection
- * flags. POL flags always indicate a polling change because it is assumed that
- * the poller uses a cache and does not always poll.
+ * The CO_FL_CURR_<DIR>_ENA flag is set from the FD status in
+ * conn_refresh_polling_flags(). The FD state is updated according to these
+ * flags in conn_cond_update_polling().
  */
 
 /* flags for use in connection->flags */
@@ -75,12 +58,12 @@ enum {
 	CO_FL_SOCK_RD_ENA   = 0x00000001,  /* receiving handshakes is allowed */
 	CO_FL_DATA_RD_ENA   = 0x00000002,  /* receiving data is allowed */
 	CO_FL_CURR_RD_ENA   = 0x00000004,  /* receiving is currently allowed */
-	CO_FL_WAIT_RD       = 0x00000008,  /* receiving needs to poll first */
+	/* unused : 0x00000008 */
 
 	CO_FL_SOCK_WR_ENA   = 0x00000010,  /* sending handshakes is desired */
 	CO_FL_DATA_WR_ENA   = 0x00000020,  /* sending data is desired */
 	CO_FL_CURR_WR_ENA   = 0x00000040,  /* sending is currently desired */
-	CO_FL_WAIT_WR       = 0x00000080,  /* sending needs to poll first */
+	/* unused : 0x00000080 */
 
 	/* These flags indicate whether the Control and Transport layers are initialized */
 	CO_FL_CTRL_READY    = 0x00000100, /* FD was registered, fd_delete() needed */
@@ -149,6 +132,19 @@ enum {
 /* possible connection error codes */
 enum {
 	CO_ER_NONE,             /* no error */
+
+	CO_ER_CONF_FDLIM,       /* reached process' configured FD limitation */
+	CO_ER_PROC_FDLIM,       /* reached process' FD limitation */
+	CO_ER_SYS_FDLIM,        /* reached system's FD limitation */
+	CO_ER_SYS_MEMLIM,       /* reached system buffers limitation */
+	CO_ER_NOPROTO,          /* protocol not supported */
+	CO_ER_SOCK_ERR,         /* other socket error */
+
+	CO_ER_PORT_RANGE,       /* source port range exhausted */
+	CO_ER_CANT_BIND,        /* can't bind to source address */
+	CO_ER_FREE_PORTS,       /* no more free ports on the system */
+	CO_ER_ADDR_INUSE,       /* local address already in use */
+
 	CO_ER_PRX_EMPTY,        /* nothing received in PROXY protocol header */
 	CO_ER_PRX_ABORT,        /* client abort during PROXY protocol header */
 	CO_ER_PRX_TIMEOUT,      /* timeout while waiting for a PROXY header */

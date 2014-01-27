@@ -4286,7 +4286,7 @@ static void http_stats_io_handler(struct stream_interface *si)
 
 static inline const char *get_conn_ctrl_name(const struct connection *conn)
 {
-	if (!(conn->flags & CO_FL_CTRL_READY) || !conn->ctrl)
+	if (!conn_ctrl_ready(conn))
 		return "NONE";
 	return conn->ctrl->name;
 }
@@ -4295,7 +4295,7 @@ static inline const char *get_conn_xprt_name(const struct connection *conn)
 {
 	static char ptr[17];
 
-	if (!(conn->flags & CO_FL_XPRT_READY) || !conn->xprt)
+	if (!conn_xprt_ready(conn))
 		return "NONE";
 
 	if (conn->xprt == &raw_sock)
@@ -4525,11 +4525,11 @@ static int stats_dump_full_sess_to_buffer(struct stream_interface *si, struct se
 			              obj_base_ptr(conn->target));
 
 			chunk_appendf(&trash,
-			              "      flags=0x%08x fd=%d fd_spec_e=%02x fd_spec_p=%d updt=%d\n",
+			              "      flags=0x%08x fd=%d fd.state=%02x fd.cache=%d updt=%d\n",
 			              conn->flags,
 			              conn->t.sock.fd,
-			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].spec_e : 0,
-			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].spec_p : 0,
+			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].state : 0,
+			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].cache : 0,
 			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].updated : 0);
 		}
 		else if ((tmpctx = objt_appctx(sess->si[0].end)) != NULL) {
@@ -4556,8 +4556,8 @@ static int stats_dump_full_sess_to_buffer(struct stream_interface *si, struct se
 			              "      flags=0x%08x fd=%d fd_spec_e=%02x fd_spec_p=%d updt=%d\n",
 			              conn->flags,
 			              conn->t.sock.fd,
-			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].spec_e : 0,
-			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].spec_p : 0,
+			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].state : 0,
+			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].cache : 0,
 			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].updated : 0);
 		}
 		else if ((tmpctx = objt_appctx(sess->si[1].end)) != NULL) {

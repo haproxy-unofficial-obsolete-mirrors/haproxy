@@ -1,7 +1,7 @@
 /*
  * FD polling functions for generic select()
  *
- * Copyright 2000-2012 Willy Tarreau <w@1wt.eu>
+ * Copyright 2000-2014 Willy Tarreau <w@1wt.eu>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -53,39 +53,31 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 	/* first, scan the update list to find changes */
 	for (updt_idx = 0; updt_idx < fd_nbupdt; updt_idx++) {
 		fd = fd_updt[updt_idx];
-		en = fdtab[fd].spec_e & 15;  /* new events */
-		eo = fdtab[fd].spec_e >> 4;  /* previous events */
-
-		if (fdtab[fd].owner && (eo ^ en)) {
-			if ((eo ^ en) & FD_EV_POLLED_RW) {
-				/* poll status changed, update the lists */
-				if ((eo & ~en) & FD_EV_POLLED_R)
-					FD_CLR(fd, fd_evts[DIR_RD]);
-				else if ((en & ~eo) & FD_EV_POLLED_R)
-					FD_SET(fd, fd_evts[DIR_RD]);
-
-				if ((eo & ~en) & FD_EV_POLLED_W)
-					FD_CLR(fd, fd_evts[DIR_WR]);
-				else if ((en & ~eo) & FD_EV_POLLED_W)
-					FD_SET(fd, fd_evts[DIR_WR]);
-			}
-
-			fdtab[fd].spec_e = (en << 4) + en;  /* save new events */
-
-			if (!(en & FD_EV_ACTIVE_RW)) {
-				/* This fd doesn't use any active entry anymore, we can
-				 * kill its entry.
-				 */
-				release_spec_entry(fd);
-			}
-			else if ((en & ~eo) & FD_EV_ACTIVE_RW) {
-				/* we need a new spec entry now */
-				alloc_spec_entry(fd);
-			}
-
-		}
 		fdtab[fd].updated = 0;
 		fdtab[fd].new = 0;
+
+		if (!fdtab[fd].owner)
+			continue;
+
+		eo = fdtab[fd].state;
+		en = fd_compute_new_polled_status(eo);
+
+		if ((eo ^ en) & FD_EV_POLLED_RW) {
+			/* poll status changed, update the lists */
+			fdtab[fd].state = en;
+
+			if ((eo & ~en) & FD_EV_POLLED_R)
+				FD_CLR(fd, fd_evts[DIR_RD]);
+			else if ((en & ~eo) & FD_EV_POLLED_R)
+				FD_SET(fd, fd_evts[DIR_RD]);
+
+			if ((eo & ~en) & FD_EV_POLLED_W)
+				FD_CLR(fd, fd_evts[DIR_WR]);
+			else if ((en & ~eo) & FD_EV_POLLED_W)
+				FD_SET(fd, fd_evts[DIR_WR]);
+		}
+
+		fd_alloc_or_release_cache_entry(fd, en);
 	}
 	fd_nbupdt = 0;
 
@@ -93,7 +85,7 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 	delta.tv_sec  = 0;
 	delta.tv_usec = 0;
 
-	if (!fd_nbspec && !run_queue && !signal_queue_len) {
+	if (!fd_cache_num && !run_queue && !signal_queue_len) {
 		if (!exp) {
 			delta_ms      = MAX_DELAY_MS;
 			delta.tv_sec  = (MAX_DELAY_MS / 1000);
@@ -156,26 +148,7 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 			if (FD_ISSET(fd, tmp_evts[DIR_WR]))
 				fdtab[fd].ev |= FD_POLL_OUT;
 
-			if (fdtab[fd].iocb && fdtab[fd].ev) {
-				/* Mark the events as speculative before processing
-				 * them so that if nothing can be done we don't need
-				 * to poll again.
-				 */
-				if (fdtab[fd].ev & FD_POLL_IN)
-					fd_ev_set(fd, DIR_RD);
-
-				if (fdtab[fd].ev & FD_POLL_OUT)
-					fd_ev_set(fd, DIR_WR);
-
-				if (fdtab[fd].spec_p) {
-					/* This fd was already scheduled for being
-					 * called as a speculative I/O.
-					 */
-					continue;
-				}
-
-				fdtab[fd].iocb(fd);
-			}
+			fd_process_polled_events(fd);
 		}
 	}
 }

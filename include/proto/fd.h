@@ -2,7 +2,7 @@
  * include/proto/fd.h
  * File descriptors states.
  *
- * Copyright (C) 2000-2012 Willy Tarreau - w@1wt.eu
+ * Copyright (C) 2000-2014 Willy Tarreau - w@1wt.eu
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -31,10 +31,10 @@
 #include <types/fd.h>
 
 /* public variables */
-extern int fd_nbspec;          // number of speculative events in the list
-extern int fd_nbupdt;          // number of updates in the list
-extern unsigned int *fd_spec;  // speculative I/O list
-extern unsigned int *fd_updt;  // FD updates list
+extern unsigned int *fd_cache;      // FD events cache
+extern unsigned int *fd_updt;       // FD updates list
+extern int fd_cache_num;            // number of events in the cache
+extern int fd_nbupdt;               // number of updates in the list
 
 /* Deletes an FD from the fdsets, and recomputes the maxfd limit.
  * The file descriptor is also closed.
@@ -76,10 +76,18 @@ int list_pollers(FILE *out);
  */
 void run_poller();
 
-/* Scan and process the speculative events. This should be called right after
+/* Scan and process the cached events. This should be called right after
  * the poller.
  */
-void fd_process_spec_events();
+void fd_process_cached_events();
+
+/* Check the events attached to a file descriptor, update its cache
+ * accordingly, and call the associated I/O callback. If new updates are
+ * detected, the function tries to process them as well in order to save
+ * wakeups after accept().
+ */
+void fd_process_polled_events(int fd);
+
 
 /* Mark fd <fd> as updated and allocate an entry in the update list for this if
  * it was not already there. This can be done at any time.
@@ -94,131 +102,231 @@ static inline void updt_fd(const int fd)
 }
 
 
-/* allocate an entry for a speculative event. This can be done at any time. */
-static inline void alloc_spec_entry(const int fd)
+/* Allocates a cache entry for a file descriptor if it does not yet have one.
+ * This can be done at any time.
+ */
+static inline void fd_alloc_cache_entry(const int fd)
 {
-	if (fdtab[fd].spec_p)
-		/* FD already in speculative I/O list */
+	if (fdtab[fd].cache)
 		return;
-	fd_nbspec++;
-	fdtab[fd].spec_p = fd_nbspec;
-	fd_spec[fd_nbspec-1] = fd;
+	fd_cache_num++;
+	fdtab[fd].cache = fd_cache_num;
+	fd_cache[fd_cache_num-1] = fd;
 }
 
-/* Removes entry used by fd <fd> from the spec list and replaces it with the
- * last one. The fdtab.spec is adjusted to match the back reference if needed.
+/* Removes entry used by fd <fd> from the FD cache and replaces it with the
+ * last one. The fdtab.cache is adjusted to match the back reference if needed.
  * If the fd has no entry assigned, return immediately.
  */
-static inline void release_spec_entry(int fd)
+static inline void fd_release_cache_entry(int fd)
 {
 	unsigned int pos;
 
-	pos = fdtab[fd].spec_p;
+	pos = fdtab[fd].cache;
 	if (!pos)
 		return;
-	fdtab[fd].spec_p = 0;
-	fd_nbspec--;
-	if (likely(pos <= fd_nbspec)) {
+	fdtab[fd].cache = 0;
+	fd_cache_num--;
+	if (likely(pos <= fd_cache_num)) {
 		/* was not the last entry */
-		fd = fd_spec[fd_nbspec];
-		fd_spec[pos - 1] = fd;
-		fdtab[fd].spec_p = pos;
+		fd = fd_cache[fd_cache_num];
+		fd_cache[pos - 1] = fd;
+		fdtab[fd].cache = pos;
+	}
+}
+
+/* Computes the new polled status based on the active and ready statuses, for
+ * each direction. This is meant to be used by pollers while processing updates.
+ */
+static inline int fd_compute_new_polled_status(int state)
+{
+	if (state & FD_EV_ACTIVE_R) {
+		if (!(state & FD_EV_READY_R))
+			state |= FD_EV_POLLED_R;
+	}
+	else
+		state &= ~FD_EV_POLLED_R;
+
+	if (state & FD_EV_ACTIVE_W) {
+		if (!(state & FD_EV_READY_W))
+			state |= FD_EV_POLLED_W;
+	}
+	else
+		state &= ~FD_EV_POLLED_W;
+
+	return state;
+}
+
+/* Automatically allocates or releases a cache entry for fd <fd> depending on
+ * its new state. This is meant to be used by pollers while processing updates.
+ */
+static inline void fd_alloc_or_release_cache_entry(int fd, int new_state)
+{
+	/* READY and ACTIVE states (the two with both flags set) require a cache entry */
+
+	if (((new_state & (FD_EV_READY_R | FD_EV_ACTIVE_R)) == (FD_EV_READY_R | FD_EV_ACTIVE_R)) ||
+	    ((new_state & (FD_EV_READY_W | FD_EV_ACTIVE_W)) == (FD_EV_READY_W | FD_EV_ACTIVE_W))) {
+		fd_alloc_cache_entry(fd);
+	}
+	else {
+		fd_release_cache_entry(fd);
 	}
 }
 
 /*
- * Returns non-zero if <fd> is already monitored for events in direction <dir>.
+ * returns the FD's recv state (FD_EV_*)
  */
-static inline int fd_ev_is_set(const int fd, int dir)
+static inline int fd_recv_state(const int fd)
 {
-	return ((unsigned)fdtab[fd].spec_e >> dir) & FD_EV_STATUS;
+	return ((unsigned)fdtab[fd].state >> (4 * DIR_RD)) & FD_EV_STATUS;
 }
 
-/* Disable processing of events on fd <fd> for direction <dir>. Note: this
- * function was optimized to be used with a constant for <dir>.
+/*
+ * returns true if the FD is active for recv
  */
-static inline void fd_ev_clr(const int fd, int dir)
+static inline int fd_recv_active(const int fd)
 {
-	unsigned int i = ((unsigned int)fdtab[fd].spec_e) & (FD_EV_STATUS << dir);
-	if (i == 0)
+	return (unsigned)fdtab[fd].state & FD_EV_ACTIVE_R;
+}
+
+/*
+ * returns true if the FD is ready for recv
+ */
+static inline int fd_recv_ready(const int fd)
+{
+	return (unsigned)fdtab[fd].state & FD_EV_READY_R;
+}
+
+/*
+ * returns true if the FD is polled for recv
+ */
+static inline int fd_recv_polled(const int fd)
+{
+	return (unsigned)fdtab[fd].state & FD_EV_POLLED_R;
+}
+
+/*
+ * returns the FD's send state (FD_EV_*)
+ */
+static inline int fd_send_state(const int fd)
+{
+	return ((unsigned)fdtab[fd].state >> (4 * DIR_WR)) & FD_EV_STATUS;
+}
+
+/*
+ * returns true if the FD is active for send
+ */
+static inline int fd_send_active(const int fd)
+{
+	return (unsigned)fdtab[fd].state & FD_EV_ACTIVE_W;
+}
+
+/*
+ * returns true if the FD is ready for send
+ */
+static inline int fd_send_ready(const int fd)
+{
+	return (unsigned)fdtab[fd].state & FD_EV_READY_W;
+}
+
+/*
+ * returns true if the FD is polled for send
+ */
+static inline int fd_send_polled(const int fd)
+{
+	return (unsigned)fdtab[fd].state & FD_EV_POLLED_W;
+}
+
+/* Disable processing recv events on fd <fd> */
+static inline void fd_stop_recv(int fd)
+{
+	if (!((unsigned int)fdtab[fd].state & FD_EV_ACTIVE_R))
 		return; /* already disabled */
-	fdtab[fd].spec_e ^= i;
+	fdtab[fd].state &= ~FD_EV_ACTIVE_R;
 	updt_fd(fd); /* need an update entry to change the state */
 }
 
-/* Enable polling for events on fd <fd> for direction <dir>. Note: this
- * function was optimized to be used with a constant for <dir>.
- */
-static inline void fd_ev_wai(const int fd, int dir)
+/* Disable processing send events on fd <fd> */
+static inline void fd_stop_send(int fd)
 {
-	unsigned int i = ((unsigned int)fdtab[fd].spec_e) & (FD_EV_STATUS << dir);
-	if (i == (FD_EV_POLLED << dir))
-		return; /* already in desired state */
-	fdtab[fd].spec_e ^= i ^ (FD_EV_POLLED << dir);
-	updt_fd(fd); /* need an update entry to change the state */
-}
-
-/* Enable processing of events on fd <fd> for direction <dir>. Note: this
- * function was optimized to be used with a constant for <dir>.
- */
-static inline void fd_ev_set(int fd, int dir)
-{
-	unsigned int i = ((unsigned int)fdtab[fd].spec_e) & (FD_EV_STATUS << dir);
-
-	/* note that we don't care about disabling the polled state when
-	 * enabling the active state, since it brings no benefit but costs
-	 * some syscalls.
-	 */
-	if (i & (FD_EV_ACTIVE << dir))
-		return; /* already in desired state */
-	fdtab[fd].spec_e |= (FD_EV_ACTIVE << dir);
+	if (!((unsigned int)fdtab[fd].state & FD_EV_ACTIVE_W))
+		return; /* already disabled */
+	fdtab[fd].state &= ~FD_EV_ACTIVE_W;
 	updt_fd(fd); /* need an update entry to change the state */
 }
 
 /* Disable processing of events on fd <fd> for both directions. */
-static inline void fd_ev_rem(const int fd)
+static inline void fd_stop_both(int fd)
 {
-	unsigned int i = ((unsigned int)fdtab[fd].spec_e) & FD_EV_CURR_MASK;
-	if (i == 0)
+	if (!((unsigned int)fdtab[fd].state & FD_EV_ACTIVE_RW))
 		return; /* already disabled */
-	fdtab[fd].spec_e ^= i;
+	fdtab[fd].state &= ~FD_EV_ACTIVE_RW;
 	updt_fd(fd); /* need an update entry to change the state */
 }
 
-/* event manipulation primitives for use by I/O callbacks */
+/* Report that FD <fd> cannot receive anymore without polling (EAGAIN detected). */
+static inline void fd_cant_recv(const int fd)
+{
+	if (!(((unsigned int)fdtab[fd].state) & FD_EV_READY_R))
+		return; /* already marked as blocked */
+	fdtab[fd].state &= ~FD_EV_READY_R;
+	updt_fd(fd);
+}
+
+/* Report that FD <fd> can receive anymore without polling. */
+static inline void fd_may_recv(const int fd)
+{
+	if (((unsigned int)fdtab[fd].state) & FD_EV_READY_R)
+		return; /* already marked as blocked */
+	fdtab[fd].state |= FD_EV_READY_R;
+	updt_fd(fd);
+}
+
+/* Disable readiness when polled. This is useful to interrupt reading when it
+ * is suspected that the end of data might have been reached (eg: short read).
+ * This can only be done using level-triggered pollers, so if any edge-triggered
+ * is ever implemented, a test will have to be added here.
+ */
+static inline void fd_done_recv(const int fd)
+{
+	if (fd_recv_polled(fd))
+		fd_cant_recv(fd);
+}
+
+/* Report that FD <fd> cannot send anymore without polling (EAGAIN detected). */
+static inline void fd_cant_send(const int fd)
+{
+	if (!(((unsigned int)fdtab[fd].state) & FD_EV_READY_W))
+		return; /* already marked as blocked */
+	fdtab[fd].state &= ~FD_EV_READY_W;
+	updt_fd(fd);
+}
+
+/* Report that FD <fd> can send anymore without polling (EAGAIN detected). */
+static inline void fd_may_send(const int fd)
+{
+	if (((unsigned int)fdtab[fd].state) & FD_EV_READY_W)
+		return; /* already marked as blocked */
+	fdtab[fd].state |= FD_EV_READY_W;
+	updt_fd(fd);
+}
+
+/* Prepare FD <fd> to try to receive */
 static inline void fd_want_recv(int fd)
 {
-	return fd_ev_set(fd, DIR_RD);
+	if (((unsigned int)fdtab[fd].state & FD_EV_ACTIVE_R))
+		return; /* already enabled */
+	fdtab[fd].state |= FD_EV_ACTIVE_R;
+	updt_fd(fd); /* need an update entry to change the state */
 }
 
-static inline void fd_stop_recv(int fd)
-{
-	return fd_ev_clr(fd, DIR_RD);
-}
-
-static inline void fd_poll_recv(int fd)
-{
-	return fd_ev_wai(fd, DIR_RD);
-}
-
+/* Prepare FD <fd> to try to send */
 static inline void fd_want_send(int fd)
 {
-	return fd_ev_set(fd, DIR_WR);
-}
-
-static inline void fd_stop_send(int fd)
-{
-	return fd_ev_clr(fd, DIR_WR);
-}
-
-static inline void fd_poll_send(int fd)
-{
-	return fd_ev_wai(fd, DIR_WR);
-}
-
-static inline void fd_stop_both(int fd)
-{
-	return fd_ev_rem(fd);
+	if (((unsigned int)fdtab[fd].state & FD_EV_ACTIVE_W))
+		return; /* already enabled */
+	fdtab[fd].state |= FD_EV_ACTIVE_W;
+	updt_fd(fd); /* need an update entry to change the state */
 }
 
 /* Prepares <fd> for being polled */

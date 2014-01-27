@@ -1,37 +1,46 @@
 /*
  * File descriptors management functions.
  *
- * Copyright 2000-2012 Willy Tarreau <w@1wt.eu>
+ * Copyright 2000-2014 Willy Tarreau <w@1wt.eu>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version
  * 2 of the License, or (at your option) any later version.
  *
- * This code implements "speculative I/O". The principle is to try to perform
- * expected I/O before registering the events in the poller. Each time this
- * succeeds, it saves a possibly expensive system call to set the event. It
- * generally succeeds for all reads after an accept(), and for writes after a
- * connect(). It also improves performance for streaming connections because
- * even if only one side is polled, the other one may react accordingly
- * depending on the fill level of the buffer. This behaviour is also the only
- * one compatible with event-based pollers (eg: EPOLL_ET).
+ * This code implements an events cache for file descriptors. It remembers the
+ * readiness of a file descriptor after a return from poll() and the fact that
+ * an I/O attempt failed on EAGAIN. Events in the cache which are still marked
+ * ready and active are processed just as if they were reported by poll().
  *
- * More importantly, it enables I/O operations that are backed by invisible
- * buffers. For example, SSL is able to read a whole socket buffer and not
- * deliver it to the application buffer because it's full. Unfortunately, it
- * won't be reported by a poller anymore until some new activity happens. The
- * only way to call it again thus is to perform speculative I/O as soon as
- * reading on the FD is enabled again.
+ * This serves multiple purposes. First, it significantly improves performance
+ * by avoiding to subscribe to polling unless absolutely necessary, so most
+ * events are processed without polling at all, especially send() which
+ * benefits from the socket buffers. Second, it is the only way to support
+ * edge-triggered pollers (eg: EPOLL_ET). And third, it enables I/O operations
+ * that are backed by invisible buffers. For example, SSL is able to read a
+ * whole socket buffer and not deliver it to the application buffer because
+ * it's full. Unfortunately, it won't be reported by a poller anymore until
+ * some new activity happens. The only way to call it again thus is to keep
+ * this readiness information in the cache and to access it without polling
+ * once the FD is enabled again.
  *
- * The speculative I/O uses a list of expected events and a list of updates.
- * Expected events are events that are expected to come and that we must report
- * to the application until it asks to stop or to poll. Updates are new requests
- * for changing an FD state. Updates are the only way to create new events. This
- * is important because it means that the number of speculative events cannot
- * increase between updates and will only grow one at a time while processing
- * updates. All updates must always be processed, though events might be
- * processed by small batches if required.
+ * One interesting feature of the cache is that it maintains the principle
+ * of speculative I/O introduced in haproxy 1.3 : the first time an event is
+ * enabled, the FD is considered as ready so that the I/O attempt is performed
+ * via the cache without polling. And the polling happens only when EAGAIN is
+ * first met. This avoids polling for HTTP requests, especially when the
+ * defer-accept mode is used. It also avoids polling for sending short data
+ * such as requests to servers or short responses to clients.
+ *
+ * The cache consists in a list of active events and a list of updates.
+ * Active events are events that are expected to come and that we must report
+ * to the application until it asks to stop or asks to poll. Updates are new
+ * requests for changing an FD state. Updates are the only way to create new
+ * events. This is important because it means that the number of cached events
+ * cannot increase between updates and will only grow one at a time while
+ * processing updates. All updates must always be processed, though events
+ * might be processed by small batches if required.
  *
  * There is no direct link between the FD and the updates list. There is only a
  * bit in the fdtab[] to indicate than a file descriptor is already present in
@@ -41,45 +50,98 @@
  *
  * It is important to understand that as long as all expected events are
  * processed, they might starve the polled events, especially because polled
- * I/O starvation quickly induces more speculative I/O. One solution to this
+ * I/O starvation quickly induces more cached I/O. One solution to this
  * consists in only processing a part of the events at once, but one drawback
- * is that unhandled events will still wake the poller up. Using an event-driven
- * poller such as EPOLL_ET will solve this issue though.
+ * is that unhandled events will still wake the poller up. Using an edge-
+ * triggered poller such as EPOLL_ET will solve this issue though.
  *
- * A file descriptor has a distinct state for each direction. This state is a
- * combination of two bits :
- *  bit 0 = active Y/N : is set if the FD is active, which means that its
- *          handler will be called without prior polling ;
- *  bit 1 = polled Y/N : is set if the FD was subscribed to polling
- *
- * It is perfectly valid to have both bits set at a time, which generally means
- * that the FD was reported by polling, was marked active and not yet unpolled.
- * Such a state must not last long to avoid unneeded wakeups.
- *
- * The state of the FD as of last change is preserved in two other bits. These
- * ones are useful to save a significant amount of system calls during state
- * changes, because there is no need to update the FD status in the system until
- * we're about to call the poller.
- *
- * Since we do not want to scan all the FD list to find speculative I/O events,
+ * Since we do not want to scan all the FD list to find cached I/O events,
  * we store them in a list consisting in a linear array holding only the FD
- * indexes right now. Note that a closed FD cannot exist in the spec list,
- * because it is closed by fd_delete() which in turn calls __fd_clo() which
- * always removes it from the list.
+ * indexes right now. Note that a closed FD cannot exist in the cache, because
+ * it is closed by fd_delete() which in turn calls fd_release_cache_entry()
+ * which always removes it from the list.
  *
- * For efficiency reasons, we will store the Read and Write bits interlaced to
- * form a 4-bit field, so that we can simply shift the value right by 0/1 and
- * get what we want :
- *    3  2  1  0
- *   Wp Rp Wa Ra
+ * The FD array has to hold a back reference to the cache. This reference is
+ * always valid unless the FD is not in the cache and is not updated, in which
+ * case the reference points to index 0.
  *
- * The FD array has to hold a back reference to the speculative list. This
- * reference is always valid unless the FD if currently being polled and not
- * updated (in which case the reference points to index 0).
+ * The event state for an FD, as found in fdtab[].state, is maintained for each
+ * direction. The state field is built this way, with R bits in the low nibble
+ * and W bits in the high nibble for ease of access and debugging :
  *
- * We store the FD state in the 4 lower bits of fdtab[fd].spec_e, and save the
- * previous state upon changes in the 4 higher bits, so that changes are easy
- * to spot.
+ *               7    6    5    4   3    2    1    0
+ *             [ 0 | PW | RW | AW | 0 | PR | RR | AR ]
+ *
+ *                   A* = active     *R = read
+ *                   P* = polled     *W = write
+ *                   R* = ready
+ *
+ * An FD is marked "active" when there is a desire to use it.
+ * An FD is marked "polled" when it is registered in the polling.
+ * An FD is marked "ready" when it has not faced a new EAGAIN since last wake-up
+ * (it is a cache of the last EAGAIN regardless of polling changes).
+ *
+ * We have 8 possible states for each direction based on these 3 flags :
+ *
+ *   +---+---+---+----------+---------------------------------------------+
+ *   | P | R | A | State    | Description				  |
+ *   +---+---+---+----------+---------------------------------------------+
+ *   | 0 | 0 | 0 | DISABLED | No activity desired, not ready.		  |
+ *   | 0 | 0 | 1 | MUSTPOLL | Activity desired via polling.		  |
+ *   | 0 | 1 | 0 | STOPPED  | End of activity without polling.		  |
+ *   | 0 | 1 | 1 | ACTIVE   | Activity desired without polling.		  |
+ *   | 1 | 0 | 0 | ABORT    | Aborted poll(). Not frequently seen.	  |
+ *   | 1 | 0 | 1 | POLLED   | FD is being polled.			  |
+ *   | 1 | 1 | 0 | PAUSED   | FD was paused while ready (eg: buffer full) |
+ *   | 1 | 1 | 1 | READY    | FD was marked ready by poll()		  |
+ *   +---+---+---+----------+---------------------------------------------+
+ *
+ * The transitions are pretty simple :
+ *   - fd_want_*() : set flag A
+ *   - fd_stop_*() : clear flag A
+ *   - fd_cant_*() : clear flag R (when facing EAGAIN)
+ *   - fd_may_*()  : set flag R (upon return from poll())
+ *   - sync()      : if (A) { if (!R) P := 1 } else { P := 0 }
+ *
+ * The PAUSED, ABORT and MUSTPOLL states are transient for level-trigerred
+ * pollers and are fixed by the sync() which happens at the beginning of the
+ * poller. For event-triggered pollers, only the MUSTPOLL state will be
+ * transient and ABORT will lead to PAUSED. The ACTIVE state is the only stable
+ * one which has P != A.
+ *
+ * The READY state is a bit special as activity on the FD might be notified
+ * both by the poller or by the cache. But it is needed for some multi-layer
+ * protocols (eg: SSL) where connection activity is not 100% linked to FD
+ * activity. Also some pollers might prefer to implement it as ACTIVE if
+ * enabling/disabling the FD is cheap. The READY and ACTIVE states are the
+ * two states for which a cache entry is allocated.
+ *
+ * The state transitions look like the diagram below. Only the 4 right states
+ * have polling enabled :
+ *
+ *          (POLLED=0)          (POLLED=1)
+ *
+ *          +----------+  sync  +-------+
+ *          | DISABLED | <----- | ABORT |         (READY=0, ACTIVE=0)
+ *          +----------+        +-------+
+ *         clr |  ^           set |  ^
+ *             |  |               |  |
+ *             v  | set           v  | clr
+ *          +----------+  sync  +--------+
+ *          | MUSTPOLL | -----> | POLLED |        (READY=0, ACTIVE=1)
+ *          +----------+        +--------+
+ *                ^          poll |  ^
+ *                |               |  |
+ *                | EAGAIN        v  | EAGAIN
+ *           +--------+         +-------+
+ *           | ACTIVE |         | READY |         (READY=1, ACTIVE=1)
+ *           +--------+         +-------+
+ *         clr |  ^           set |  ^
+ *             |  |               |  |
+ *             v  | set           v  | clr
+ *          +---------+   sync  +--------+
+ *          | STOPPED | <------ | PAUSED |        (READY=1, ACTIVE=0)
+ *          +---------+         +--------+
  */
 
 #include <stdio.h>
@@ -105,11 +167,10 @@ struct poller pollers[MAX_POLLERS];
 struct poller cur_poller;
 int nbpollers = 0;
 
-/* FD status is defined by the poller's status and by the speculative I/O list */
-int fd_nbspec = 0;             // number of speculative events in the list
-int fd_nbupdt = 0;             // number of updates in the list
-unsigned int *fd_spec = NULL;  // speculative I/O list
+unsigned int *fd_cache = NULL; // FD events cache
 unsigned int *fd_updt = NULL;  // FD updates list
+int fd_cache_num = 0;          // number of events in the cache
+int fd_nbupdt = 0;             // number of updates in the list
 
 /* Deletes an FD from the fdsets, and recomputes the maxfd limit.
  * The file descriptor is also closed.
@@ -124,8 +185,8 @@ void fd_delete(int fd)
 	if (cur_poller.clo)
 		cur_poller.clo(fd);
 
-	release_spec_entry(fd);
-	fdtab[fd].spec_e &= ~(FD_EV_CURR_MASK | FD_EV_PREV_MASK);
+	fd_release_cache_entry(fd);
+	fdtab[fd].state = 0;
 
 	port_range_release_port(fdinfo[fd].port_range, fdinfo[fd].local_port);
 	fdinfo[fd].port_range = NULL;
@@ -137,35 +198,29 @@ void fd_delete(int fd)
 		maxfd--;
 }
 
-/* Scan and process the speculative events. This should be called right after
+/* Scan and process the cached events. This should be called right after
  * the poller.
  */
-void fd_process_spec_events()
+void fd_process_cached_events()
 {
-	int fd, spec_idx, e;
+	int fd, entry, e;
 
-	/* now process speculative events if any */
+	for (entry = 0; entry < fd_cache_num; ) {
+		fd = fd_cache[entry];
+		e = fdtab[fd].state;
 
-	for (spec_idx = 0; spec_idx < fd_nbspec; ) {
-		fd = fd_spec[spec_idx];
-		e = fdtab[fd].spec_e;
-
-		/*
-		 * Process the speculative events.
-		 *
-		 * Principle: events which are marked FD_EV_ACTIVE are processed
+		/* Principle: events which are marked FD_EV_ACTIVE are processed
 		 * with their usual I/O callback. The callback may remove the
-		 * events from the list or tag them for polling. Changes will be
-		 * applied on next round. Speculative entries with no more activity
-		 * are automatically scheduled for removal.
+		 * events from the cache or tag them for polling. Changes will be
+		 * applied on next round. Cache entries with no more activity are
+		 * automatically scheduled for removal.
 		 */
-
 		fdtab[fd].ev &= FD_POLL_STICKY;
 
-		if (e & FD_EV_ACTIVE_R)
+		if ((e & (FD_EV_READY_R | FD_EV_ACTIVE_R)) == (FD_EV_READY_R | FD_EV_ACTIVE_R))
 			fdtab[fd].ev |= FD_POLL_IN;
 
-		if (e & FD_EV_ACTIVE_W)
+		if ((e & (FD_EV_READY_W | FD_EV_ACTIVE_W)) == (FD_EV_READY_W | FD_EV_ACTIVE_W))
 			fdtab[fd].ev |= FD_POLL_OUT;
 
 		if (fdtab[fd].iocb && fdtab[fd].owner && fdtab[fd].ev)
@@ -173,13 +228,81 @@ void fd_process_spec_events()
 		else
 			updt_fd(fd);
 
-		/* if the fd was removed from the spec list, it has been
+		/* If the fd was removed from the cache, it has been
 		 * replaced by the next one that we don't want to skip !
 		 */
-		if (spec_idx < fd_nbspec && fd_spec[spec_idx] != fd)
+		if (entry < fd_cache_num && fd_cache[entry] != fd)
+			continue;
+		entry++;
+	}
+}
+
+/* Check the events attached to a file descriptor, update its cache
+ * accordingly, and call the associated I/O callback. If new updates are
+ * detected, the function tries to process them as well in order to save
+ * wakeups after accept().
+ */
+void fd_process_polled_events(int fd)
+{
+	int new_updt, old_updt;
+
+	/* First thing to do is to mark the reported events as ready, in order
+	 * for them to later be continued from the cache without polling if
+	 * they have to be interrupted (eg: recv fills a buffer).
+	 */
+	if (fdtab[fd].ev & (FD_POLL_IN | FD_POLL_HUP | FD_POLL_ERR))
+		fd_may_recv(fd);
+
+	if (fdtab[fd].ev & (FD_POLL_OUT | FD_POLL_ERR))
+		fd_may_send(fd);
+
+	if (fdtab[fd].cache) {
+		/* This fd is already cached, no need to process it now. */
+		return;
+	}
+
+	if (unlikely(!fdtab[fd].iocb || !fdtab[fd].ev)) {
+		/* nothing to do */
+		return;
+	}
+
+	/* Save number of updates to detect creation of new FDs. */
+	old_updt = fd_nbupdt;
+	fdtab[fd].iocb(fd);
+
+	/* One or more fd might have been created during the iocb().
+	 * This mainly happens with new incoming connections that have
+	 * just been accepted, so we'd like to process them immediately
+	 * for better efficiency, as it saves one useless task wakeup.
+	 * Second benefit, if at the end the fds are disabled again, we can
+	 * safely destroy their update entry to reduce the scope of later
+	 * scans. This is the reason we scan the new entries backwards.
+	 */
+	for (new_updt = fd_nbupdt; new_updt > old_updt; new_updt--) {
+		fd = fd_updt[new_updt - 1];
+		if (!fdtab[fd].new)
 			continue;
 
-		spec_idx++;
+		fdtab[fd].new = 0;
+		fdtab[fd].ev &= FD_POLL_STICKY;
+
+		if ((fdtab[fd].state & FD_EV_STATUS_R) == (FD_EV_READY_R | FD_EV_ACTIVE_R))
+			fdtab[fd].ev |= FD_POLL_IN;
+
+		if ((fdtab[fd].state & FD_EV_STATUS_W) == (FD_EV_READY_W | FD_EV_ACTIVE_W))
+			fdtab[fd].ev |= FD_POLL_OUT;
+
+		if (fdtab[fd].ev && fdtab[fd].iocb && fdtab[fd].owner)
+			fdtab[fd].iocb(fd);
+
+		/* we can remove this update entry if it's the last one and is
+		 * unused, otherwise we don't touch anything, especially given
+		 * that the FD might have been closed already.
+		 */
+		if (new_updt == fd_nbupdt && !fd_recv_active(fd) && !fd_send_active(fd)) {
+			fdtab[fd].updated = 0;
+			fd_nbupdt--;
+		}
 	}
 }
 
@@ -202,8 +325,8 @@ int init_pollers()
 	int p;
 	struct poller *bp;
 
-	if ((fd_spec = (uint32_t *)calloc(1, sizeof(uint32_t) * global.maxsock)) == NULL)
-		goto fail_spec;
+	if ((fd_cache = (uint32_t *)calloc(1, sizeof(uint32_t) * global.maxsock)) == NULL)
+		goto fail_cache;
 
 	if ((fd_updt = (uint32_t *)calloc(1, sizeof(uint32_t) * global.maxsock)) == NULL)
 		goto fail_updt;
@@ -225,8 +348,8 @@ int init_pollers()
 	return 0;
 
  fail_updt:
-	free(fd_spec);
- fail_spec:
+	free(fd_cache);
+ fail_cache:
 	return 0;
 }
 
@@ -246,9 +369,9 @@ void deinit_pollers() {
 	}
 
 	free(fd_updt);
-	free(fd_spec);
+	free(fd_cache);
 	fd_updt = NULL;
-	fd_spec = NULL;
+	fd_cache = NULL;
 }
 
 /*

@@ -205,7 +205,10 @@ static void stream_int_update_embedded(struct stream_interface *si)
 	    /* changes on the consumption side */
 	    (si->ob->flags & (CF_WRITE_NULL|CF_WRITE_ERROR)) ||
 	    ((si->ob->flags & CF_WRITE_ACTIVITY) &&
-	     (si->ob->flags & (CF_SHUTW|CF_WAKE_WRITE)))) {
+	     ((si->ob->flags & CF_SHUTW) ||
+	      ((si->ob->flags & CF_WAKE_WRITE) &&
+	       (si->ob->prod->state != SI_ST_EST ||
+	        (channel_is_empty(si->ob) && !si->ob->to_forward)))))) {
 		if (!(si->flags & SI_FL_DONT_WAKE) && si->owner)
 			task_wakeup(si->owner, TASK_WOKEN_IO);
 	}
@@ -397,6 +400,9 @@ int conn_si_send_proxy(struct connection *conn, unsigned int flag)
 	if (!conn_ctrl_ready(conn))
 		goto out_error;
 
+	if (!fd_send_ready(conn->t.sock.fd))
+		goto out_wait;
+
 	/* If we have a PROXY line to send, we'll use this to validate the
 	 * connection, in which case the connection is validated only once
 	 * we've sent the whole proxy line. Otherwise we use connect().
@@ -484,7 +490,7 @@ int conn_si_send_proxy(struct connection *conn, unsigned int flag)
 
  out_wait:
 	__conn_sock_stop_recv(conn);
-	__conn_sock_poll_send(conn);
+	fd_cant_send(conn->t.sock.fd);
 	return 0;
 }
 
@@ -630,7 +636,10 @@ static int si_conn_wake_cb(struct connection *conn)
 	    /* changes on the consumption side */
 	    (si->ob->flags & (CF_WRITE_NULL|CF_WRITE_ERROR)) ||
 	    ((si->ob->flags & CF_WRITE_ACTIVITY) &&
-	     (si->ob->flags & (CF_SHUTW|CF_WAKE_WRITE)))) {
+	     ((si->ob->flags & CF_SHUTW) ||
+	      ((si->ob->flags & CF_WAKE_WRITE) &&
+	       (si->ob->prod->state != SI_ST_EST ||
+	        (channel_is_empty(si->ob) && !si->ob->to_forward)))))) {
 		task_wakeup(si->owner, TASK_WOKEN_IO);
 	}
 	if (si->ib->flags & CF_READ_ACTIVITY)
@@ -673,7 +682,7 @@ static void si_conn_send(struct connection *conn)
 	/* when we're here, we already know that there is no spliced
 	 * data left, and that there are sendable buffered data.
 	 */
-	if (!(conn->flags & (CO_FL_ERROR | CO_FL_SOCK_WR_SH | CO_FL_DATA_WR_SH | CO_FL_WAIT_DATA | CO_FL_WAIT_WR | CO_FL_HANDSHAKE))) {
+	if (!(conn->flags & (CO_FL_ERROR | CO_FL_SOCK_WR_SH | CO_FL_DATA_WR_SH | CO_FL_WAIT_DATA | CO_FL_HANDSHAKE))) {
 		/* check if we want to inform the kernel that we're interested in
 		 * sending more data after this call. We want this if :
 		 *  - we're about to close after this last send and want to merge
@@ -971,19 +980,16 @@ static void stream_int_chk_snd_conn(struct stream_interface *si)
 		return;
 	}
 
+	/* Before calling the data-level operations, we have to prepare
+	 * the polling flags to ensure we properly detect changes.
+	 */
+	conn_refresh_polling_flags(conn);
+	__conn_data_want_send(conn);
+
 	if (!(conn->flags & (CO_FL_HANDSHAKE|CO_FL_WAIT_L4_CONN|CO_FL_WAIT_L6_CONN))) {
-		/* Before calling the data-level operations, we have to prepare
-		 * the polling flags to ensure we properly detect changes.
-		 */
-		if (conn_ctrl_ready(conn))
-			fd_want_send(conn->t.sock.fd);
-
-		conn_refresh_polling_flags(conn);
-
 		si_conn_send(conn);
-		if (conn_ctrl_ready(conn) && (conn->flags & CO_FL_ERROR)) {
+		if (conn->flags & CO_FL_ERROR) {
 			/* Write error on the file descriptor */
-			fd_stop_both(conn->t.sock.fd);
 			__conn_data_stop_both(conn);
 			si->flags |= SI_FL_ERR;
 			goto out_wakeup;
@@ -1043,7 +1049,10 @@ static void stream_int_chk_snd_conn(struct stream_interface *si)
 	/* in case of special condition (error, shutdown, end of write...), we
 	 * have to notify the task.
 	 */
-	if (likely(ob->flags & (CF_WRITE_NULL|CF_WRITE_ERROR|CF_SHUTW|CF_WAKE_WRITE))) {
+	if (likely((ob->flags & (CF_WRITE_NULL|CF_WRITE_ERROR|CF_SHUTW)) ||
+	          ((ob->flags & CF_WAKE_WRITE) &&
+	           ((channel_is_empty(si->ob) && !ob->to_forward) ||
+	            si->state != SI_ST_EST)))) {
 	out_wakeup:
 		if (!(si->flags & SI_FL_DONT_WAKE) && si->owner)
 			task_wakeup(si->owner, TASK_WOKEN_IO);
@@ -1149,7 +1158,7 @@ static void si_conn_recv_cb(struct connection *conn)
 	 * that if such an event is not handled above in splice, it will be handled here by
 	 * recv().
 	 */
-	while (!(conn->flags & (CO_FL_ERROR | CO_FL_SOCK_RD_SH | CO_FL_DATA_RD_SH | CO_FL_WAIT_RD | CO_FL_WAIT_ROOM | CO_FL_HANDSHAKE))) {
+	while (!(conn->flags & (CO_FL_ERROR | CO_FL_SOCK_RD_SH | CO_FL_DATA_RD_SH | CO_FL_WAIT_ROOM | CO_FL_HANDSHAKE))) {
 		max = bi_avail(chn);
 
 		if (!max) {

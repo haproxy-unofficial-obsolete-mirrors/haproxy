@@ -59,7 +59,7 @@ int conn_fd_handler(int fd)
 	 * around.
 	 */
 	while (unlikely(conn->flags & (CO_FL_HANDSHAKE | CO_FL_ERROR))) {
-		if (unlikely(conn->flags & (CO_FL_ERROR|CO_FL_WAIT_RD|CO_FL_WAIT_WR)))
+		if (unlikely(conn->flags & CO_FL_ERROR))
 			goto leave;
 
 		if (conn->flags & CO_FL_ACCEPT_PROXY)
@@ -92,9 +92,8 @@ int conn_fd_handler(int fd)
 	 * that we must absolutely test conn->xprt at each step in case it suddenly
 	 * changes due to a quick unexpected close().
 	 */
-	if ((fdtab[fd].ev & (FD_POLL_IN | FD_POLL_HUP | FD_POLL_ERR)) &&
-	    conn->xprt &&
-	    !(conn->flags & (CO_FL_WAIT_RD|CO_FL_WAIT_ROOM|CO_FL_ERROR|CO_FL_HANDSHAKE))) {
+	if (conn->xprt && fd_recv_ready(fd) &&
+	    ((conn->flags & (CO_FL_DATA_RD_ENA|CO_FL_WAIT_ROOM|CO_FL_ERROR|CO_FL_HANDSHAKE)) == CO_FL_DATA_RD_ENA)) {
 		/* force detection of a flag change : it's impossible to have both
 		 * CONNECTED and WAIT_CONN so we're certain to trigger a change.
 		 */
@@ -102,9 +101,8 @@ int conn_fd_handler(int fd)
 		conn->data->recv(conn);
 	}
 
-	if ((fdtab[fd].ev & (FD_POLL_OUT | FD_POLL_ERR)) &&
-	    conn->xprt &&
-	    !(conn->flags & (CO_FL_WAIT_WR|CO_FL_WAIT_DATA|CO_FL_ERROR|CO_FL_HANDSHAKE))) {
+	if (conn->xprt && fd_send_ready(fd) &&
+	    ((conn->flags & (CO_FL_DATA_WR_ENA|CO_FL_WAIT_DATA|CO_FL_ERROR|CO_FL_HANDSHAKE)) == CO_FL_DATA_WR_ENA)) {
 		/* force detection of a flag change : it's impossible to have both
 		 * CONNECTED and WAIT_CONN so we're certain to trigger a change.
 		 */
@@ -118,7 +116,7 @@ int conn_fd_handler(int fd)
 	if (unlikely(conn->flags & (CO_FL_HANDSHAKE | CO_FL_ERROR)))
 		goto process_handshake;
 
-	if (unlikely(conn->flags & CO_FL_WAIT_L4_CONN) && !(conn->flags & CO_FL_WAIT_WR)) {
+	if (unlikely(conn->flags & CO_FL_WAIT_L4_CONN)) {
 		/* still waiting for a connection to establish and nothing was
 		 * attempted yet to probe the connection. Then let's retry the
 		 * connect().
@@ -159,15 +157,11 @@ void conn_update_data_polling(struct connection *c)
 {
 	unsigned int f = c->flags;
 
-	if (!(c->flags & CO_FL_CTRL_READY))
+	if (!conn_ctrl_ready(c))
 		return;
 
 	/* update read status if needed */
-	if (unlikely((f & (CO_FL_DATA_RD_ENA|CO_FL_WAIT_RD)) == (CO_FL_DATA_RD_ENA|CO_FL_WAIT_RD))) {
-		fd_poll_recv(c->t.sock.fd);
-		f |= CO_FL_CURR_RD_ENA;
-	}
-	else if (unlikely((f & (CO_FL_CURR_RD_ENA|CO_FL_DATA_RD_ENA)) == CO_FL_DATA_RD_ENA)) {
+	if (unlikely((f & (CO_FL_CURR_RD_ENA|CO_FL_DATA_RD_ENA)) == CO_FL_DATA_RD_ENA)) {
 		fd_want_recv(c->t.sock.fd);
 		f |= CO_FL_CURR_RD_ENA;
 	}
@@ -177,11 +171,7 @@ void conn_update_data_polling(struct connection *c)
 	}
 
 	/* update write status if needed */
-	if (unlikely((f & (CO_FL_DATA_WR_ENA|CO_FL_WAIT_WR)) == (CO_FL_DATA_WR_ENA|CO_FL_WAIT_WR))) {
-		fd_poll_send(c->t.sock.fd);
-		f |= CO_FL_CURR_WR_ENA;
-	}
-	else if (unlikely((f & (CO_FL_CURR_WR_ENA|CO_FL_DATA_WR_ENA)) == CO_FL_DATA_WR_ENA)) {
+	if (unlikely((f & (CO_FL_CURR_WR_ENA|CO_FL_DATA_WR_ENA)) == CO_FL_DATA_WR_ENA)) {
 		fd_want_send(c->t.sock.fd);
 		f |= CO_FL_CURR_WR_ENA;
 	}
@@ -189,7 +179,7 @@ void conn_update_data_polling(struct connection *c)
 		fd_stop_send(c->t.sock.fd);
 		f &= ~CO_FL_CURR_WR_ENA;
 	}
-	c->flags = f & ~(CO_FL_WAIT_RD | CO_FL_WAIT_WR);
+	c->flags = f;
 }
 
 /* Update polling on connection <c>'s file descriptor depending on its current
@@ -202,15 +192,11 @@ void conn_update_sock_polling(struct connection *c)
 {
 	unsigned int f = c->flags;
 
-	if (!(c->flags & CO_FL_CTRL_READY))
+	if (!conn_ctrl_ready(c))
 		return;
 
 	/* update read status if needed */
-	if (unlikely((f & (CO_FL_SOCK_RD_ENA|CO_FL_WAIT_RD)) == (CO_FL_SOCK_RD_ENA|CO_FL_WAIT_RD))) {
-		fd_poll_recv(c->t.sock.fd);
-		f |= CO_FL_CURR_RD_ENA;
-	}
-	else if (unlikely((f & (CO_FL_CURR_RD_ENA|CO_FL_SOCK_RD_ENA)) == CO_FL_SOCK_RD_ENA)) {
+	if (unlikely((f & (CO_FL_CURR_RD_ENA|CO_FL_SOCK_RD_ENA)) == CO_FL_SOCK_RD_ENA)) {
 		fd_want_recv(c->t.sock.fd);
 		f |= CO_FL_CURR_RD_ENA;
 	}
@@ -220,11 +206,7 @@ void conn_update_sock_polling(struct connection *c)
 	}
 
 	/* update write status if needed */
-	if (unlikely((f & (CO_FL_SOCK_WR_ENA|CO_FL_WAIT_WR)) == (CO_FL_SOCK_WR_ENA|CO_FL_WAIT_WR))) {
-		fd_poll_send(c->t.sock.fd);
-		f |= CO_FL_CURR_WR_ENA;
-	}
-	else if (unlikely((f & (CO_FL_CURR_WR_ENA|CO_FL_SOCK_WR_ENA)) == CO_FL_SOCK_WR_ENA)) {
+	if (unlikely((f & (CO_FL_CURR_WR_ENA|CO_FL_SOCK_WR_ENA)) == CO_FL_SOCK_WR_ENA)) {
 		fd_want_send(c->t.sock.fd);
 		f |= CO_FL_CURR_WR_ENA;
 	}
@@ -232,7 +214,7 @@ void conn_update_sock_polling(struct connection *c)
 		fd_stop_send(c->t.sock.fd);
 		f &= ~CO_FL_CURR_WR_ENA;
 	}
-	c->flags = f & ~(CO_FL_WAIT_RD | CO_FL_WAIT_WR);
+	c->flags = f;
 }
 
 /* This handshake handler waits a PROXY protocol header at the beginning of the
@@ -266,8 +248,11 @@ int conn_recv_proxy(struct connection *conn, int flag)
 	if (conn->flags & CO_FL_SOCK_RD_SH)
 		goto fail;
 
-	if (!(conn->flags & CO_FL_CTRL_READY))
+	if (!conn_ctrl_ready(conn))
 		goto fail;
+
+	if (!fd_recv_ready(conn->t.sock.fd))
+		return 0;
 
 	do {
 		trash.len = recv(conn->t.sock.fd, trash.str, trash.size, MSG_PEEK);
@@ -275,7 +260,7 @@ int conn_recv_proxy(struct connection *conn, int flag)
 			if (errno == EINTR)
 				continue;
 			if (errno == EAGAIN) {
-				__conn_sock_poll_recv(conn);
+				fd_cant_recv(conn->t.sock.fd);
 				return 0;
 			}
 			goto recv_abort;
