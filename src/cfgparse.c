@@ -129,11 +129,7 @@ static const struct cfg_opt cfg_opts[] =
 	{ "clitcpka",     PR_O_TCP_CLI_KA, PR_CAP_FE, 0, 0 },
 	{ "contstats",    PR_O_CONTSTATS,  PR_CAP_FE, 0, 0 },
 	{ "dontlognull",  PR_O_NULLNOLOG,  PR_CAP_FE, 0, 0 },
-	{ "forceclose",   PR_O_FORCE_CLO,  PR_CAP_FE | PR_CAP_BE, 0, PR_MODE_HTTP },
 	{ "http_proxy",	  PR_O_HTTP_PROXY, PR_CAP_FE | PR_CAP_BE, 0, PR_MODE_HTTP },
-	{ "httpclose",    PR_O_HTTP_CLOSE, PR_CAP_FE | PR_CAP_BE, 0, PR_MODE_HTTP },
-	{ "http-keep-alive",   PR_O_KEEPALIVE,   PR_CAP_FE | PR_CAP_BE, 0, PR_MODE_HTTP },
-	{ "http-server-close", PR_O_SERVER_CLO,  PR_CAP_FE | PR_CAP_BE, 0, PR_MODE_HTTP },
 	{ "prefer-last-server", PR_O_PREF_LAST,  PR_CAP_BE, 0, PR_MODE_HTTP },
 	{ "logasap",      PR_O_LOGASAP,    PR_CAP_FE, 0, 0 },
 	{ "nolinger",     PR_O_TCP_NOLING, PR_CAP_FE | PR_CAP_BE, 0, 0 },
@@ -862,6 +858,22 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		goto out;
 #endif
 	}
+	else if (!strcmp(args[0], "ssl-server-verify")) {
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		if (strcmp(args[1],"none") == 0)
+			global.ssl_server_verify = SSL_SERVER_VERIFY_NONE;
+		else if (strcmp(args[1],"required") == 0)
+			global.ssl_server_verify = SSL_SERVER_VERIFY_REQUIRED;
+		else {
+			Alert("parsing [%s:%d] : '%s' expects 'none' or 'required' as argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+	                goto out;
+		}
+	}
 	else if (!strcmp(args[0], "maxconnrate")) {
 		if (global.cps_lim != 0) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
@@ -874,6 +886,32 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 		global.cps_lim = atol(args[1]);
+	}
+	else if (!strcmp(args[0], "maxsessrate")) {
+		if (global.sps_lim != 0) {
+			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT;
+			goto out;
+		}
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		global.sps_lim = atol(args[1]);
+	}
+	else if (!strcmp(args[0], "maxsslrate")) {
+		if (global.ssl_lim != 0) {
+			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT;
+			goto out;
+		}
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		global.ssl_lim = atol(args[1]);
 	}
 	else if (!strcmp(args[0], "maxcomprate")) {
 		if (*(args[1]) == 0) {
@@ -3459,6 +3497,72 @@ stats_error_parsing:
 				case KWM_DEF: /* already cleared */
 					break;
 				}
+				goto out;
+			}
+		}
+
+		/* HTTP options override each other. They can be cancelled using
+		 * "no option xxx" which only switches to default mode if the mode
+		 * was this one (useful for cancelling options set in defaults
+		 * sections).
+		 */
+		if (strcmp(args[1], "httpclose") == 0) {
+			if (kwm == KWM_STD) {
+				curproxy->options &= ~PR_O_HTTP_MODE;
+				curproxy->options |= PR_O_HTTP_PCL;
+				goto out;
+			}
+			else if (kwm == KWM_NO) {
+				if ((curproxy->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL)
+					curproxy->options &= ~PR_O_HTTP_MODE;
+				goto out;
+			}
+		}
+		else if (strcmp(args[1], "forceclose") == 0) {
+			if (kwm == KWM_STD) {
+				curproxy->options &= ~PR_O_HTTP_MODE;
+				curproxy->options |= PR_O_HTTP_FCL;
+				goto out;
+			}
+			else if (kwm == KWM_NO) {
+				if ((curproxy->options & PR_O_HTTP_MODE) == PR_O_HTTP_FCL)
+					curproxy->options &= ~PR_O_HTTP_MODE;
+				goto out;
+			}
+		}
+		else if (strcmp(args[1], "http-server-close") == 0) {
+			if (kwm == KWM_STD) {
+				curproxy->options &= ~PR_O_HTTP_MODE;
+				curproxy->options |= PR_O_HTTP_SCL;
+				goto out;
+			}
+			else if (kwm == KWM_NO) {
+				if ((curproxy->options & PR_O_HTTP_MODE) == PR_O_HTTP_SCL)
+					curproxy->options &= ~PR_O_HTTP_MODE;
+				goto out;
+			}
+		}
+		else if (strcmp(args[1], "http-keep-alive") == 0) {
+			if (kwm == KWM_STD) {
+				curproxy->options &= ~PR_O_HTTP_MODE;
+				curproxy->options |= PR_O_HTTP_KAL;
+				goto out;
+			}
+			else if (kwm == KWM_NO) {
+				if ((curproxy->options & PR_O_HTTP_MODE) == PR_O_HTTP_KAL)
+					curproxy->options &= ~PR_O_HTTP_MODE;
+				goto out;
+			}
+		}
+		else if (strcmp(args[1], "http-tunnel") == 0) {
+			if (kwm == KWM_STD) {
+				curproxy->options &= ~PR_O_HTTP_MODE;
+				curproxy->options |= PR_O_HTTP_TUN;
+				goto out;
+			}
+			else if (kwm == KWM_NO) {
+				if ((curproxy->options & PR_O_HTTP_MODE) == PR_O_HTTP_TUN)
+					curproxy->options &= ~PR_O_HTTP_MODE;
 				goto out;
 			}
 		}

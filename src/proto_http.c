@@ -3539,29 +3539,44 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit, 
 		}
 	}
 
-	/* Until set to anything else, the connection mode is set as TUNNEL. It will
+	/* Until set to anything else, the connection mode is set as Keep-Alive. It will
 	 * only change if both the request and the config reference something else.
-	 * Option httpclose by itself does not set a mode, it remains a tunnel mode
-	 * in which headers are mangled. However, if another mode is set, it will
-	 * affect it (eg: server-close/keep-alive + httpclose = close). Note that we
-	 * avoid to redo the same work if FE and BE have the same settings (common).
-	 * The method consists in checking if options changed between the two calls
-	 * (implying that either one is non-null, or one of them is non-null and we
-	 * are there for the first time.
+	 * Option httpclose by itself sets tunnel mode where headers are mangled.
+	 * However, if another mode is set, it will affect it (eg: server-close/
+	 * keep-alive + httpclose = close). Note that we avoid to redo the same work
+	 * if FE and BE have the same settings (common). The method consists in
+	 * checking if options changed between the two calls (implying that either
+	 * one is non-null, or one of them is non-null and we are there for the first
+	 * time.
 	 */
 
 	if ((!(txn->flags & TX_HDR_CONN_PRS) &&
-	     (s->fe->options & (PR_O_KEEPALIVE|PR_O_SERVER_CLO|PR_O_HTTP_CLOSE|PR_O_FORCE_CLO))) ||
-	    ((s->fe->options & (PR_O_KEEPALIVE|PR_O_SERVER_CLO|PR_O_HTTP_CLOSE|PR_O_FORCE_CLO)) !=
-	     (s->be->options & (PR_O_KEEPALIVE|PR_O_SERVER_CLO|PR_O_HTTP_CLOSE|PR_O_FORCE_CLO)))) {
-		int tmp = TX_CON_WANT_TUN;
+	     ((s->fe->options & PR_O_HTTP_MODE) != PR_O_HTTP_KAL)) ||
+	    ((s->fe->options & PR_O_HTTP_MODE) != (s->be->options & PR_O_HTTP_MODE))) {
+		int tmp = TX_CON_WANT_KAL;
 
-		if ((s->fe->options|s->be->options) & PR_O_KEEPALIVE ||
-		    ((s->fe->options2|s->be->options2) & PR_O2_FAKE_KA))
-			tmp = TX_CON_WANT_KAL;
-		if ((s->fe->options|s->be->options) & PR_O_SERVER_CLO)
-			tmp = TX_CON_WANT_SCL;
-		if ((s->fe->options|s->be->options) & PR_O_FORCE_CLO)
+		if (!((s->fe->options2|s->be->options2) & PR_O2_FAKE_KA)) {
+			if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_TUN ||
+			    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_TUN)
+				tmp = TX_CON_WANT_TUN;
+
+			if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL ||
+			    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL)
+				tmp = TX_CON_WANT_TUN;
+		}
+
+		if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_SCL ||
+		    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_SCL) {
+			/* option httpclose + server_close => forceclose */
+			if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL ||
+			    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL)
+				tmp = TX_CON_WANT_CLO;
+			else
+				tmp = TX_CON_WANT_SCL;
+		}
+
+		if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_FCL ||
+		    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_FCL)
 			tmp = TX_CON_WANT_CLO;
 
 		if ((txn->flags & TX_CON_WANT_MSK) < tmp)
@@ -3584,7 +3599,6 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit, 
 		     (txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_SCL) &&
 		    ((txn->flags & TX_HDR_CONN_CLO) ||                         /* "connection: close" */
 		     (!(msg->flags & HTTP_MSGF_VER_11) && !(txn->flags & TX_HDR_CONN_KAL)) || /* no "connection: k-a" in 1.0 */
-		     ((s->fe->options|s->be->options) & PR_O_HTTP_CLOSE) ||    /* httpclose+any = forceclose */
 		     !(msg->flags & HTTP_MSGF_XFER_LEN) ||                     /* no length known => close */
 		     s->fe->state == PR_STSTOPPED))                            /* frontend is stopping */
 		    txn->flags = (txn->flags & ~TX_CON_WANT_MSK) | TX_CON_WANT_CLO;
@@ -3963,17 +3977,20 @@ int http_process_request(struct session *s, struct channel *req, int an_bit)
 	 */
 	if (!(txn->flags & TX_HDR_CONN_UPG) &&
 	    (((txn->flags & TX_CON_WANT_MSK) != TX_CON_WANT_TUN) ||
-	     ((s->fe->options|s->be->options) & PR_O_HTTP_CLOSE))) {
+	     ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL ||
+	      (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL))) {
 		unsigned int want_flags = 0;
 
 		if (msg->flags & HTTP_MSGF_VER_11) {
 			if (((txn->flags & TX_CON_WANT_MSK) >= TX_CON_WANT_SCL ||
-			    ((s->fe->options|s->be->options) & PR_O_HTTP_CLOSE)) &&
+			     ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL ||
+			      (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL)) &&
 			    !((s->fe->options2|s->be->options2) & PR_O2_FAKE_KA))
 				want_flags |= TX_CON_CLO_SET;
 		} else {
 			if (((txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_KAL &&
-			     !((s->fe->options|s->be->options) & PR_O_HTTP_CLOSE)) ||
+			     ((s->fe->options & PR_O_HTTP_MODE) != PR_O_HTTP_PCL &&
+			      (s->be->options & PR_O_HTTP_MODE) != PR_O_HTTP_PCL)) ||
 			    ((s->fe->options2|s->be->options2) & PR_O2_FAKE_KA))
 				want_flags |= TX_CON_KAL_SET;
 		}
@@ -4312,7 +4329,7 @@ void http_end_txn_clean_session(struct session *s)
 
 	s->logs.t_close = tv_ms_elapsed(&s->logs.tv_accept, &now);
 	session_process_counters(s);
-	session_stop_backend_counters(s);
+	session_stop_content_counters(s);
 
 	if (s->txn.status) {
 		int n;
@@ -5608,8 +5625,15 @@ int http_process_res_common(struct session *t, struct channel *rep, int an_bit, 
 	}
 	else if ((txn->status >= 200) && !(txn->flags & TX_HDR_CONN_PRS) &&
 		 ((txn->flags & TX_CON_WANT_MSK) != TX_CON_WANT_TUN ||
-		  ((t->fe->options|t->be->options) & PR_O_HTTP_CLOSE))) {
+		  ((t->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL ||
+		   (t->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL))) {
 		int to_del = 0;
+
+		/* this situation happens when combining pretend-keepalive with httpclose. */
+		if ((txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_KAL &&
+		    ((t->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL ||
+		     (t->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL))
+			txn->flags = (txn->flags & ~TX_CON_WANT_MSK) | TX_CON_WANT_CLO;
 
 		/* on unknown transfer length, we must close */
 		if (!(msg->flags & HTTP_MSGF_XFER_LEN) &&
@@ -5874,7 +5898,8 @@ int http_process_res_common(struct session *t, struct channel *rep, int an_bit, 
 		 */
 		if (!(txn->flags & TX_HDR_CONN_UPG) &&
 		    (((txn->flags & TX_CON_WANT_MSK) != TX_CON_WANT_TUN) ||
-		     ((t->fe->options|t->be->options) & PR_O_HTTP_CLOSE))) {
+		     ((t->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL ||
+		      (t->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL))) {
 			unsigned int want_flags = 0;
 
 			if ((txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_KAL ||
@@ -8383,6 +8408,9 @@ struct http_req_rule *parse_http_req_cond(const char **args, const char *file, i
 		proxy->conf.args.ctx = ARGC_HRQ;
 		parse_logformat_string(args[cur_arg + 1], proxy, &rule->arg.hdr_add.fmt, 0,
 				       (proxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR);
+		free(proxy->conf.lfs_file);
+		proxy->conf.lfs_file = strdup(proxy->conf.args.file);
+		proxy->conf.lfs_line = proxy->conf.args.line;
 		cur_arg += 2;
 	} else if (strcmp(args[0], "redirect") == 0) {
 		struct redirect_rule *redir;
@@ -8551,6 +8579,9 @@ struct http_res_rule *parse_http_res_cond(const char **args, const char *file, i
 		proxy->conf.args.ctx = ARGC_HRS;
 		parse_logformat_string(args[cur_arg + 1], proxy, &rule->arg.hdr_add.fmt, 0,
 				       (proxy->cap & PR_CAP_BE) ? SMP_VAL_BE_HRS_HDR : SMP_VAL_FE_HRS_HDR);
+		free(proxy->conf.lfs_file);
+		proxy->conf.lfs_file = strdup(proxy->conf.args.file);
+		proxy->conf.lfs_line = proxy->conf.args.line;
 		cur_arg += 2;
 	} else {
 		Alert("parsing [%s:%d]: 'http-response' expects 'allow', 'deny', 'redirect', 'add-header', 'set-header', 'set-nice', 'set-tos', 'set-mark', 'set-log-level', but got '%s'%s.\n",
@@ -8704,6 +8735,9 @@ struct redirect_rule *http_parse_redirect_rule(const char *file, int linenum, st
 		if (!(type == REDIRECT_TYPE_PREFIX && destination[0] == '/' && destination[1] == '\0')) {
 			parse_logformat_string(destination, curproxy, &rule->rdr_fmt, 0,
 			                       (curproxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR);
+			free(curproxy->conf.lfs_file);
+			curproxy->conf.lfs_file = strdup(curproxy->conf.args.file);
+			curproxy->conf.lfs_line = curproxy->conf.args.line;
 		}
 	}
 
@@ -9646,6 +9680,58 @@ extract_cookie_value(char *hdr, const char *hdr_end,
 	return NULL;
 }
 
+/* Fetch a captured HTTP request header. The index is the position of
+ * the "capture" option in the configuration file
+ */
+static int
+smp_fetch_capture_header_req(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                 const struct arg *args, struct sample *smp, const char *kw)
+{
+	struct proxy *fe = l4->fe;
+	struct http_txn *txn = l7;
+	int idx;
+
+	if (!args || args->type != ARGT_UINT)
+		return 0;
+
+	idx = args->data.uint;
+
+	if (idx > (fe->nb_req_cap - 1) || txn->req.cap == NULL || txn->req.cap[idx] == NULL)
+		return 0;
+
+	smp->type = SMP_T_CSTR;
+	smp->data.str.str = txn->req.cap[idx];
+	smp->data.str.len = strlen(txn->req.cap[idx]);
+
+	return 1;
+}
+
+/* Fetch a captured HTTP response header. The index is the position of
+ * the "capture" option in the configuration file
+ */
+static int
+smp_fetch_capture_header_res(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                 const struct arg *args, struct sample *smp, const char *kw)
+{
+	struct proxy *fe = l4->fe;
+	struct http_txn *txn = l7;
+	int idx;
+
+	if (!args || args->type != ARGT_UINT)
+		return 0;
+
+	idx = args->data.uint;
+
+	if (idx > (fe->nb_rsp_cap - 1) || txn->rsp.cap == NULL || txn->rsp.cap[idx] == NULL)
+		return 0;
+
+	smp->type = SMP_T_CSTR;
+	smp->data.str.str = txn->rsp.cap[idx];
+	smp->data.str.len = strlen(txn->rsp.cap[idx]);
+
+	return 1;
+}
+
 /* Iterate over all cookies present in a message. The context is stored in
  * smp->ctx.a[0] for the in-header position, smp->ctx.a[1] for the
  * end-of-header-value, and smp->ctx.a[2] for the hdr_ctx. Depending on
@@ -10203,6 +10289,10 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {ILH, {
 	{ "base",            smp_fetch_base,           0,                NULL,    SMP_T_CSTR, SMP_USE_HRQHV },
 	{ "base32",          smp_fetch_base32,         0,                NULL,    SMP_T_UINT, SMP_USE_HRQHV },
 	{ "base32+src",      smp_fetch_base32_src,     0,                NULL,    SMP_T_BIN,  SMP_USE_HRQHV },
+
+	/* capture are allocated and are permanent in the session */
+	{ "capture.req.hdr", smp_fetch_capture_header_req, ARG1(1, UINT), NULL, SMP_T_CSTR, SMP_USE_HRQHP },
+	{ "capture.res.hdr", smp_fetch_capture_header_res, ARG1(1, UINT), NULL, SMP_T_CSTR, SMP_USE_HRSHP },
 
 	/* cookie is valid in both directions (eg: for "stick ...") but cook*
 	 * are only here to match the ACL's name, are request-only and are used

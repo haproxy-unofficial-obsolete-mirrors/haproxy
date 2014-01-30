@@ -63,7 +63,29 @@
 #include <proto/ssl_sock.h>
 #endif
 
+/* stats socket states */
+enum {
+	STAT_CLI_INIT = 0,   /* initial state, must leave to zero ! */
+	STAT_CLI_END,        /* final state, let's close */
+	STAT_CLI_GETREQ,     /* wait for a request */
+	STAT_CLI_OUTPUT,     /* all states after this one are responses */
+	STAT_CLI_PROMPT,     /* display the prompt (first output, same code) */
+	STAT_CLI_PRINT,      /* display message in cli->msg */
+	STAT_CLI_O_INFO,     /* dump info */
+	STAT_CLI_O_SESS,     /* dump sessions */
+	STAT_CLI_O_ERR,      /* dump errors */
+	STAT_CLI_O_TAB,      /* dump tables */
+	STAT_CLI_O_CLR,      /* clear tables */
+	STAT_CLI_O_SET,      /* set entries in tables */
+	STAT_CLI_O_STAT,     /* dump stats */
+	STAT_CLI_O_MAPS,     /* list all maps */
+	STAT_CLI_O_MAP,      /* list all map entries of a map */
+	STAT_CLI_O_MLOOK,    /* lookup a map entry */
+	STAT_CLI_O_POOLS,    /* dump memory pools */
+};
+
 static int stats_dump_info_to_buffer(struct stream_interface *si);
+static int stats_dump_pools_to_buffer(struct stream_interface *si);
 static int stats_dump_full_sess_to_buffer(struct stream_interface *si, struct session *sess);
 static int stats_dump_sess_to_buffer(struct stream_interface *si);
 static int stats_dump_errors_to_buffer(struct stream_interface *si);
@@ -113,6 +135,7 @@ static const char stats_sock_usage_msg[] =
 	"  prompt         : toggle interactive mode with prompt\n"
 	"  quit           : disconnect\n"
 	"  show info      : report information about the running process\n"
+	"  show pools     : report information about the memory pools usage\n"
 	"  show stat      : report counters for each proxy and server\n"
 	"  show errors    : report last request and response errors for each proxy\n"
 	"  show sess [id] : report the list of current sessions or dump this session\n"
@@ -1033,6 +1056,10 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			appctx->st2 = STAT_ST_INIT;
 			appctx->st0 = STAT_CLI_O_INFO; // stats_dump_info_to_buffer
 		}
+		else if (strcmp(args[1], "pools") == 0) {
+			appctx->st2 = STAT_ST_INIT;
+			appctx->st0 = STAT_CLI_O_POOLS; // stats_dump_pools_to_buffer
+		}
 		else if (strcmp(args[1], "sess") == 0) {
 			appctx->st2 = STAT_ST_INIT;
 			if (s->listener->bind_conf->level < ACCESS_LVL_OPER) {
@@ -1146,6 +1173,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			}
 
 			global.cps_max = 0;
+			global.sps_max = 0;
 			return 1;
 		}
 		else if (strcmp(args[1], "table") == 0) {
@@ -1424,6 +1452,82 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 					return 1;
 				}
 			}
+			else if (strcmp(args[2], "sessions") == 0) {
+				if (strcmp(args[3], "global") == 0) {
+					int v;
+
+					if (s->listener->bind_conf->level < ACCESS_LVL_ADMIN) {
+						appctx->ctx.cli.msg = stats_permission_denied_msg;
+						appctx->st0 = STAT_CLI_PRINT;
+						return 1;
+					}
+
+					if (!*args[4]) {
+						appctx->ctx.cli.msg = "Expects an integer value.\n";
+						appctx->st0 = STAT_CLI_PRINT;
+						return 1;
+					}
+
+					v = atoi(args[4]);
+					if (v < 0) {
+						appctx->ctx.cli.msg = "Value out of range.\n";
+						appctx->st0 = STAT_CLI_PRINT;
+						return 1;
+					}
+
+					global.sps_lim = v;
+
+					/* Dequeues all of the listeners waiting for a resource */
+					if (!LIST_ISEMPTY(&global_listener_queue))
+						dequeue_all_listeners(&global_listener_queue);
+
+					return 1;
+				}
+				else {
+					appctx->ctx.cli.msg = "'set rate-limit sessions' only supports 'global'.\n";
+					appctx->st0 = STAT_CLI_PRINT;
+					return 1;
+				}
+			}
+#ifdef USE_OPENSSL
+			else if (strcmp(args[2], "ssl-sessions") == 0) {
+				if (strcmp(args[3], "global") == 0) {
+					int v;
+
+					if (s->listener->bind_conf->level < ACCESS_LVL_ADMIN) {
+						appctx->ctx.cli.msg = stats_permission_denied_msg;
+						appctx->st0 = STAT_CLI_PRINT;
+						return 1;
+					}
+
+					if (!*args[4]) {
+						appctx->ctx.cli.msg = "Expects an integer value.\n";
+						appctx->st0 = STAT_CLI_PRINT;
+						return 1;
+					}
+
+					v = atoi(args[4]);
+					if (v < 0) {
+						appctx->ctx.cli.msg = "Value out of range.\n";
+						appctx->st0 = STAT_CLI_PRINT;
+						return 1;
+					}
+
+					global.ssl_lim = v;
+
+					/* Dequeues all of the listeners waiting for a resource */
+					if (!LIST_ISEMPTY(&global_listener_queue))
+						dequeue_all_listeners(&global_listener_queue);
+
+					return 1;
+				}
+				else {
+					appctx->ctx.cli.msg = "'set rate-limit ssl-sessions' only supports 'global'.\n";
+					appctx->st0 = STAT_CLI_PRINT;
+					return 1;
+				}
+			}
+#endif
 			else if (strcmp(args[2], "http-compression") == 0) {
 				if (strcmp(args[3], "global") == 0) {
 					int v;
@@ -1444,7 +1548,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 				}
 			}
 			else {
-				appctx->ctx.cli.msg = "'set rate-limit' supports 'connections' and 'http-compression'.\n";
+				appctx->ctx.cli.msg = "'set rate-limit' supports 'connections', 'sessions', 'ssl-sessions', and 'http-compression'.\n";
 				appctx->st0 = STAT_CLI_PRINT;
 				return 1;
 			}
@@ -2076,6 +2180,11 @@ static void cli_io_handler(struct stream_interface *si)
 			case STAT_CLI_O_MLOOK:
 				if (stats_map_lookup(si))
 					appctx->st0 = STAT_CLI_PROMPT;
+				break;
+			case STAT_CLI_O_POOLS:
+				if (stats_dump_pools_to_buffer(si))
+					appctx->st0 = STAT_CLI_PROMPT;
+				break;
 			default: /* abnormal state */
 				appctx->st0 = STAT_CLI_PROMPT;
 				break;
@@ -2168,13 +2277,28 @@ static int stats_dump_info_to_buffer(struct stream_interface *si)
 	             "Maxsock: %d\n"
 	             "Maxconn: %d\n"
 	             "Hard_maxconn: %d\n"
-	             "Maxpipes: %d\n"
 	             "CurrConns: %d\n"
+		     "CumConns: %d\n"
+		     "CumReq: %d\n"
+#ifdef USE_OPENSSL
+		     "MaxSslConns: %d\n"
+	             "CurrSslConns: %d\n"
+		     "CumSslConns: %d\n"
+#endif
+	             "Maxpipes: %d\n"
 	             "PipesUsed: %d\n"
 	             "PipesFree: %d\n"
 	             "ConnRate: %d\n"
 	             "ConnRateLimit: %d\n"
 	             "MaxConnRate: %d\n"
+	             "SessRate: %d\n"
+	             "SessRateLimit: %d\n"
+	             "MaxSessRate: %d\n"
+#ifdef USE_OPENSSL
+	             "SslRate: %d\n"
+	             "SslRateLimit: %d\n"
+	             "MaxSslRate: %d\n"
+#endif
 	             "CompressBpsIn: %u\n"
 	             "CompressBpsOut: %u\n"
 	             "CompressBpsRateLim: %u\n"
@@ -2195,9 +2319,17 @@ static int stats_dump_info_to_buffer(struct stream_interface *si)
 	             up,
 	             global.rlimit_memmax,
 	             global.rlimit_nofile,
-	             global.maxsock, global.maxconn, global.hardmaxconn, global.maxpipes,
-	             actconn, pipes_used, pipes_free,
+	             global.maxsock, global.maxconn, global.hardmaxconn,
+	             actconn, totalconn, global.req_count,
+#ifdef USE_OPENSSL
+		     global.maxsslconn, sslconns, totalsslconns,
+#endif
+		     global.maxpipes, pipes_used, pipes_free,
 	             read_freq_ctr(&global.conn_per_sec), global.cps_lim, global.cps_max,
+	             read_freq_ctr(&global.sess_per_sec), global.sps_lim, global.sps_max,
+#ifdef USE_OPENSSL
+	             read_freq_ctr(&global.ssl_per_sec), global.ssl_lim, global.ssl_max,
+#endif
 	             read_freq_ctr(&global.comp_bps_in), read_freq_ctr(&global.comp_bps_out),
 	             global.comp_rate_lim,
 #ifdef USE_ZLIB
@@ -2210,6 +2342,18 @@ static int stats_dump_info_to_buffer(struct stream_interface *si)
 	if (bi_putchk(si->ib, &trash) == -1)
 		return 0;
 
+	return 1;
+}
+
+/* This function dumps memory usage information onto the stream interface's
+ * read buffer. It returns 0 as long as it does not complete, non-zero upon
+ * completion. No state is used.
+ */
+static int stats_dump_pools_to_buffer(struct stream_interface *si)
+{
+	dump_pools_to_trash();
+	if (bi_putchk(si->ib, &trash) == -1)
+		return 0;
 	return 1;
 }
 
