@@ -1287,7 +1287,9 @@ const char *http_parse_reqline(struct http_msg *msg,
  * Returns the data from Authorization header. Function may be called more
  * than once so data is stored in txn->auth_data. When no header is found
  * or auth method is unknown auth_method is set to HTTP_AUTH_WRONG to avoid
- * searching again for something we are unable to find anyway.
+ * searching again for something we are unable to find anyway. However, if
+ * the result if valid, the cache is not reused because we would risk to
+ * have the credentials overwritten by another session in parallel.
  */
 
 char *get_http_auth_buff;
@@ -1308,9 +1310,6 @@ get_http_auth(struct session *s)
 
 	if (txn->auth.method == HTTP_AUTH_WRONG)
 		return 0;
-
-	if (txn->auth.method)
-		return 1;
 
 	txn->auth.method = HTTP_AUTH_WRONG;
 
@@ -3550,8 +3549,7 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit, 
 	 * time.
 	 */
 
-	if ((!(txn->flags & TX_HDR_CONN_PRS) &&
-	     ((s->fe->options & PR_O_HTTP_MODE) != PR_O_HTTP_KAL)) ||
+	if (!(txn->flags & TX_HDR_CONN_PRS) ||
 	    ((s->fe->options & PR_O_HTTP_MODE) != (s->be->options & PR_O_HTTP_MODE))) {
 		int tmp = TX_CON_WANT_KAL;
 
@@ -3582,7 +3580,8 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit, 
 		if ((txn->flags & TX_CON_WANT_MSK) < tmp)
 			txn->flags = (txn->flags & ~TX_CON_WANT_MSK) | tmp;
 
-		if (!(txn->flags & TX_HDR_CONN_PRS)) {
+		if (!(txn->flags & TX_HDR_CONN_PRS) &&
+		    (txn->flags & TX_CON_WANT_MSK) != TX_CON_WANT_TUN) {
 			/* parse the Connection header and possibly clean it */
 			int to_del = 0;
 			if ((msg->flags & HTTP_MSGF_VER_11) ||
