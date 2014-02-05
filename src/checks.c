@@ -1449,6 +1449,13 @@ static int wake_srv_chk(struct connection *conn)
 		__conn_data_stop_both(conn);
 		task_wakeup(check->task, TASK_WOKEN_IO);
 	}
+	else if (!(conn->flags & (CO_FL_DATA_RD_ENA|CO_FL_DATA_WR_ENA|CO_FL_HANDSHAKE))) {
+		/* we may get here if only a connection probe was required : we
+		 * don't have any data to send nor anything expected in response,
+		 * so the completion of the connection establishment is enough.
+		 */
+		task_wakeup(check->task, TASK_WOKEN_IO);
+	}
 
 	if (check->result != CHK_RES_UNKNOWN) {
 		/* We're here because nobody wants to handle the error, so we
@@ -1578,8 +1585,12 @@ static struct task *process_chk(struct task *t)
 		}
 
 		if (check->type == PR_O2_TCPCHK_CHK) {
-			tcpcheck_main(conn);
-			return t;
+			struct tcpcheck_rule *r = (struct tcpcheck_rule *) s->proxy->tcpcheck_rules.n;
+			/* if first step is a 'connect', then tcpcheck_main must run it */
+			if (r->action == TCPCHK_ACT_CONNECT) {
+				tcpcheck_main(conn);
+				return t;
+			}
 		}
 
 
