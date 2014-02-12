@@ -142,14 +142,20 @@ struct global global = {
 		.chksize = BUFSIZE,
 #ifdef USE_OPENSSL
 		.sslcachesize = SSLCACHESIZE,
+#ifdef DEFAULT_SSL_MAX_RECORD
+		.ssl_max_record = DEFAULT_SSL_MAX_RECORD,
+#endif
 #endif
 #ifdef USE_ZLIB
 		.zlibmemlevel = 8,
 		.zlibwindowsize = MAX_WBITS,
 #endif
 		.comp_maxlevel = 1,
-
-
+#ifdef DEFAULT_IDLE_TIMER
+		.idle_timer = DEFAULT_IDLE_TIMER,
+#else
+		.idle_timer = 1000, /* 1 second */
+#endif
 	},
 #ifdef USE_OPENSSL
 #ifdef DEFAULT_MAXSSLCONN
