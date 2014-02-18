@@ -74,8 +74,10 @@
 #include <proto/ssl_sock.h>
 #include <proto/task.h>
 
+/* Warning, these are bits, not integers! */
 #define SSL_SOCK_ST_FL_VERIFY_DONE  0x00000001
 #define SSL_SOCK_ST_FL_16K_WBFSIZE  0x00000002
+#define SSL_SOCK_SEND_UNLIMITED     0x00000004
 /* bits 0xFFFF0000 are reserved to store verify errors */
 
 /* Verify errors macros */
@@ -192,17 +194,21 @@ static int ssl_sock_advertise_npn_protos(SSL *s, const unsigned char **data,
 }
 #endif
 
-#ifdef OPENSSL_ALPN_NEGOTIATED
+#ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
 /* This callback is used so that the server advertises the list of
  * negociable protocols for ALPN.
  */
-static int ssl_sock_advertise_alpn_protos(SSL *s, const unsigned char **data,
-                                          unsigned int *len, void *arg)
+static int ssl_sock_advertise_alpn_protos(SSL *s, const unsigned char **out,
+                                          unsigned char *outlen,
+                                          const unsigned char *server,
+                                          unsigned int server_len, void *arg)
 {
 	struct bind_conf *conf = arg;
 
-	*data = (const unsigned char *)conf->alpn_str;
-	*len = conf->alpn_len;
+	if (SSL_select_next_proto((unsigned char**) out, outlen, (const unsigned char *)conf->alpn_str,
+	                          conf->alpn_len, server, server_len) != OPENSSL_NPN_NEGOTIATED) {
+		return SSL_TLSEXT_ERR_NOACK;
+	}
 	return SSL_TLSEXT_ERR_OK;
 }
 #endif
@@ -782,9 +788,9 @@ int ssl_sock_prepare_ctx(struct bind_conf *bind_conf, SSL_CTX *ctx, struct proxy
 	if (bind_conf->npn_str)
 		SSL_CTX_set_next_protos_advertised_cb(ctx, ssl_sock_advertise_npn_protos, bind_conf);
 #endif
-#ifdef OPENSSL_ALPN_NEGOTIATED
+#ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
 	if (bind_conf->alpn_str)
-		SSL_CTX_set_alpn_advertised_cb(ctx, ssl_sock_advertise_alpn_protos, bind_conf);
+		SSL_CTX_set_alpn_select_cb(ctx, ssl_sock_advertise_alpn_protos, bind_conf);
 #endif
 
 #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
@@ -1036,7 +1042,7 @@ int ssl_sock_prepare_srv_ctx(struct server *srv, struct proxy *curproxy)
 		if (srv->ssl_ctx.ca_file) {
 			/* load CAfile to verify */
 			if (!SSL_CTX_load_verify_locations(srv->ssl_ctx.ctx, srv->ssl_ctx.ca_file, NULL)) {
-				Alert("Proxy '%s', server '%s' |%s:%d] unable to load CA file '%s'.\n",
+				Alert("Proxy '%s', server '%s' [%s:%d] unable to load CA file '%s'.\n",
 				      curproxy->id, srv->id,
 				      srv->conf.file, srv->conf.line, srv->ssl_ctx.ca_file);
 				cfgerr++;
@@ -1044,11 +1050,11 @@ int ssl_sock_prepare_srv_ctx(struct server *srv, struct proxy *curproxy)
 		}
 		else {
 			if (global.ssl_server_verify == SSL_SERVER_VERIFY_REQUIRED)
-				Alert("Proxy '%s', server '%s' |%s:%d] verify is enabled by default but no CA file specified. If you're running on a LAN where you're certain to trust the server's certificate, please set an explicit 'verify none' statement on the 'server' line, or use 'ssl-server-verify none' in the global section to disable server-side verifications by default.\n",
+				Alert("Proxy '%s', server '%s' [%s:%d] verify is enabled by default but no CA file specified. If you're running on a LAN where you're certain to trust the server's certificate, please set an explicit 'verify none' statement on the 'server' line, or use 'ssl-server-verify none' in the global section to disable server-side verifications by default.\n",
 				      curproxy->id, srv->id,
 				      srv->conf.file, srv->conf.line);
 			else
-				Alert("Proxy '%s', server '%s' |%s:%d] verify is enabled but no CA file specified.\n",
+				Alert("Proxy '%s', server '%s' [%s:%d] verify is enabled but no CA file specified.\n",
 				      curproxy->id, srv->id,
 				      srv->conf.file, srv->conf.line);
 			cfgerr++;
@@ -1058,7 +1064,7 @@ int ssl_sock_prepare_srv_ctx(struct server *srv, struct proxy *curproxy)
 			X509_STORE *store = SSL_CTX_get_cert_store(srv->ssl_ctx.ctx);
 
 			if (!store || !X509_STORE_load_locations(store, srv->ssl_ctx.crl_file, NULL)) {
-				Alert("Proxy '%s', server '%s' |%s:%d] unable to configure CRL file '%s'.\n",
+				Alert("Proxy '%s', server '%s' [%s:%d] unable to configure CRL file '%s'.\n",
 				      curproxy->id, srv->id,
 				      srv->conf.file, srv->conf.line, srv->ssl_ctx.crl_file);
 				cfgerr++;
@@ -1529,15 +1535,27 @@ static int ssl_sock_from_buf(struct connection *conn, struct buffer *buf, int fl
 		try = bo_contig_data(buf);
 
 		if (!(flags & CO_SFL_STREAMER) &&
-		    global.tune.ssl_max_record && try > global.tune.ssl_max_record)
+		    !(conn->xprt_st & SSL_SOCK_SEND_UNLIMITED) &&
+		    global.tune.ssl_max_record && try > global.tune.ssl_max_record) {
 			try = global.tune.ssl_max_record;
+		}
+		else {
+			/* we need to keep the information about the fact that
+			 * we're not limiting the upcoming send(), because if it
+			 * fails, we'll have to retry with at least as many data.
+			 */
+			conn->xprt_st |= SSL_SOCK_SEND_UNLIMITED;
+		}
 
 		ret = SSL_write(conn->xprt_ctx, bo_ptr(buf), try);
+
 		if (conn->flags & CO_FL_ERROR) {
 			/* CO_FL_ERROR may be set by ssl_sock_infocbk */
 			goto out_error;
 		}
 		if (ret > 0) {
+			conn->xprt_st &= ~SSL_SOCK_SEND_UNLIMITED;
+
 			buf->o -= ret;
 			done += ret;
 
@@ -2673,7 +2691,7 @@ smp_fetch_ssl_fc_npn(struct proxy *px, struct session *l4, void *l7, unsigned in
 }
 #endif
 
-#ifdef OPENSSL_ALPN_NEGOTIATED
+#ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
 static int
 smp_fetch_ssl_fc_alpn(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
                       const struct arg *args, struct sample *smp, const char *kw)
@@ -2691,7 +2709,7 @@ smp_fetch_ssl_fc_alpn(struct proxy *px, struct session *l4, void *l7, unsigned i
 		return 0;
 
 	smp->data.str.str = NULL;
-	SSL_get0_alpn_negotiated(conn->xprt_ctx,
+	SSL_get0_alpn_selected(conn->xprt_ctx,
 	                         (const unsigned char **)&smp->data.str.str, (unsigned *)&smp->data.str.len);
 
 	if (!smp->data.str.str)
@@ -3179,7 +3197,7 @@ static int bind_parse_npn(char **args, int cur_arg, struct proxy *px, struct bin
 /* parse the "alpn" bind keyword */
 static int bind_parse_alpn(char **args, int cur_arg, struct proxy *px, struct bind_conf *conf, char **err)
 {
-#ifdef OPENSSL_ALPN_NEGOTIATED
+#ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
 	char *p1, *p2;
 
 	if (!*args[cur_arg + 1]) {
@@ -3508,7 +3526,7 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {ILH, {
 #ifdef OPENSSL_NPN_NEGOTIATED
 	{ "ssl_fc_npn",             smp_fetch_ssl_fc_npn,         0,                   NULL,    SMP_T_CSTR, SMP_USE_L5CLI },
 #endif
-#ifdef OPENSSL_ALPN_NEGOTIATED
+#ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
 	{ "ssl_fc_alpn",            smp_fetch_ssl_fc_alpn,        0,                   NULL,    SMP_T_CSTR, SMP_USE_L5CLI },
 #endif
 	{ "ssl_fc_protocol",        smp_fetch_ssl_fc_protocol,    0,                   NULL,    SMP_T_CSTR, SMP_USE_L5CLI },
@@ -3540,7 +3558,7 @@ static struct acl_kw_list acl_kws = {ILH, {
 #ifdef OPENSSL_NPN_NEGOTIATED
 	{ "ssl_fc_npn",             NULL,         pat_parse_str,     pat_match_str     },
 #endif
-#ifdef OPENSSL_ALPN_NEGOTIATED
+#ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
 	{ "ssl_fc_alpn",            NULL,         pat_parse_str,     pat_match_str     },
 #endif
 	{ "ssl_fc_protocol",        NULL,         pat_parse_str,     pat_match_str     },
