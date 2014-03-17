@@ -4448,11 +4448,6 @@ void http_end_txn_clean_session(struct session *s)
 	s->flags &= ~(SN_DIRECT|SN_ASSIGNED|SN_ADDR_SET|SN_BE_ASSIGNED|SN_FORCE_PRST|SN_IGNORE_PRST);
 	s->flags &= ~(SN_CURR_SESS|SN_REDIRECTABLE|SN_SRV_REUSED);
 
-	if (s->flags & SN_COMP_READY)
-		s->comp_algo->end(&s->comp_ctx);
-	s->comp_algo = NULL;
-	s->flags &= ~SN_COMP_READY;
-
 	s->txn.meth = 0;
 	http_reset_txn(s);
 	s->txn.flags |= TX_NOT_FIRST | TX_WAIT_NEXT_RQ;
@@ -4883,8 +4878,17 @@ int http_request_forward_body(struct session *s, struct channel *req, int an_bit
 		return 1;
 	}
 
-	/* in most states, we should abort in case of early close */
-	channel_auto_close(req);
+	/* Some post-connect processing might want us to refrain from starting to
+	 * forward data. Currently, the only reason for this is "balance url_param"
+	 * whichs need to parse/process the request after we've enabled forwarding.
+	 */
+	if (unlikely(msg->flags & HTTP_MSGF_WAIT_CONN)) {
+		if (!(s->rep->flags & CF_READ_ATTACHED)) {
+			channel_auto_connect(req);
+			goto missing_data;
+		}
+		msg->flags &= ~HTTP_MSGF_WAIT_CONN;
+	}
 
 	/* Note that we don't have to send 100-continue back because we don't
 	 * need the data to complete our job, and it's up to the server to
@@ -4905,6 +4909,9 @@ int http_request_forward_body(struct session *s, struct channel *req, int an_bit
 		else
 			msg->msg_state = HTTP_MSG_DATA;
 	}
+
+	/* in most states, we should abort in case of early close */
+	channel_auto_close(req);
 
 	while (1) {
 		unsigned int bytes;
@@ -8230,6 +8237,12 @@ void http_init_txn(struct session *s)
 void http_end_txn(struct session *s)
 {
 	struct http_txn *txn = &s->txn;
+
+	/* release any possible compression context */
+	if (s->flags & SN_COMP_READY)
+		s->comp_algo->end(&s->comp_ctx);
+	s->comp_algo = NULL;
+	s->flags &= ~SN_COMP_READY;
 
 	/* these ones will have been dynamically allocated */
 	pool_free2(pool2_requri, txn->uri);
