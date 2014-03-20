@@ -2192,7 +2192,8 @@ smp_fetch_ssl_c_sig_alg(struct proxy *px, struct session *l4, void *l7, unsigned
 		return 0;
 	}
 
-	smp->type = SMP_T_CSTR;
+	smp->type = SMP_T_STR;
+	smp->flags |= SMP_F_CONST;
 	smp->data.str.len = strlen(smp->data.str.str);
 	X509_free(crt);
 
@@ -2233,7 +2234,8 @@ smp_fetch_ssl_c_key_alg(struct proxy *px, struct session *l4, void *l7, unsigned
 		return 0;
 	}
 
-	smp->type = SMP_T_CSTR;
+	smp->type = SMP_T_STR;
+	smp->flags |= SMP_F_CONST;
 	smp->data.str.len = strlen(smp->data.str.str);
 	X509_free(crt);
 
@@ -2442,7 +2444,8 @@ smp_fetch_ssl_f_sig_alg(struct proxy *px, struct session *l4, void *l7, unsigned
 	if (!smp->data.str.str)
 		return 0;
 
-	smp->type = SMP_T_CSTR;
+	smp->type = SMP_T_STR;
+	smp->flags |= SMP_F_CONST;
 	smp->data.str.len = strlen(smp->data.str.str);
 
 	return 1;
@@ -2479,7 +2482,8 @@ smp_fetch_ssl_f_key_alg(struct proxy *px, struct session *l4, void *l7, unsigned
 	if (!smp->data.str.str)
 		return 0;
 
-	smp->type = SMP_T_CSTR;
+	smp->type = SMP_T_STR;
+	smp->flags |= SMP_F_CONST;
 	smp->data.str.len = strlen(smp->data.str.str);
 
 	return 1;
@@ -2610,7 +2614,8 @@ smp_fetch_ssl_fc_cipher(struct proxy *px, struct session *l4, void *l7, unsigned
 	if (!smp->data.str.str)
 		return 0;
 
-	smp->type = SMP_T_CSTR;
+	smp->type = SMP_T_STR;
+	smp->flags |= SMP_F_CONST;
 	smp->data.str.len = strlen(smp->data.str.str);
 
 	return 1;
@@ -2670,8 +2675,8 @@ smp_fetch_ssl_fc_npn(struct proxy *px, struct session *l4, void *l7, unsigned in
 {
 	struct connection *conn;
 
-	smp->flags = 0;
-	smp->type = SMP_T_CSTR;
+	smp->flags = SMP_F_CONST;
+	smp->type = SMP_T_STR;
 
 	if (!l4)
 		return 0;
@@ -2698,8 +2703,8 @@ smp_fetch_ssl_fc_alpn(struct proxy *px, struct session *l4, void *l7, unsigned i
 {
 	struct connection *conn;
 
-	smp->flags = 0;
-	smp->type = SMP_T_CSTR;
+	smp->flags = SMP_F_CONST;
+	smp->type = SMP_T_STR;
 
 	if (!l4)
 		return 0;
@@ -2738,7 +2743,8 @@ smp_fetch_ssl_fc_protocol(struct proxy *px, struct session *l4, void *l7, unsign
 	if (!smp->data.str.str)
 		return 0;
 
-	smp->type = SMP_T_CSTR;
+	smp->type = SMP_T_STR;
+	smp->flags = SMP_F_CONST;
 	smp->data.str.len = strlen(smp->data.str.str);
 
 	return 1;
@@ -2752,8 +2758,8 @@ smp_fetch_ssl_fc_session_id(struct proxy *px, struct session *l4, void *l7, unsi
 	SSL_SESSION *sess;
 	struct connection *conn;
 
-	smp->flags = 0;
-	smp->type = SMP_T_CBIN;
+	smp->flags = SMP_F_CONST;
+	smp->type = SMP_T_BIN;
 
 	if (!l4)
 		return 0;
@@ -2783,8 +2789,8 @@ smp_fetch_ssl_fc_sni(struct proxy *px, struct session *l4, void *l7, unsigned in
 #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
 	struct connection *conn;
 
-	smp->flags = 0;
-	smp->type = SMP_T_CSTR;
+	smp->flags = SMP_F_CONST;
+	smp->type = SMP_T_STR;
 
 	if (!l4)
 		return 0;
@@ -3520,19 +3526,19 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {ILH, {
 	{ "ssl_f_version",          smp_fetch_ssl_f_version,      0,                   NULL,    SMP_T_UINT, SMP_USE_L5CLI },
 	{ "ssl_fc",                 smp_fetch_ssl_fc,             0,                   NULL,    SMP_T_BOOL, SMP_USE_L5CLI },
 	{ "ssl_fc_alg_keysize",     smp_fetch_ssl_fc_alg_keysize, 0,                   NULL,    SMP_T_UINT, SMP_USE_L5CLI },
-	{ "ssl_fc_cipher",          smp_fetch_ssl_fc_cipher,      0,                   NULL,    SMP_T_CSTR, SMP_USE_L5CLI },
+	{ "ssl_fc_cipher",          smp_fetch_ssl_fc_cipher,      0,                   NULL,    SMP_T_STR,  SMP_USE_L5CLI },
 	{ "ssl_fc_has_crt",         smp_fetch_ssl_fc_has_crt,     0,                   NULL,    SMP_T_BOOL, SMP_USE_L5CLI },
 	{ "ssl_fc_has_sni",         smp_fetch_ssl_fc_has_sni,     0,                   NULL,    SMP_T_BOOL, SMP_USE_L5CLI },
 #ifdef OPENSSL_NPN_NEGOTIATED
-	{ "ssl_fc_npn",             smp_fetch_ssl_fc_npn,         0,                   NULL,    SMP_T_CSTR, SMP_USE_L5CLI },
+	{ "ssl_fc_npn",             smp_fetch_ssl_fc_npn,         0,                   NULL,    SMP_T_STR,  SMP_USE_L5CLI },
 #endif
 #ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
-	{ "ssl_fc_alpn",            smp_fetch_ssl_fc_alpn,        0,                   NULL,    SMP_T_CSTR, SMP_USE_L5CLI },
+	{ "ssl_fc_alpn",            smp_fetch_ssl_fc_alpn,        0,                   NULL,    SMP_T_STR,  SMP_USE_L5CLI },
 #endif
-	{ "ssl_fc_protocol",        smp_fetch_ssl_fc_protocol,    0,                   NULL,    SMP_T_CSTR, SMP_USE_L5CLI },
+	{ "ssl_fc_protocol",        smp_fetch_ssl_fc_protocol,    0,                   NULL,    SMP_T_STR,  SMP_USE_L5CLI },
 	{ "ssl_fc_use_keysize",     smp_fetch_ssl_fc_use_keysize, 0,                   NULL,    SMP_T_UINT, SMP_USE_L5CLI },
-	{ "ssl_fc_session_id",      smp_fetch_ssl_fc_session_id,  0,                   NULL,    SMP_T_CBIN, SMP_USE_L5CLI },
-	{ "ssl_fc_sni",             smp_fetch_ssl_fc_sni,         0,                   NULL,    SMP_T_CSTR, SMP_USE_L5CLI },
+	{ "ssl_fc_session_id",      smp_fetch_ssl_fc_session_id,  0,                   NULL,    SMP_T_BIN,  SMP_USE_L5CLI },
+	{ "ssl_fc_sni",             smp_fetch_ssl_fc_sni,         0,                   NULL,    SMP_T_STR,  SMP_USE_L5CLI },
 	{ NULL, NULL, 0, 0, 0 },
 }};
 
@@ -3540,31 +3546,31 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {ILH, {
  * Please take care of keeping this list alphabetically sorted.
  */
 static struct acl_kw_list acl_kws = {ILH, {
-	{ "ssl_c_i_dn",             NULL,         pat_parse_str,     pat_match_str     },
-	{ "ssl_c_key_alg",          NULL,         pat_parse_str,     pat_match_str     },
-	{ "ssl_c_notafter",         NULL,         pat_parse_str,     pat_match_str     },
-	{ "ssl_c_notbefore",        NULL,         pat_parse_str,     pat_match_str     },
-	{ "ssl_c_sig_alg",          NULL,         pat_parse_str,     pat_match_str     },
-	{ "ssl_c_s_dn",             NULL,         pat_parse_str,     pat_match_str     },
-	{ "ssl_c_serial",           NULL,         pat_parse_bin,     pat_match_bin     },
-	{ "ssl_f_i_dn",             NULL,         pat_parse_str,     pat_match_str     },
-	{ "ssl_f_key_alg",          NULL,         pat_parse_str,     pat_match_str     },
-	{ "ssl_f_notafter",         NULL,         pat_parse_str,     pat_match_str     },
-	{ "ssl_f_notbefore",        NULL,         pat_parse_str,     pat_match_str     },
-	{ "ssl_f_sig_alg",          NULL,         pat_parse_str,     pat_match_str     },
-	{ "ssl_f_s_dn",             NULL,         pat_parse_str,     pat_match_str     },
-	{ "ssl_f_serial",           NULL,         pat_parse_bin,     pat_match_bin     },
-	{ "ssl_fc_cipher",          NULL,         pat_parse_str,     pat_match_str     },
+	{ "ssl_c_i_dn",             NULL,         PAT_MATCH_STR },
+	{ "ssl_c_key_alg",          NULL,         PAT_MATCH_STR },
+	{ "ssl_c_notafter",         NULL,         PAT_MATCH_STR },
+	{ "ssl_c_notbefore",        NULL,         PAT_MATCH_STR },
+	{ "ssl_c_sig_alg",          NULL,         PAT_MATCH_STR },
+	{ "ssl_c_s_dn",             NULL,         PAT_MATCH_STR },
+	{ "ssl_c_serial",           NULL,         PAT_MATCH_BIN },
+	{ "ssl_f_i_dn",             NULL,         PAT_MATCH_STR },
+	{ "ssl_f_key_alg",          NULL,         PAT_MATCH_STR },
+	{ "ssl_f_notafter",         NULL,         PAT_MATCH_STR },
+	{ "ssl_f_notbefore",        NULL,         PAT_MATCH_STR },
+	{ "ssl_f_sig_alg",          NULL,         PAT_MATCH_STR },
+	{ "ssl_f_s_dn",             NULL,         PAT_MATCH_STR },
+	{ "ssl_f_serial",           NULL,         PAT_MATCH_BIN },
+	{ "ssl_fc_cipher",          NULL,         PAT_MATCH_STR },
 #ifdef OPENSSL_NPN_NEGOTIATED
-	{ "ssl_fc_npn",             NULL,         pat_parse_str,     pat_match_str     },
+	{ "ssl_fc_npn",             NULL,         PAT_MATCH_STR },
 #endif
 #ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
-	{ "ssl_fc_alpn",            NULL,         pat_parse_str,     pat_match_str     },
+	{ "ssl_fc_alpn",            NULL,         PAT_MATCH_STR },
 #endif
-	{ "ssl_fc_protocol",        NULL,         pat_parse_str,     pat_match_str     },
-	{ "ssl_fc_sni",             "ssl_fc_sni", pat_parse_str,     pat_match_str     },
-	{ "ssl_fc_sni_end",         "ssl_fc_sni", pat_parse_str,     pat_match_end     },
-	{ "ssl_fc_sni_reg",         "ssl_fc_sni", pat_parse_reg,     pat_match_reg     },
+	{ "ssl_fc_protocol",        NULL,         PAT_MATCH_STR },
+	{ "ssl_fc_sni",             "ssl_fc_sni", PAT_MATCH_STR },
+	{ "ssl_fc_sni_end",         "ssl_fc_sni", PAT_MATCH_END },
+	{ "ssl_fc_sni_reg",         "ssl_fc_sni", PAT_MATCH_REG },
 	{ /* END */ },
 }};
 

@@ -92,8 +92,12 @@ struct acl_expr;
 struct acl_keyword {
 	const char *kw;
 	char *fetch_kw;
-	int (*parse)(const char **text, struct pattern *pattern, enum pat_usage usage, int *opaque, char **err);
-	enum pat_match_res (*match)(struct sample *smp, struct pattern *pattern);
+	int match_type; /* Contain PAT_MATCH_* */
+	int (*parse)(const char *text, struct pattern *pattern, char **err);
+	int (*index)(struct pattern_expr *expr, struct pattern *pattern, char **err);
+	void (*delete)(struct pattern_expr *expr, struct pat_ref_elt *);
+	void (*prune)(struct pattern_expr *expr);
+	struct pattern *(*match)(struct sample *smp, struct pattern_expr *expr, int fill);
 	/* must be after the config params */
 	struct sample_fetch *smp; /* the sample fetch we depend on */
 };
@@ -118,7 +122,7 @@ struct acl_kw_list {
  */
 struct acl_expr {
 	struct sample_expr *smp;      /* the sample expression we depend on */
-	struct pattern_expr pat;      /* the pattern matching expression */
+	struct pattern_head pat;      /* the pattern matching expression */
 	struct list list;             /* chaining */
 	const char *kw;               /* points to the ACL kw's name or fetch's name (must not free) */
 };

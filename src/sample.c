@@ -24,9 +24,22 @@
 #include <proto/arg.h>
 #include <proto/auth.h>
 #include <proto/log.h>
+#include <proto/proto_http.h>
 #include <proto/proxy.h>
 #include <proto/sample.h>
 #include <proto/stick_table.h>
+
+/* sample type names */
+const char *smp_to_type[SMP_TYPES] = {
+	[SMP_T_BOOL] = "bool",
+	[SMP_T_UINT] = "uint",
+	[SMP_T_SINT] = "sint",
+	[SMP_T_ADDR] = "addr",
+	[SMP_T_IPV4] = "ipv4",
+	[SMP_T_IPV6] = "ipv6",
+	[SMP_T_STR]  = "str",
+	[SMP_T_BIN]  = "bin",
+};
 
 /* static sample used in sample_process() when <p> is NULL */
 static struct sample temp_smp;
@@ -411,6 +424,7 @@ static int c_ip2str(struct sample *smp)
 	trash->len = strlen(trash->str);
 	smp->data.str = *trash;
 	smp->type = SMP_T_STR;
+	smp->flags &= ~SMP_F_CONST;
 
 	return 1;
 }
@@ -432,6 +446,7 @@ static int c_ipv62str(struct sample *smp)
 	trash->len = strlen(trash->str);
 	smp->data.str = *trash;
 	smp->type = SMP_T_STR;
+	smp->flags &= ~SMP_F_CONST;
 	return 1;
 }
 
@@ -455,9 +470,11 @@ static int c_str2addr(struct sample *smp)
 		if (!buf2ip6(smp->data.str.str, smp->data.str.len, &smp->data.ipv6))
 			return 0;
 		smp->type = SMP_T_IPV6;
+		smp->flags &= ~SMP_F_CONST;
 		return 1;
 	}
 	smp->type = SMP_T_IPV4;
+	smp->flags &= ~SMP_F_CONST;
 	return 1;
 }
 
@@ -466,6 +483,7 @@ static int c_str2ip(struct sample *smp)
 	if (!buf2ip(smp->data.str.str, smp->data.str.len, &smp->data.ipv4))
 		return 0;
 	smp->type = SMP_T_IPV4;
+	smp->flags &= ~SMP_F_CONST;
 	return 1;
 }
 
@@ -474,23 +492,31 @@ static int c_str2ipv6(struct sample *smp)
 	if (!buf2ip6(smp->data.str.str, smp->data.str.len, &smp->data.ipv6))
 		return 0;
 	smp->type = SMP_T_IPV6;
+	smp->flags &= ~SMP_F_CONST;
 	return 1;
 }
 
+/* The sample is always copied into a new one so that smp->size is always
+ * valid. The NULL char always enforces the end of string if it is met.
+ */
 static int c_bin2str(struct sample *smp)
 {
 	struct chunk *trash = get_trash_chunk();
 	unsigned char c;
 	int ptr = 0;
 
-	trash->len = 0;
-	while (ptr < smp->data.str.len && trash->len <= trash->size - 2) {
-		c = smp->data.str.str[ptr++];
-		trash->str[trash->len++] = hextab[(c >> 4) & 0xF];
-		trash->str[trash->len++] = hextab[c & 0xF];
+	while (ptr < smp->data.str.len) {
+		c = smp->data.str.str[ptr];
+		if (!c)
+			break;
+		trash->str[ptr] = c;
+		ptr++;
 	}
+	trash->len = ptr;
+	trash->str[ptr] = 0;
 	smp->data.str = *trash;
 	smp->type = SMP_T_STR;
+	smp->flags &= ~SMP_F_CONST;
 	return 1;
 }
 
@@ -509,37 +535,49 @@ static int c_int2str(struct sample *smp)
 	trash->len = strlen(pos);
 	smp->data.str = *trash;
 	smp->type = SMP_T_STR;
+	smp->flags &= ~SMP_F_CONST;
 	return 1;
 }
 
-static inline void _c_datadup(struct sample *smp)
+/* This function duplicates data and removes the flag "const". */
+int smp_dup(struct sample *smp)
 {
-	struct chunk *trash = get_trash_chunk();
+	struct chunk *trash;
 
-	trash->len = smp->data.str.len < trash->size ? smp->data.str.len : trash->size;
-	memcpy(trash->str, smp->data.str.str, trash->len);
-	smp->data.str = *trash;
-}
+	/* If the const flag is not set, we don't need to duplicate the
+	 * pattern as it can be modified in place.
+	 */
+	if (!(smp->flags & SMP_F_CONST))
+		return 1;
 
-static int c_datadup(struct sample *smp)
-{
-	_c_datadup(smp);
-	if (smp->type == SMP_T_CSTR)
-		smp->type = SMP_T_STR;
-	else
-		smp->type = SMP_T_BIN;
+	switch (smp->type) {
+	case SMP_T_BOOL:
+	case SMP_T_UINT:
+	case SMP_T_SINT:
+	case SMP_T_ADDR:
+	case SMP_T_IPV4:
+	case SMP_T_IPV6:
+		/* These type are not const. */
+		break;
+	case SMP_T_STR:
+	case SMP_T_BIN:
+		/* Duplicate data. */
+		trash = get_trash_chunk();
+		trash->len = smp->data.str.len < trash->size ? smp->data.str.len : trash->size;
+		memcpy(trash->str, smp->data.str.str, trash->len);
+		smp->data.str = *trash;
+		break;
+	default:
+		/* Other cases are unexpected. */
+		return 0;
+	}
+
+	/* remove const flag */
+	smp->flags &= ~SMP_F_CONST;
 	return 1;
 }
 
-static int c_bindup(struct sample *smp)
-{
-	_c_datadup(smp);
-	smp->type = SMP_T_BIN;
-	return 1;
-}
-
-
-static int c_none(struct sample *smp)
+int c_none(struct sample *smp)
 {
 	return 1;
 }
@@ -566,6 +604,52 @@ static int c_str2int(struct sample *smp)
 
 	smp->data.uint = ret;
 	smp->type = SMP_T_UINT;
+	smp->flags &= ~SMP_F_CONST;
+	return 1;
+}
+
+static int c_str2meth(struct sample *smp)
+{
+	enum http_meth_t meth;
+	int len;
+
+	meth = find_http_meth(smp->data.str.str, smp->data.str.len);
+	if (meth == HTTP_METH_OTHER) {
+		len = smp->data.str.len;
+		smp->data.meth.str.str = smp->data.str.str;
+		smp->data.meth.str.len = len;
+	}
+	else
+		smp->flags &= ~SMP_F_CONST;
+	smp->data.meth.meth = meth;
+	smp->type = SMP_T_METH;
+	return 1;
+}
+
+static int c_meth2str(struct sample *smp)
+{
+	int len;
+	enum http_meth_t meth;
+
+	if (smp->data.meth.meth == HTTP_METH_OTHER) {
+		/* The method is unknown. Copy the original pointer. */
+		len = smp->data.meth.str.len;
+		smp->data.str.str = smp->data.meth.str.str;
+		smp->data.str.len = len;
+		smp->type = SMP_T_STR;
+	}
+	else if (smp->data.meth.meth < HTTP_METH_OTHER) {
+		/* The method is known, copy the pointer containing the string. */
+		meth = smp->data.meth.meth;
+		smp->data.str.str = http_known_methods[meth].name;
+		smp->data.str.len = http_known_methods[meth].len;
+		smp->flags |= SMP_F_CONST;
+		smp->type = SMP_T_STR;
+	}
+	else {
+		/* Unknown method */
+		return 0;
+	}
 	return 1;
 }
 
@@ -576,17 +660,16 @@ static int c_str2int(struct sample *smp)
 /*****************************************************************/
 
 sample_cast_fct sample_casts[SMP_TYPES][SMP_TYPES] = {
-/*            to:  BOOL       UINT       SINT       ADDR        IPV4      IPV6        STR         BIN        CSTR        CBIN    */
-/* from: BOOL */ { c_none,    c_none,    c_none,    NULL,       NULL,     NULL,       c_int2str,  NULL,      c_int2str,  NULL,   },
-/*       UINT */ { c_none,    c_none,    c_none,    c_int2ip,   c_int2ip, NULL,       c_int2str,  NULL,      c_int2str,  NULL,   },
-/*       SINT */ { c_none,    c_none,    c_none,    c_int2ip,   c_int2ip, NULL,       c_int2str,  NULL,      c_int2str,  NULL,   },
-/*       ADDR */ { NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       NULL,       NULL,      NULL,       NULL,   },
-/*       IPV4 */ { NULL,      c_ip2int,  c_ip2int,  c_none,     c_none,   c_ip2ipv6,  c_ip2str,   NULL,      c_ip2str,   NULL,   },
-/*       IPV6 */ { NULL,      NULL,      NULL,      c_none,     NULL,     c_none,     c_ipv62str, NULL,      c_ipv62str, NULL,   },
-/*        STR */ { c_str2int, c_str2int, c_str2int, c_str2addr, c_str2ip, c_str2ipv6, c_none,     c_none,    c_none,     c_none, },
-/*        BIN */ { NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       c_bin2str,  c_none,    c_bin2str,  c_none, },
-/*       CSTR */ { c_str2int, c_str2int, c_str2int, c_str2addr, c_str2ip, c_str2ipv6, c_datadup,  c_bindup,  c_none,     c_none, },
-/*       CBIN */ { NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       c_bin2str,  c_datadup, c_bin2str,  c_none, },
+/*            to:  BOOL       UINT       SINT       ADDR        IPV4      IPV6        STR         BIN         METH */
+/* from: BOOL */ { c_none,    c_none,    c_none,    NULL,       NULL,     NULL,       c_int2str,  NULL,       NULL,       },
+/*       UINT */ { c_none,    c_none,    c_none,    c_int2ip,   c_int2ip, NULL,       c_int2str,  NULL,       NULL,       },
+/*       SINT */ { c_none,    c_none,    c_none,    c_int2ip,   c_int2ip, NULL,       c_int2str,  NULL,       NULL,       },
+/*       ADDR */ { NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       NULL,       NULL,       NULL,       },
+/*       IPV4 */ { NULL,      c_ip2int,  c_ip2int,  c_none,     c_none,   c_ip2ipv6,  c_ip2str,   NULL,       NULL,       },
+/*       IPV6 */ { NULL,      NULL,      NULL,      c_none,     NULL,     c_none,     c_ipv62str, NULL,       NULL,       },
+/*        STR */ { c_str2int, c_str2int, c_str2int, c_str2addr, c_str2ip, c_str2ipv6, c_none,     c_none,     c_str2meth, },
+/*        BIN */ { NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       c_bin2str,  c_none,     c_str2meth, },
+/*       METH */ { NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       c_meth2str, c_meth2str, c_none,     },
 };
 
 /*
@@ -595,7 +678,7 @@ sample_cast_fct sample_casts[SMP_TYPES][SMP_TYPES] = {
  * Returns a pointer on allocated sample expression structure.
  * The caller must have set al->ctx.
  */
-struct sample_expr *sample_parse_expr(char **str, int *idx, char **err_msg, struct arg_list *al)
+struct sample_expr *sample_parse_expr(char **str, int *idx, const char *file, int line, char **err_msg, struct arg_list *al)
 {
 	const char *begw; /* beginning of word */
 	const char *endw; /* end of word */
@@ -779,7 +862,7 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, char **err_msg, stru
 			if (!conv_expr->arg_p)
 				conv_expr->arg_p = empty_arg_list;
 
-			if (conv->val_args && !conv->val_args(conv_expr->arg_p, conv, err_msg)) {
+			if (conv->val_args && !conv->val_args(conv_expr->arg_p, conv, file, line, err_msg)) {
 				memprintf(err_msg, "invalid args in conv method '%s' : %s", ckw, *err_msg);
 				goto out_error;
 			}
@@ -1074,13 +1157,13 @@ struct sample *sample_fetch_string(struct proxy *px, struct session *l4, void *l
 	if (!smp)
 		return NULL;
 
-	if (!sample_casts[smp->type][SMP_T_CSTR])
+	if (!sample_casts[smp->type][SMP_T_STR])
 		return NULL;
 
-	if (!sample_casts[smp->type][SMP_T_CSTR](smp))
+	if (!sample_casts[smp->type][SMP_T_STR](smp))
 		return NULL;
 
-	smp->type = SMP_T_CSTR;
+	smp->type = SMP_T_STR;
 	return smp;
 }
 
@@ -1089,9 +1172,30 @@ struct sample *sample_fetch_string(struct proxy *px, struct session *l4, void *l
 /*    These functions set the data type on return.               */
 /*****************************************************************/
 
+static int sample_conv_bin2hex(const struct arg *arg_p, struct sample *smp)
+{
+	struct chunk *trash = get_trash_chunk();
+	unsigned char c;
+	int ptr = 0;
+
+	trash->len = 0;
+	while (ptr < smp->data.str.len && trash->len <= trash->size - 2) {
+		c = smp->data.str.str[ptr++];
+		trash->str[trash->len++] = hextab[(c >> 4) & 0xF];
+		trash->str[trash->len++] = hextab[c & 0xF];
+	}
+	smp->data.str = *trash;
+	smp->type = SMP_T_STR;
+	smp->flags &= ~SMP_F_CONST;
+	return 1;
+}
+
 static int sample_conv_str2lower(const struct arg *arg_p, struct sample *smp)
 {
 	int i;
+
+	if (!smp_dup(smp))
+		return 0;
 
 	if (!smp->data.str.size)
 		return 0;
@@ -1100,13 +1204,15 @@ static int sample_conv_str2lower(const struct arg *arg_p, struct sample *smp)
 		if ((smp->data.str.str[i] >= 'A') && (smp->data.str.str[i] <= 'Z'))
 			smp->data.str.str[i] += 'a' - 'A';
 	}
-	smp->type = SMP_T_STR;
 	return 1;
 }
 
 static int sample_conv_str2upper(const struct arg *arg_p, struct sample *smp)
 {
 	int i;
+
+	if (!smp_dup(smp))
+		return 0;
 
 	if (!smp->data.str.size)
 		return 0;
@@ -1115,7 +1221,6 @@ static int sample_conv_str2upper(const struct arg *arg_p, struct sample *smp)
 		if ((smp->data.str.str[i] >= 'a') && (smp->data.str.str[i] <= 'z'))
 			smp->data.str.str[i] += 'A' - 'a';
 	}
-	smp->type = SMP_T_STR;
 	return 1;
 }
 
@@ -1165,7 +1270,8 @@ smp_fetch_env(struct proxy *px, struct session *s, void *l7, unsigned int opt,
 	if (!env)
 		return 0;
 
-	smp->type = SMP_T_CSTR;
+	smp->type = SMP_T_STR;
+	smp->flags = SMP_F_CONST;
 	smp->data.str.str = env;
 	smp->data.str.len = strlen(env);
 	return 1;
@@ -1215,7 +1321,7 @@ smp_fetch_rand(struct proxy *px, struct session *s, void *l7, unsigned int opt,
 static struct sample_fetch_kw_list smp_kws = {ILH, {
 	{ "always_false", smp_fetch_false, 0,            NULL, SMP_T_BOOL, SMP_USE_INTRN },
 	{ "always_true",  smp_fetch_true,  0,            NULL, SMP_T_BOOL, SMP_USE_INTRN },
-	{ "env",          smp_fetch_env,   ARG1(1,STR),  NULL, SMP_T_CSTR, SMP_USE_INTRN },
+	{ "env",          smp_fetch_env,   ARG1(1,STR),  NULL, SMP_T_STR,  SMP_USE_INTRN },
 	{ "date",         smp_fetch_date,  ARG1(0,SINT), NULL, SMP_T_UINT, SMP_USE_INTRN },
 	{ "rand",         smp_fetch_rand,  ARG1(0,UINT), NULL, SMP_T_UINT, SMP_USE_INTRN },
 	{ /* END */ },
@@ -1225,6 +1331,7 @@ static struct sample_fetch_kw_list smp_kws = {ILH, {
 static struct sample_conv_kw_list sample_conv_kws = {ILH, {
 	{ "upper",  sample_conv_str2upper, 0,            NULL, SMP_T_STR,  SMP_T_STR  },
 	{ "lower",  sample_conv_str2lower, 0,            NULL, SMP_T_STR,  SMP_T_STR  },
+	{ "hex",    sample_conv_bin2hex,   0,            NULL, SMP_T_BIN,  SMP_T_STR  },
 	{ "ipmask", sample_conv_ipmask,    ARG1(1,MSK4), NULL, SMP_T_IPV4, SMP_T_IPV4 },
 	{ NULL, NULL, 0, 0, 0 },
 }};

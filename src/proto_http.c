@@ -235,6 +235,7 @@ static struct hdr_ctx static_hdr_ctx;
  */
 fd_set hdr_encode_map[(sizeof(fd_set) > (256/8)) ? 1 : ((256/8) / sizeof(fd_set))];
 fd_set url_encode_map[(sizeof(fd_set) > (256/8)) ? 1 : ((256/8) / sizeof(fd_set))];
+fd_set http_encode_map[(sizeof(fd_set) > (256/8)) ? 1 : ((256/8) / sizeof(fd_set))];
 
 #else
 #error "Check if your OS uses bitfields for fd_sets"
@@ -263,6 +264,7 @@ void init_proto_http()
 	 */
 	memset(hdr_encode_map, 0, sizeof(hdr_encode_map));
 	memset(url_encode_map, 0, sizeof(url_encode_map));
+	memset(http_encode_map, 0, sizeof(url_encode_map));
 	for (i = 0; i < 32; i++) {
 		FD_SET(i, hdr_encode_map);
 		FD_SET(i, url_encode_map);
@@ -283,6 +285,32 @@ void init_proto_http()
 		FD_SET(*tmp, url_encode_map);
 		tmp++;
 	}
+
+	/* initialize the http header encoding map. The draft httpbis define the
+	 * header content as:
+	 *
+	 *    HTTP-message   = start-line
+	 *                     *( header-field CRLF )
+	 *                     CRLF
+	 *                     [ message-body ]
+	 *    header-field   = field-name ":" OWS field-value OWS
+	 *    field-value    = *( field-content / obs-fold )
+	 *    field-content  = field-vchar [ 1*( SP / HTAB ) field-vchar ]
+	 *    obs-fold       = CRLF 1*( SP / HTAB )
+	 *    field-vchar    = VCHAR / obs-text
+	 *    VCHAR          = %x21-7E
+	 *    obs-text       = %x80-FF
+	 *
+	 * All the chars are encoded except "VCHAR", "obs-text", SP and HTAB.
+	 * The encoded chars are form 0x00 to 0x08, 0x0a to 0x1f and 0x7f. The
+	 * "obs-fold" is volontary forgotten because haproxy remove this.
+	 */
+	memset(http_encode_map, 0, sizeof(http_encode_map));
+	for (i = 0x00; i <= 0x08; i++)
+		FD_SET(i, http_encode_map);
+	for (i = 0x0a; i <= 0x1f; i++)
+		FD_SET(i, http_encode_map);
+	FD_SET(0x7f, http_encode_map);
 
 	/* memory allocations */
 	pool2_requri = create_pool("requri", REQURI_LEN, MEM_F_SHARED);
@@ -322,6 +350,18 @@ const struct http_method_desc http_methods[26][3] = {
 	/* rest is empty like this :
 	 *      [1] = {	.meth = HTTP_METH_NONE    , .len=0, .text=""        },
 	 */
+};
+
+const struct http_method_name http_known_methods[HTTP_METH_OTHER] = {
+	[HTTP_METH_NONE]    = { "",         0 },
+	[HTTP_METH_OPTIONS] = { "OPTIONS",  7 },
+	[HTTP_METH_GET]     = { "GET",      3 },
+	[HTTP_METH_HEAD]    = { "HEAD",     4 },
+	[HTTP_METH_POST]    = { "POST",     4 },
+	[HTTP_METH_PUT]     = { "PUT",      3 },
+	[HTTP_METH_DELETE]  = { "DELETE",   6 },
+	[HTTP_METH_TRACE]   = { "TRACE",    5 },
+	[HTTP_METH_CONNECT] = { "CONNECT",  7 },
 };
 
 /* It is about twice as fast on recent architectures to lookup a byte in a
@@ -767,7 +807,7 @@ struct chunk *http_error_message(struct session *s, int msgnum)
  * returns HTTP_METH_NONE if there is nothing valid to read (empty or non-text
  * string), HTTP_METH_OTHER for unknown methods, or the identified method.
  */
-static enum http_meth_t find_http_meth(const char *str, const int len)
+enum http_meth_t find_http_meth(const char *str, const int len)
 {
 	unsigned char m;
 	const struct http_method_desc *h;
@@ -1333,6 +1373,9 @@ const char *http_parse_reqline(struct http_msg *msg,
  * have the credentials overwritten by another session in parallel.
  */
 
+/* This bufffer is initialized in the file 'src/haproxy.c'. This length is
+ * set according to global.tune.bufsize.
+ */
 char *get_http_auth_buff;
 
 int
@@ -2101,6 +2144,38 @@ static inline int http_skip_chunk_crlf(struct http_msg *msg)
 	return 1;
 }
 
+/* Parses a qvalue and returns it multipled by 1000, from 0 to 1000. If the
+ * value is larger than 1000, it is bound to 1000. The parser consumes up to
+ * 1 digit, one dot and 3 digits and stops on the first invalid character.
+ * Unparsable qvalues return 1000 as "q=1.000".
+ */
+int parse_qvalue(const char *qvalue)
+{
+	int q = 1000;
+
+	if (!isdigit(*qvalue))
+		goto out;
+	q = (*qvalue++ - '0') * 1000;
+
+	if (*qvalue++ != '.')
+		goto out;
+
+	if (!isdigit(*qvalue))
+		goto out;
+	q += (*qvalue++ - '0') * 100;
+
+	if (!isdigit(*qvalue))
+		goto out;
+	q += (*qvalue++ - '0') * 10;
+
+	if (!isdigit(*qvalue))
+		goto out;
+	q += (*qvalue++ - '0') * 1;
+ out:
+	if (q > 1000)
+		q = 1000;
+	return q;
+}
 
 /*
  * Selects a compression algorithm depending on the client request.
@@ -2132,26 +2207,71 @@ int select_compression_request_header(struct session *s, struct buffer *req)
 
 	/* search for the algo in the backend in priority or the frontend */
 	if ((s->be->comp && (comp_algo_back = s->be->comp->algos)) || (s->fe->comp && (comp_algo_back = s->fe->comp->algos))) {
+		int best_q = 0;
+
 		ctx.idx = 0;
 		while (http_find_header2("Accept-Encoding", 15, req->p, &txn->hdr_idx, &ctx)) {
+			const char *qval;
+			int q;
+			int toklen;
+
+			/* try to isolate the token from the optional q-value */
+			toklen = 0;
+			while (toklen < ctx.vlen && http_is_token[(unsigned char)*(ctx.line + ctx.val + toklen)])
+				toklen++;
+
+			qval = ctx.line + ctx.val + toklen;
+			while (1) {
+				while (qval < ctx.line + ctx.val + ctx.vlen && http_is_lws[(unsigned char)*qval])
+					qval++;
+
+				if (qval >= ctx.line + ctx.val + ctx.vlen || *qval != ';') {
+					qval = NULL;
+					break;
+				}
+				qval++;
+
+				while (qval < ctx.line + ctx.val + ctx.vlen && http_is_lws[(unsigned char)*qval])
+					qval++;
+
+				if (qval >= ctx.line + ctx.val + ctx.vlen) {
+					qval = NULL;
+					break;
+				}
+				if (strncmp(qval, "q=", MIN(ctx.line + ctx.val + ctx.vlen - qval, 2)) == 0)
+					break;
+
+				while (qval < ctx.line + ctx.val + ctx.vlen && *qval != ';')
+					qval++;
+			}
+
+			/* here we have qval pointing to the first "q=" attribute or NULL if not found */
+			q = qval ? parse_qvalue(qval + 2) : 1000;
+
+			if (q <= best_q)
+				continue;
+
 			for (comp_algo = comp_algo_back; comp_algo; comp_algo = comp_algo->next) {
-				if (word_match(ctx.line + ctx.val, ctx.vlen, comp_algo->name, comp_algo->name_len)) {
+				if (*(ctx.line + ctx.val) == '*' ||
+				    word_match(ctx.line + ctx.val, toklen, comp_algo->name, comp_algo->name_len)) {
 					s->comp_algo = comp_algo;
-
-					/* remove all occurrences of the header when "compression offload" is set */
-
-					if ((s->be->comp && s->be->comp->offload) ||
-					    (s->fe->comp && s->fe->comp->offload)) {
-						http_remove_header2(msg, &txn->hdr_idx, &ctx);
-						ctx.idx = 0;
-						while (http_find_header2("Accept-Encoding", 15, req->p, &txn->hdr_idx, &ctx)) {
-							http_remove_header2(msg, &txn->hdr_idx, &ctx);
-						}
-					}
-					return 1;
+					best_q = q;
+					break;
 				}
 			}
 		}
+	}
+
+	/* remove all occurrences of the header when "compression offload" is set */
+	if (s->comp_algo) {
+		if ((s->be->comp && s->be->comp->offload) || (s->fe->comp && s->fe->comp->offload)) {
+			http_remove_header2(msg, &txn->hdr_idx, &ctx);
+			ctx.idx = 0;
+			while (http_find_header2("Accept-Encoding", 15, req->p, &txn->hdr_idx, &ctx)) {
+				http_remove_header2(msg, &txn->hdr_idx, &ctx);
+			}
+		}
+		return 1;
 	}
 
 	/* identity is implicit does not require headers */
@@ -8459,8 +8579,9 @@ struct http_req_rule *parse_http_req_cond(const char **args, const char *file, i
 		LIST_INIT(&rule->arg.hdr_add.fmt);
 
 		proxy->conf.args.ctx = ARGC_HRQ;
-		parse_logformat_string(args[cur_arg + 1], proxy, &rule->arg.hdr_add.fmt, 0,
-				       (proxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR);
+		parse_logformat_string(args[cur_arg + 1], proxy, &rule->arg.hdr_add.fmt, LOG_OPT_HTTP,
+				       (proxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR,
+				       file, linenum);
 		free(proxy->conf.lfs_file);
 		proxy->conf.lfs_file = strdup(proxy->conf.args.file);
 		proxy->conf.lfs_line = proxy->conf.args.line;
@@ -8630,8 +8751,9 @@ struct http_res_rule *parse_http_res_cond(const char **args, const char *file, i
 		LIST_INIT(&rule->arg.hdr_add.fmt);
 
 		proxy->conf.args.ctx = ARGC_HRS;
-		parse_logformat_string(args[cur_arg + 1], proxy, &rule->arg.hdr_add.fmt, 0,
-				       (proxy->cap & PR_CAP_BE) ? SMP_VAL_BE_HRS_HDR : SMP_VAL_FE_HRS_HDR);
+		parse_logformat_string(args[cur_arg + 1], proxy, &rule->arg.hdr_add.fmt, LOG_OPT_HTTP,
+				       (proxy->cap & PR_CAP_BE) ? SMP_VAL_BE_HRS_HDR : SMP_VAL_FE_HRS_HDR,
+				       file, linenum);
 		free(proxy->conf.lfs_file);
 		proxy->conf.lfs_file = strdup(proxy->conf.args.file);
 		proxy->conf.lfs_line = proxy->conf.args.line;
@@ -8786,8 +8908,9 @@ struct redirect_rule *http_parse_redirect_rule(const char *file, int linenum, st
 		 */
 		proxy->conf.args.ctx = ARGC_RDR;
 		if (!(type == REDIRECT_TYPE_PREFIX && destination[0] == '/' && destination[1] == '\0')) {
-			parse_logformat_string(destination, curproxy, &rule->rdr_fmt, 0,
-			                       (curproxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR);
+			parse_logformat_string(destination, curproxy, &rule->rdr_fmt, LOG_OPT_HTTP,
+			                       (curproxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR,
+					       file, linenum);
 			free(curproxy->conf.lfs_file);
 			curproxy->conf.lfs_file = strdup(curproxy->conf.args.file);
 			curproxy->conf.lfs_line = curproxy->conf.args.line;
@@ -8942,37 +9065,29 @@ smp_prefetch_http(struct proxy *px, struct session *s, void *l7, unsigned int op
  * We use the pre-parsed method if it is known, and store its number as an
  * integer. If it is unknown, we use the pointer and the length.
  */
-static int pat_parse_meth(const char **text, struct pattern *pattern, enum pat_usage usage, int *opaque, char **err)
+static int pat_parse_meth(const char *text, struct pattern *pattern, char **err)
 {
 	int len, meth;
 	struct chunk *trash;
 
-	len  = strlen(*text);
-	meth = find_http_meth(*text, len);
+	len  = strlen(text);
+	meth = find_http_meth(text, len);
 
 	pattern->val.i = meth;
 	if (meth == HTTP_METH_OTHER) {
-		if (usage == PAT_U_COMPILE) {
-			pattern->ptr.str = strdup(*text);
-			if (!pattern->ptr.str) {
-				memprintf(err, "out of memory while loading pattern");
-				return 0;
-			}
+		trash = get_trash_chunk();
+		if (trash->size < len) {
+			memprintf(err, "no space avalaible in the buffer. expect %d, provides %d",
+			          len, trash->size);
+			return 0;
 		}
-		else {
-			trash = get_trash_chunk();
-			if (trash->size < len) {
-				memprintf(err, "no space avalaible in the buffer. expect %d, provides %d",
-				          len, trash->size);
-				return 0;
-			}
-			pattern->ptr.str = trash->str;
-		}
-		pattern->expect_type = SMP_T_CSTR;
+		pattern->ptr.str = trash->str;
 		pattern->len = len;
 	}
-	else
-		pattern->expect_type = SMP_T_UINT;
+	else {
+		pattern->ptr.str = NULL;
+		pattern->len = 0;
+	}
 	return 1;
 }
 
@@ -8994,46 +9109,48 @@ smp_fetch_meth(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
 	CHECK_HTTP_MESSAGE_FIRST_PERM();
 
 	meth = txn->meth;
-	smp->type = SMP_T_UINT;
-	smp->data.uint = meth;
+	smp->type = SMP_T_METH;
+	smp->data.meth.meth = meth;
 	if (meth == HTTP_METH_OTHER) {
 		if (txn->rsp.msg_state != HTTP_MSG_RPBEFORE)
 			/* ensure the indexes are not affected */
 			return 0;
-		smp->type = SMP_T_CSTR;
-		smp->data.str.len = txn->req.sl.rq.m_l;
-		smp->data.str.str = txn->req.chn->buf->p;
+		smp->flags |= SMP_F_CONST;
+		smp->data.meth.str.len = txn->req.sl.rq.m_l;
+		smp->data.meth.str.str = txn->req.chn->buf->p;
 	}
-	smp->flags = SMP_F_VOL_1ST;
+	smp->flags |= SMP_F_VOL_1ST;
 	return 1;
 }
 
 /* See above how the method is stored in the global pattern */
-static enum pat_match_res pat_match_meth(struct sample *smp, struct pattern *pattern)
+static struct pattern *pat_match_meth(struct sample *smp, struct pattern_expr *expr, int fill)
 {
 	int icase;
+	struct pattern_list *lst;
+	struct pattern *pattern;
 
+	list_for_each_entry(lst, &expr->patterns, list) {
+		pattern = &lst->pat;
 
-	if (smp->type == SMP_T_UINT) {
 		/* well-known method */
-		if (smp->data.uint == pattern->val.i)
-			return PAT_MATCH;
-		return PAT_NOMATCH;
+		if (pattern->val.i != HTTP_METH_OTHER) {
+			if (smp->data.meth.meth == pattern->val.i)
+				return pattern;
+			else
+				continue;
+		}
+
+		/* Other method, we must compare the strings */
+		if (pattern->len != smp->data.meth.str.len)
+			continue;
+
+		icase = pattern->flags & PAT_F_IGNORE_CASE;
+		if ((icase && strncasecmp(pattern->ptr.str, smp->data.meth.str.str, smp->data.meth.str.len) != 0) ||
+		    (!icase && strncmp(pattern->ptr.str, smp->data.meth.str.str, smp->data.meth.str.len) != 0))
+			return pattern;
 	}
-
-	/* Uncommon method, only HTTP_METH_OTHER is accepted now */
-	if (pattern->val.i != HTTP_METH_OTHER)
-		return PAT_NOMATCH;
-
-	/* Other method, we must compare the strings */
-	if (pattern->len != smp->data.str.len)
-		return PAT_NOMATCH;
-
-	icase = pattern->flags & PAT_F_IGNORE_CASE;
-	if ((icase && strncasecmp(pattern->ptr.str, smp->data.str.str, smp->data.str.len) != 0) ||
-	    (!icase && strncmp(pattern->ptr.str, smp->data.str.str, smp->data.str.len) != 0))
-		return PAT_NOMATCH;
-	return PAT_MATCH;
+	return NULL;
 }
 
 static int
@@ -9053,11 +9170,11 @@ smp_fetch_rqver(struct proxy *px, struct session *l4, void *l7, unsigned int opt
 	if (len <= 0)
 		return 0;
 
-	smp->type = SMP_T_CSTR;
+	smp->type = SMP_T_STR;
 	smp->data.str.str = ptr;
 	smp->data.str.len = len;
 
-	smp->flags = SMP_F_VOL_1ST;
+	smp->flags = SMP_F_VOL_1ST | SMP_F_CONST;
 	return 1;
 }
 
@@ -9081,11 +9198,11 @@ smp_fetch_stver(struct proxy *px, struct session *l4, void *l7, unsigned int opt
 	if (len <= 0)
 		return 0;
 
-	smp->type = SMP_T_CSTR;
+	smp->type = SMP_T_STR;
 	smp->data.str.str = ptr;
 	smp->data.str.len = len;
 
-	smp->flags = SMP_F_VOL_1ST;
+	smp->flags = SMP_F_VOL_1ST | SMP_F_CONST;
 	return 1;
 }
 
@@ -9121,10 +9238,10 @@ smp_fetch_url(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
 
 	CHECK_HTTP_MESSAGE_FIRST();
 
-	smp->type = SMP_T_CSTR;
+	smp->type = SMP_T_STR;
 	smp->data.str.len = txn->req.sl.rq.u_l;
 	smp->data.str.str = txn->req.chn->buf->p + txn->req.sl.rq.u;
-	smp->flags = SMP_F_VOL_1ST;
+	smp->flags = SMP_F_VOL_1ST | SMP_F_CONST;
 	return 1;
 }
 
@@ -9216,8 +9333,8 @@ smp_fetch_fhdr(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
 		/* prepare to report multiple occurrences for ACL fetches */
 		smp->flags |= SMP_F_NOT_LAST;
 
-	smp->type = SMP_T_CSTR;
-	smp->flags |= SMP_F_VOL_HDR;
+	smp->type = SMP_T_STR;
+	smp->flags |= SMP_F_VOL_HDR | SMP_F_CONST;
 	if (http_get_fhdr(msg, name_str, name_len, idx, occ, ctx, &smp->data.str.str, &smp->data.str.len))
 		return 1;
 
@@ -9304,8 +9421,8 @@ smp_fetch_hdr(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
 		/* prepare to report multiple occurrences for ACL fetches */
 		smp->flags |= SMP_F_NOT_LAST;
 
-	smp->type = SMP_T_CSTR;
-	smp->flags |= SMP_F_VOL_HDR;
+	smp->type = SMP_T_STR;
+	smp->flags |= SMP_F_VOL_HDR | SMP_F_CONST;
 	if (http_get_hdr(msg, name_str, name_len, idx, occ, ctx, &smp->data.str.str, &smp->data.str.len))
 		return 1;
 
@@ -9412,14 +9529,14 @@ smp_fetch_path(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
 		return 0;
 
 	/* OK, we got the '/' ! */
-	smp->type = SMP_T_CSTR;
+	smp->type = SMP_T_STR;
 	smp->data.str.str = ptr;
 
 	while (ptr < end && *ptr != '?')
 		ptr++;
 
 	smp->data.str.len = ptr - smp->data.str.str;
-	smp->flags = SMP_F_VOL_1ST;
+	smp->flags = SMP_F_VOL_1ST | SMP_F_CONST;
 	return 1;
 }
 
@@ -9602,7 +9719,7 @@ smp_fetch_http_auth(struct proxy *px, struct session *l4, void *l7, unsigned int
 		return 0;
 
 	smp->type = SMP_T_BOOL;
-	smp->data.uint = check_user(args->data.usr, 0, l4->txn.auth.user, l4->txn.auth.pass);
+	smp->data.uint = check_user(args->data.usr, l4->txn.auth.user, l4->txn.auth.pass);
 	return 1;
 }
 
@@ -9620,20 +9737,20 @@ smp_fetch_http_auth_grp(struct proxy *px, struct session *l4, void *l7, unsigned
 	if (!get_http_auth(l4))
 		return 0;
 
-	/* pat_match_auth() will need several information at once */
-	smp->ctx.a[0] = args->data.usr;      /* user list */
-	smp->ctx.a[1] = l4->txn.auth.user;   /* user name */
-	smp->ctx.a[2] = l4->txn.auth.pass;   /* password */
-
 	/* if the user does not belong to the userlist or has a wrong password,
 	 * report that it unconditionally does not match. Otherwise we return
-	 * a non-zero integer which will be ignored anyway since all the params
-	 * that pat_match_auth() will use are in test->ctx.a[0,1,2].
+	 * a string containing the username.
 	 */
-	smp->type = SMP_T_BOOL;
-	smp->data.uint = check_user(args->data.usr, 0, l4->txn.auth.user, l4->txn.auth.pass);
-	if (smp->data.uint)
-		smp->type = SMP_T_UINT;
+	if (!check_user(args->data.usr, l4->txn.auth.user, l4->txn.auth.pass))
+		return 0;
+
+	/* pat_match_auth() will need the user list */
+	smp->ctx.a[0] = args->data.usr;
+
+	smp->type = SMP_T_STR;
+	smp->flags = SMP_F_CONST;
+	smp->data.str.str = l4->txn.auth.user;
+	smp->data.str.len = strlen(l4->txn.auth.user);
 
 	return 1;
 }
@@ -9752,7 +9869,8 @@ smp_fetch_capture_header_req(struct proxy *px, struct session *l4, void *l7, uns
 	if (idx > (fe->nb_req_cap - 1) || txn->req.cap == NULL || txn->req.cap[idx] == NULL)
 		return 0;
 
-	smp->type = SMP_T_CSTR;
+	smp->type = SMP_T_STR;
+	smp->flags |= SMP_F_CONST;
 	smp->data.str.str = txn->req.cap[idx];
 	smp->data.str.len = strlen(txn->req.cap[idx]);
 
@@ -9778,7 +9896,8 @@ smp_fetch_capture_header_res(struct proxy *px, struct session *l4, void *l7, uns
 	if (idx > (fe->nb_rsp_cap - 1) || txn->rsp.cap == NULL || txn->rsp.cap[idx] == NULL)
 		return 0;
 
-	smp->type = SMP_T_CSTR;
+	smp->type = SMP_T_STR;
+	smp->flags |= SMP_F_CONST;
 	smp->data.str.str = txn->rsp.cap[idx];
 	smp->data.str.len = strlen(txn->rsp.cap[idx]);
 
@@ -9806,7 +9925,8 @@ smp_fetch_capture_req_method(struct proxy *px, struct session *l4, void *l7, uns
 	temp->str = txn->uri;
 	temp->len = ptr - txn->uri;
 	smp->data.str = *temp;
-	smp->type = SMP_T_CSTR;
+	smp->type = SMP_T_STR;
+	smp->flags = SMP_F_CONST;
 
 	return 1;
 
@@ -9843,7 +9963,8 @@ smp_fetch_capture_req_uri(struct proxy *px, struct session *l4, void *l7, unsign
 
 	smp->data.str = *temp;
 	smp->data.str.len = ptr - temp->str;
-	smp->type = SMP_T_CSTR;
+	smp->type = SMP_T_STR;
+	smp->flags = SMP_F_CONST;
 
 	return 1;
 }
@@ -9927,7 +10048,8 @@ smp_fetch_cookie(struct proxy *px, struct session *l4, void *l7, unsigned int op
 			smp->ctx.a[1] = smp->ctx.a[0] + ctx->vlen;
 		}
 
-		smp->type = SMP_T_CSTR;
+		smp->type = SMP_T_STR;
+		smp->flags |= SMP_F_CONST;
 		smp->ctx.a[0] = extract_cookie_value(smp->ctx.a[0], smp->ctx.a[1],
 						 args->data.str.str, args->data.str.len,
 						 (opt & SMP_OPT_DIR) == SMP_OPT_DIR_REQ,
@@ -10003,7 +10125,8 @@ smp_fetch_cookie_cnt(struct proxy *px, struct session *l4, void *l7, unsigned in
 			val_end = val_beg + ctx.vlen;
 		}
 
-		smp->type = SMP_T_CSTR;
+		smp->type = SMP_T_STR;
+		smp->flags |= SMP_F_CONST;
 		while ((val_beg = extract_cookie_value(val_beg, val_end,
 						       args->data.str.str, args->data.str.len,
 						       (opt & SMP_OPT_DIR) == SMP_OPT_DIR_REQ,
@@ -10150,8 +10273,8 @@ smp_fetch_url_param(struct proxy *px, struct session *l4, void *l7, unsigned int
                                  delim))
 		return 0;
 
-	smp->type = SMP_T_CSTR;
-	smp->flags = SMP_F_VOL_1ST;
+	smp->type = SMP_T_STR;
+	smp->flags = SMP_F_VOL_1ST | SMP_F_CONST;
 	return 1;
 }
 
@@ -10316,84 +10439,89 @@ static int sample_conv_http_date(const struct arg *args, struct sample *smp)
  * Please take care of keeping this list alphabetically sorted.
  */
 static struct acl_kw_list acl_kws = {ILH, {
-	{ "base",            "base",          pat_parse_str,     pat_match_str     },
-	{ "base_beg",        "base",          pat_parse_str,     pat_match_beg     },
-	{ "base_dir",        "base",          pat_parse_str,     pat_match_dir     },
-	{ "base_dom",        "base",          pat_parse_str,     pat_match_dom     },
-	{ "base_end",        "base",          pat_parse_str,     pat_match_end     },
-	{ "base_len",        "base",          pat_parse_int,     pat_match_len     },
-	{ "base_reg",        "base",          pat_parse_reg,     pat_match_reg     },
-	{ "base_sub",        "base",          pat_parse_str,     pat_match_sub     },
+	{ "base",            "base",     PAT_MATCH_STR },
+	{ "base_beg",        "base",     PAT_MATCH_BEG },
+	{ "base_dir",        "base",     PAT_MATCH_DIR },
+	{ "base_dom",        "base",     PAT_MATCH_DOM },
+	{ "base_end",        "base",     PAT_MATCH_END },
+	{ "base_len",        "base",     PAT_MATCH_LEN },
+	{ "base_reg",        "base",     PAT_MATCH_REG },
+	{ "base_sub",        "base",     PAT_MATCH_SUB },
 
-	{ "cook",            "req.cook",      pat_parse_str,     pat_match_str     },
-	{ "cook_beg",        "req.cook",      pat_parse_str,     pat_match_beg     },
-	{ "cook_dir",        "req.cook",      pat_parse_str,     pat_match_dir     },
-	{ "cook_dom",        "req.cook",      pat_parse_str,     pat_match_dom     },
-	{ "cook_end",        "req.cook",      pat_parse_str,     pat_match_end     },
-	{ "cook_len",        "req.cook",      pat_parse_int,     pat_match_len     },
-	{ "cook_reg",        "req.cook",      pat_parse_reg,     pat_match_reg     },
-	{ "cook_sub",        "req.cook",      pat_parse_str,     pat_match_sub     },
+	{ "cook",            "req.cook", PAT_MATCH_STR },
+	{ "cook_beg",        "req.cook", PAT_MATCH_BEG },
+	{ "cook_dir",        "req.cook", PAT_MATCH_DIR },
+	{ "cook_dom",        "req.cook", PAT_MATCH_DOM },
+	{ "cook_end",        "req.cook", PAT_MATCH_END },
+	{ "cook_len",        "req.cook", PAT_MATCH_LEN },
+	{ "cook_reg",        "req.cook", PAT_MATCH_REG },
+	{ "cook_sub",        "req.cook", PAT_MATCH_SUB },
 
-	{ "hdr",             "req.hdr",       pat_parse_str,     pat_match_str     },
-	{ "hdr_beg",         "req.hdr",       pat_parse_str,     pat_match_beg     },
-	{ "hdr_dir",         "req.hdr",       pat_parse_str,     pat_match_dir     },
-	{ "hdr_dom",         "req.hdr",       pat_parse_str,     pat_match_dom     },
-	{ "hdr_end",         "req.hdr",       pat_parse_str,     pat_match_end     },
-	{ "hdr_len",         "req.hdr",       pat_parse_int,     pat_match_len     },
-	{ "hdr_reg",         "req.hdr",       pat_parse_reg,     pat_match_reg     },
-	{ "hdr_sub",         "req.hdr",       pat_parse_str,     pat_match_sub     },
+	{ "hdr",             "req.hdr",  PAT_MATCH_STR },
+	{ "hdr_beg",         "req.hdr",  PAT_MATCH_BEG },
+	{ "hdr_dir",         "req.hdr",  PAT_MATCH_DIR },
+	{ "hdr_dom",         "req.hdr",  PAT_MATCH_DOM },
+	{ "hdr_end",         "req.hdr",  PAT_MATCH_END },
+	{ "hdr_len",         "req.hdr",  PAT_MATCH_LEN },
+	{ "hdr_reg",         "req.hdr",  PAT_MATCH_REG },
+	{ "hdr_sub",         "req.hdr",  PAT_MATCH_SUB },
 
-	{ "http_auth_group", NULL,            pat_parse_strcat,  pat_match_auth    },
+	/* these two declarations uses strings with list storage (in place
+	 * of tree storage). The basic match is PAT_MATCH_STR, but the indexation
+	 * and delete functions are relative to the list management. The parse
+	 * and match method are related to the corresponding fetch methods. This
+	 * is very particular ACL declaration mode.
+	 */
+	{ "http_auth_group", NULL,       PAT_MATCH_STR, NULL,  pat_idx_list_str, pat_del_list_ptr, NULL, pat_match_auth },
+	{ "method",          NULL,       PAT_MATCH_STR, pat_parse_meth, pat_idx_list_str, pat_del_list_ptr, NULL, pat_match_meth },
 
-	{ "method",          NULL,            pat_parse_meth,    pat_match_meth    },
+	{ "path",            "path",     PAT_MATCH_STR },
+	{ "path_beg",        "path",     PAT_MATCH_BEG },
+	{ "path_dir",        "path",     PAT_MATCH_DIR },
+	{ "path_dom",        "path",     PAT_MATCH_DOM },
+	{ "path_end",        "path",     PAT_MATCH_END },
+	{ "path_len",        "path",     PAT_MATCH_LEN },
+	{ "path_reg",        "path",     PAT_MATCH_REG },
+	{ "path_sub",        "path",     PAT_MATCH_SUB },
 
-	{ "path",            "path",          pat_parse_str,     pat_match_str     },
-	{ "path_beg",        "path",          pat_parse_str,     pat_match_beg     },
-	{ "path_dir",        "path",          pat_parse_str,     pat_match_dir     },
-	{ "path_dom",        "path",          pat_parse_str,     pat_match_dom     },
-	{ "path_end",        "path",          pat_parse_str,     pat_match_end     },
-	{ "path_len",        "path",          pat_parse_int,     pat_match_len     },
-	{ "path_reg",        "path",          pat_parse_reg,     pat_match_reg     },
-	{ "path_sub",        "path",          pat_parse_str,     pat_match_sub     },
+	{ "req_ver",         "req.ver",  PAT_MATCH_STR },
+	{ "resp_ver",        "res.ver",  PAT_MATCH_STR },
 
-	{ "req_ver",         "req.ver",       pat_parse_str,     pat_match_str     },
-	{ "resp_ver",        "res.ver",       pat_parse_str,     pat_match_str     },
+	{ "scook",           "res.cook", PAT_MATCH_STR },
+	{ "scook_beg",       "res.cook", PAT_MATCH_BEG },
+	{ "scook_dir",       "res.cook", PAT_MATCH_DIR },
+	{ "scook_dom",       "res.cook", PAT_MATCH_DOM },
+	{ "scook_end",       "res.cook", PAT_MATCH_END },
+	{ "scook_len",       "res.cook", PAT_MATCH_LEN },
+	{ "scook_reg",       "res.cook", PAT_MATCH_REG },
+	{ "scook_sub",       "res.cook", PAT_MATCH_SUB },
 
-	{ "scook",           "res.cook",      pat_parse_str,     pat_match_str     },
-	{ "scook_beg",       "res.cook",      pat_parse_str,     pat_match_beg     },
-	{ "scook_dir",       "res.cook",      pat_parse_str,     pat_match_dir     },
-	{ "scook_dom",       "res.cook",      pat_parse_str,     pat_match_dom     },
-	{ "scook_end",       "res.cook",      pat_parse_str,     pat_match_end     },
-	{ "scook_len",       "res.cook",      pat_parse_int,     pat_match_len     },
-	{ "scook_reg",       "res.cook",      pat_parse_reg,     pat_match_reg     },
-	{ "scook_sub",       "res.cook",      pat_parse_str,     pat_match_sub     },
+	{ "shdr",            "res.hdr",  PAT_MATCH_STR },
+	{ "shdr_beg",        "res.hdr",  PAT_MATCH_BEG },
+	{ "shdr_dir",        "res.hdr",  PAT_MATCH_DIR },
+	{ "shdr_dom",        "res.hdr",  PAT_MATCH_DOM },
+	{ "shdr_end",        "res.hdr",  PAT_MATCH_END },
+	{ "shdr_len",        "res.hdr",  PAT_MATCH_LEN },
+	{ "shdr_reg",        "res.hdr",  PAT_MATCH_REG },
+	{ "shdr_sub",        "res.hdr",  PAT_MATCH_SUB },
 
-	{ "shdr",            "res.hdr",       pat_parse_str,     pat_match_str     },
-	{ "shdr_beg",        "res.hdr",       pat_parse_str,     pat_match_beg     },
-	{ "shdr_dir",        "res.hdr",       pat_parse_str,     pat_match_dir     },
-	{ "shdr_dom",        "res.hdr",       pat_parse_str,     pat_match_dom     },
-	{ "shdr_end",        "res.hdr",       pat_parse_str,     pat_match_end     },
-	{ "shdr_len",        "res.hdr",       pat_parse_int,     pat_match_len     },
-	{ "shdr_reg",        "res.hdr",       pat_parse_reg,     pat_match_reg     },
-	{ "shdr_sub",        "res.hdr",       pat_parse_str,     pat_match_sub     },
+	{ "url",             "url",      PAT_MATCH_STR },
+	{ "url_beg",         "url",      PAT_MATCH_BEG },
+	{ "url_dir",         "url",      PAT_MATCH_DIR },
+	{ "url_dom",         "url",      PAT_MATCH_DOM },
+	{ "url_end",         "url",      PAT_MATCH_END },
+	{ "url_len",         "url",      PAT_MATCH_LEN },
+	{ "url_reg",         "url",      PAT_MATCH_REG },
+	{ "url_sub",         "url",      PAT_MATCH_SUB },
 
-	{ "url",             "url",           pat_parse_str,     pat_match_str     },
-	{ "url_beg",         "url",           pat_parse_str,     pat_match_beg     },
-	{ "url_dir",         "url",           pat_parse_str,     pat_match_dir     },
-	{ "url_dom",         "url",           pat_parse_str,     pat_match_dom     },
-	{ "url_end",         "url",           pat_parse_str,     pat_match_end     },
-	{ "url_len",         "url",           pat_parse_int,     pat_match_len     },
-	{ "url_reg",         "url",           pat_parse_reg,     pat_match_reg     },
-	{ "url_sub",         "url",           pat_parse_str,     pat_match_sub     },
-
-	{ "urlp",            "urlp",          pat_parse_str,     pat_match_str     },
-	{ "urlp_beg",        "urlp",          pat_parse_str,     pat_match_beg     },
-	{ "urlp_dir",        "urlp",          pat_parse_str,     pat_match_dir     },
-	{ "urlp_dom",        "urlp",          pat_parse_str,     pat_match_dom     },
-	{ "urlp_end",        "urlp",          pat_parse_str,     pat_match_end     },
-	{ "urlp_len",        "urlp",          pat_parse_int,     pat_match_len     },
-	{ "urlp_reg",        "urlp",          pat_parse_reg,     pat_match_reg     },
-	{ "urlp_sub",        "urlp",          pat_parse_str,     pat_match_sub     },
+	{ "urlp",            "urlp",     PAT_MATCH_STR },
+	{ "urlp_beg",        "urlp",     PAT_MATCH_BEG },
+	{ "urlp_dir",        "urlp",     PAT_MATCH_DIR },
+	{ "urlp_dom",        "urlp",     PAT_MATCH_DOM },
+	{ "urlp_end",        "urlp",     PAT_MATCH_END },
+	{ "urlp_len",        "urlp",     PAT_MATCH_LEN },
+	{ "urlp_reg",        "urlp",     PAT_MATCH_REG },
+	{ "urlp_sub",        "urlp",     PAT_MATCH_SUB },
 
 	{ /* END */ },
 }};
@@ -10403,23 +10531,23 @@ static struct acl_kw_list acl_kws = {ILH, {
 /************************************************************************/
 /* Note: must not be declared <const> as its list will be overwritten */
 static struct sample_fetch_kw_list sample_fetch_keywords = {ILH, {
-	{ "base",            smp_fetch_base,           0,                NULL,    SMP_T_CSTR, SMP_USE_HRQHV },
+	{ "base",            smp_fetch_base,           0,                NULL,    SMP_T_STR,  SMP_USE_HRQHV },
 	{ "base32",          smp_fetch_base32,         0,                NULL,    SMP_T_UINT, SMP_USE_HRQHV },
 	{ "base32+src",      smp_fetch_base32_src,     0,                NULL,    SMP_T_BIN,  SMP_USE_HRQHV },
 
-	{ "capture.req.uri",    smp_fetch_capture_req_uri,    0,          NULL,    SMP_T_CSTR, SMP_USE_HRQHP },
-	{ "capture.req.method", smp_fetch_capture_req_method, 0,          NULL,    SMP_T_CSTR, SMP_USE_HRQHP },
+	{ "capture.req.uri",    smp_fetch_capture_req_uri,    0,          NULL,    SMP_T_STR, SMP_USE_HRQHP },
+	{ "capture.req.method", smp_fetch_capture_req_method, 0,          NULL,    SMP_T_STR, SMP_USE_HRQHP },
 
 	/* capture are allocated and are permanent in the session */
-	{ "capture.req.hdr", smp_fetch_capture_header_req, ARG1(1, UINT), NULL, SMP_T_CSTR, SMP_USE_HRQHP },
-	{ "capture.res.hdr", smp_fetch_capture_header_res, ARG1(1, UINT), NULL, SMP_T_CSTR, SMP_USE_HRSHP },
+	{ "capture.req.hdr", smp_fetch_capture_header_req, ARG1(1, UINT), NULL,   SMP_T_STR,  SMP_USE_HRQHP },
+	{ "capture.res.hdr", smp_fetch_capture_header_res, ARG1(1, UINT), NULL,   SMP_T_STR,  SMP_USE_HRSHP },
 
 	/* cookie is valid in both directions (eg: for "stick ...") but cook*
 	 * are only here to match the ACL's name, are request-only and are used
 	 * for ACL compatibility only.
 	 */
-	{ "cook",            smp_fetch_cookie,         ARG1(0,STR),      NULL,    SMP_T_CSTR, SMP_USE_HRQHV },
-	{ "cookie",          smp_fetch_cookie,         ARG1(0,STR),      NULL,    SMP_T_CSTR, SMP_USE_HRQHV|SMP_USE_HRSHV },
+	{ "cook",            smp_fetch_cookie,         ARG1(0,STR),      NULL,    SMP_T_STR,  SMP_USE_HRQHV },
+	{ "cookie",          smp_fetch_cookie,         ARG1(0,STR),      NULL,    SMP_T_STR,  SMP_USE_HRQHV|SMP_USE_HRSHV },
 	{ "cook_cnt",        smp_fetch_cookie_cnt,     ARG1(0,STR),      NULL,    SMP_T_UINT, SMP_USE_HRQHV },
 	{ "cook_val",        smp_fetch_cookie_val,     ARG1(0,STR),      NULL,    SMP_T_UINT, SMP_USE_HRQHV },
 
@@ -10427,73 +10555,73 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {ILH, {
 	 * only here to match the ACL's name, are request-only and are used for
 	 * ACL compatibility only.
 	 */
-	{ "hdr",             smp_fetch_hdr,            ARG2(0,STR,SINT), val_hdr, SMP_T_CSTR, SMP_USE_HRQHV|SMP_USE_HRSHV },
+	{ "hdr",             smp_fetch_hdr,            ARG2(0,STR,SINT), val_hdr, SMP_T_STR,  SMP_USE_HRQHV|SMP_USE_HRSHV },
 	{ "hdr_cnt",         smp_fetch_hdr_cnt,        ARG1(0,STR),      NULL,    SMP_T_UINT, SMP_USE_HRQHV },
 	{ "hdr_ip",          smp_fetch_hdr_ip,         ARG2(0,STR,SINT), val_hdr, SMP_T_IPV4, SMP_USE_HRQHV },
 	{ "hdr_val",         smp_fetch_hdr_val,        ARG2(0,STR,SINT), val_hdr, SMP_T_UINT, SMP_USE_HRQHV },
 
 	{ "http_auth",       smp_fetch_http_auth,      ARG1(1,USR),      NULL,    SMP_T_BOOL, SMP_USE_HRQHV },
-	{ "http_auth_group", smp_fetch_http_auth_grp,  ARG1(1,USR),      NULL,    SMP_T_BOOL, SMP_USE_HRQHV },
+	{ "http_auth_group", smp_fetch_http_auth_grp,  ARG1(1,USR),      NULL,    SMP_T_STR,  SMP_USE_HRQHV },
 	{ "http_first_req",  smp_fetch_http_first_req, 0,                NULL,    SMP_T_BOOL, SMP_USE_HRQHP },
-	{ "method",          smp_fetch_meth,           0,                NULL,    SMP_T_UINT, SMP_USE_HRQHP },
-	{ "path",            smp_fetch_path,           0,                NULL,    SMP_T_CSTR, SMP_USE_HRQHV },
+	{ "method",          smp_fetch_meth,           0,                NULL,    SMP_T_METH, SMP_USE_HRQHP },
+	{ "path",            smp_fetch_path,           0,                NULL,    SMP_T_STR,  SMP_USE_HRQHV },
 
 	/* HTTP protocol on the request path */
 	{ "req.proto_http",  smp_fetch_proto_http,     0,                NULL,    SMP_T_BOOL, SMP_USE_HRQHP },
 	{ "req_proto_http",  smp_fetch_proto_http,     0,                NULL,    SMP_T_BOOL, SMP_USE_HRQHP },
 
 	/* HTTP version on the request path */
-	{ "req.ver",         smp_fetch_rqver,          0,                NULL,    SMP_T_CSTR, SMP_USE_HRQHV },
-	{ "req_ver",         smp_fetch_rqver,          0,                NULL,    SMP_T_CSTR, SMP_USE_HRQHV },
+	{ "req.ver",         smp_fetch_rqver,          0,                NULL,    SMP_T_STR,  SMP_USE_HRQHV },
+	{ "req_ver",         smp_fetch_rqver,          0,                NULL,    SMP_T_STR,  SMP_USE_HRQHV },
 
 	/* HTTP version on the response path */
-	{ "res.ver",         smp_fetch_stver,          0,                NULL,    SMP_T_CSTR, SMP_USE_HRSHV },
-	{ "resp_ver",        smp_fetch_stver,          0,                NULL,    SMP_T_CSTR, SMP_USE_HRSHV },
+	{ "res.ver",         smp_fetch_stver,          0,                NULL,    SMP_T_STR,  SMP_USE_HRSHV },
+	{ "resp_ver",        smp_fetch_stver,          0,                NULL,    SMP_T_STR,  SMP_USE_HRSHV },
 
 	/* explicit req.{cook,hdr} are used to force the fetch direction to be request-only */
-	{ "req.cook",        smp_fetch_cookie,         ARG1(0,STR),      NULL,    SMP_T_CSTR, SMP_USE_HRQHV },
+	{ "req.cook",        smp_fetch_cookie,         ARG1(0,STR),      NULL,    SMP_T_STR,  SMP_USE_HRQHV },
 	{ "req.cook_cnt",    smp_fetch_cookie_cnt,     ARG1(0,STR),      NULL,    SMP_T_UINT, SMP_USE_HRQHV },
 	{ "req.cook_val",    smp_fetch_cookie_val,     ARG1(0,STR),      NULL,    SMP_T_UINT, SMP_USE_HRQHV },
 
-	{ "req.fhdr",        smp_fetch_fhdr,           ARG2(0,STR,SINT), val_hdr, SMP_T_CSTR, SMP_USE_HRQHV },
+	{ "req.fhdr",        smp_fetch_fhdr,           ARG2(0,STR,SINT), val_hdr, SMP_T_STR,  SMP_USE_HRQHV },
 	{ "req.fhdr_cnt",    smp_fetch_fhdr_cnt,       ARG1(0,STR),      NULL,    SMP_T_UINT, SMP_USE_HRQHV },
-	{ "req.hdr",         smp_fetch_hdr,            ARG2(0,STR,SINT), val_hdr, SMP_T_CSTR, SMP_USE_HRQHV },
+	{ "req.hdr",         smp_fetch_hdr,            ARG2(0,STR,SINT), val_hdr, SMP_T_STR,  SMP_USE_HRQHV },
 	{ "req.hdr_cnt",     smp_fetch_hdr_cnt,        ARG1(0,STR),      NULL,    SMP_T_UINT, SMP_USE_HRQHV },
 	{ "req.hdr_ip",      smp_fetch_hdr_ip,         ARG2(0,STR,SINT), val_hdr, SMP_T_IPV4, SMP_USE_HRQHV },
 	{ "req.hdr_val",     smp_fetch_hdr_val,        ARG2(0,STR,SINT), val_hdr, SMP_T_UINT, SMP_USE_HRQHV },
 
 	/* explicit req.{cook,hdr} are used to force the fetch direction to be response-only */
-	{ "res.cook",        smp_fetch_cookie,         ARG1(0,STR),      NULL,    SMP_T_CSTR, SMP_USE_HRSHV },
+	{ "res.cook",        smp_fetch_cookie,         ARG1(0,STR),      NULL,    SMP_T_STR,  SMP_USE_HRSHV },
 	{ "res.cook_cnt",    smp_fetch_cookie_cnt,     ARG1(0,STR),      NULL,    SMP_T_UINT, SMP_USE_HRSHV },
 	{ "res.cook_val",    smp_fetch_cookie_val,     ARG1(0,STR),      NULL,    SMP_T_UINT, SMP_USE_HRSHV },
 
-	{ "res.fhdr",        smp_fetch_fhdr,           ARG2(0,STR,SINT), val_hdr, SMP_T_CSTR, SMP_USE_HRSHV },
+	{ "res.fhdr",        smp_fetch_fhdr,           ARG2(0,STR,SINT), val_hdr, SMP_T_STR,  SMP_USE_HRSHV },
 	{ "res.fhdr_cnt",    smp_fetch_fhdr_cnt,       ARG1(0,STR),      NULL,    SMP_T_UINT, SMP_USE_HRSHV },
-	{ "res.hdr",         smp_fetch_hdr,            ARG2(0,STR,SINT), val_hdr, SMP_T_CSTR, SMP_USE_HRSHV },
+	{ "res.hdr",         smp_fetch_hdr,            ARG2(0,STR,SINT), val_hdr, SMP_T_STR,  SMP_USE_HRSHV },
 	{ "res.hdr_cnt",     smp_fetch_hdr_cnt,        ARG1(0,STR),      NULL,    SMP_T_UINT, SMP_USE_HRSHV },
 	{ "res.hdr_ip",      smp_fetch_hdr_ip,         ARG2(0,STR,SINT), val_hdr, SMP_T_IPV4, SMP_USE_HRSHV },
 	{ "res.hdr_val",     smp_fetch_hdr_val,        ARG2(0,STR,SINT), val_hdr, SMP_T_UINT, SMP_USE_HRSHV },
 
 	/* scook is valid only on the response and is used for ACL compatibility */
-	{ "scook",           smp_fetch_cookie,         ARG1(0,STR),      NULL,    SMP_T_CSTR, SMP_USE_HRSHV },
+	{ "scook",           smp_fetch_cookie,         ARG1(0,STR),      NULL,    SMP_T_STR,  SMP_USE_HRSHV },
 	{ "scook_cnt",       smp_fetch_cookie_cnt,     ARG1(0,STR),      NULL,    SMP_T_UINT, SMP_USE_HRSHV },
 	{ "scook_val",       smp_fetch_cookie_val,     ARG1(0,STR),      NULL,    SMP_T_UINT, SMP_USE_HRSHV },
-	{ "set-cookie",      smp_fetch_cookie,         ARG1(0,STR),      NULL,    SMP_T_CSTR, SMP_USE_HRSHV }, /* deprecated */
+	{ "set-cookie",      smp_fetch_cookie,         ARG1(0,STR),      NULL,    SMP_T_STR,  SMP_USE_HRSHV }, /* deprecated */
 
 	/* shdr is valid only on the response and is used for ACL compatibility */
-	{ "shdr",            smp_fetch_hdr,            ARG2(0,STR,SINT), val_hdr, SMP_T_CSTR, SMP_USE_HRSHV },
+	{ "shdr",            smp_fetch_hdr,            ARG2(0,STR,SINT), val_hdr, SMP_T_STR,  SMP_USE_HRSHV },
 	{ "shdr_cnt",        smp_fetch_hdr_cnt,        ARG1(0,STR),      NULL,    SMP_T_UINT, SMP_USE_HRSHV },
 	{ "shdr_ip",         smp_fetch_hdr_ip,         ARG2(0,STR,SINT), val_hdr, SMP_T_IPV4, SMP_USE_HRSHV },
 	{ "shdr_val",        smp_fetch_hdr_val,        ARG2(0,STR,SINT), val_hdr, SMP_T_UINT, SMP_USE_HRSHV },
 
 	{ "status",          smp_fetch_stcode,         0,                NULL,    SMP_T_UINT, SMP_USE_HRSHP },
-	{ "url",             smp_fetch_url,            0,                NULL,    SMP_T_CSTR, SMP_USE_HRQHV },
+	{ "url",             smp_fetch_url,            0,                NULL,    SMP_T_STR,  SMP_USE_HRQHV },
 	{ "url32",           smp_fetch_url32,          0,                NULL,    SMP_T_UINT, SMP_USE_HRQHV },
 	{ "url32+src",       smp_fetch_url32_src,      0,                NULL,    SMP_T_BIN,  SMP_USE_HRQHV },
 	{ "url_ip",          smp_fetch_url_ip,         0,                NULL,    SMP_T_IPV4, SMP_USE_HRQHV },
 	{ "url_port",        smp_fetch_url_port,       0,                NULL,    SMP_T_UINT, SMP_USE_HRQHV },
-	{ "url_param",       smp_fetch_url_param,      ARG2(1,STR,STR),  NULL,    SMP_T_CSTR, SMP_USE_HRQHV },
-	{ "urlp"     ,       smp_fetch_url_param,      ARG2(1,STR,STR),  NULL,    SMP_T_CSTR, SMP_USE_HRQHV },
+	{ "url_param",       smp_fetch_url_param,      ARG2(1,STR,STR),  NULL,    SMP_T_STR,  SMP_USE_HRQHV },
+	{ "urlp"     ,       smp_fetch_url_param,      ARG2(1,STR,STR),  NULL,    SMP_T_STR,  SMP_USE_HRQHV },
 	{ "urlp_val",        smp_fetch_url_param_val,  ARG2(1,STR,STR),  NULL,    SMP_T_UINT, SMP_USE_HRQHV },
 	{ /* END */ },
 }};

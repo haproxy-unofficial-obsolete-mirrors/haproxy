@@ -39,9 +39,12 @@ static struct acl_kw_list acl_keywords = {
 };
 
 /* input values are 0 or 3, output is the same */
-static inline enum acl_test_res pat2acl(enum pat_match_res res)
+static inline enum acl_test_res pat2acl(struct pattern *pat)
 {
-	return (enum acl_test_res)res;
+	if (pat)
+		return ACL_TEST_PASS;
+	else
+		return ACL_TEST_FAIL;
 }
 
 /*
@@ -103,7 +106,7 @@ static struct acl_expr *prune_acl_expr(struct acl_expr *expr)
 {
 	struct arg *arg;
 
-	pattern_prune_expr(&expr->pat);
+	pattern_prune(&expr->pat);
 
 	for (arg = expr->smp->arg_p; arg; arg++) {
 		if (arg->type == ARGT_STOP)
@@ -128,12 +131,12 @@ static struct acl_expr *prune_acl_expr(struct acl_expr *expr)
  * Right now, the only accepted syntax is :
  * <subject> [<value>...]
  */
-struct acl_expr *parse_acl_expr(const char **args, char **err, struct arg_list *al)
+struct acl_expr *parse_acl_expr(const char **args, char **err, struct arg_list *al,
+                                const char *file, int line)
 {
-	__label__ out_return, out_free_expr, out_free_pattern;
+	__label__ out_return, out_free_expr;
 	struct acl_expr *expr;
 	struct acl_keyword *aclkw;
-	struct pattern *pattern;
 	int patflags;
 	const char *arg;
 	struct sample_expr *smp = NULL;
@@ -145,6 +148,19 @@ struct acl_expr *parse_acl_expr(const char **args, char **err, struct arg_list *
 	unsigned long prev_type;
 	int cur_type;
 	int nbargs;
+	int operator = STD_OP_EQ;
+	int op;
+	int contain_colon, have_dot;
+	const char *dot;
+	signed long long value, minor;
+	/* The following buffer contain two numbers, a ':' separator and the final \0. */
+	char buffer[NB_LLMAX_STR + 1 + NB_LLMAX_STR + 1];
+	int is_loaded;
+	int unique_id;
+	char *error;
+	struct pat_ref *ref;
+	struct pattern_expr *pattern_expr;
+	int load_as_map = 0;
 
 	/* First, we look for an ACL keyword. And if we don't find one, then
 	 * we look for a sample fetch expression starting with a sample fetch
@@ -156,7 +172,7 @@ struct acl_expr *parse_acl_expr(const char **args, char **err, struct arg_list *
 	al->conv = NULL;
 
 	aclkw = find_acl_kw(args[0]);
-	if (aclkw && aclkw->parse) {
+	if (aclkw) {
 		/* OK we have a real ACL keyword */
 
 		/* build new sample expression for this ACL */
@@ -307,7 +323,7 @@ struct acl_expr *parse_acl_expr(const char **args, char **err, struct arg_list *
 				if (!conv_expr->arg_p)
 					conv_expr->arg_p = empty_arg_list;
 
-				if (conv->val_args && !conv->val_args(conv_expr->arg_p, conv, err)) {
+				if (conv->val_args && !conv->val_args(conv_expr->arg_p, conv, file, line, err)) {
 					memprintf(err, "ACL keyword '%s' : invalid args in conv method '%s' : %s.",
 						  aclkw->kw, ckw, *err);
 					goto out_free_smp;
@@ -326,7 +342,7 @@ struct acl_expr *parse_acl_expr(const char **args, char **err, struct arg_list *
 		 * so, we retrieve a completely parsed expression with args and
 		 * convs already done.
 		 */
-		smp = sample_parse_expr((char **)args, &idx, err, al);
+		smp = sample_parse_expr((char **)args, &idx, file, line, err, al);
 		if (!smp) {
 			memprintf(err, "%s in ACL expression '%s'", *err, *args);
 			goto out_return;
@@ -339,13 +355,35 @@ struct acl_expr *parse_acl_expr(const char **args, char **err, struct arg_list *
 		goto out_return;
 	}
 
-	pattern_init_expr(&expr->pat);
+	pattern_init_head(&expr->pat);
 
 	expr->kw = aclkw ? aclkw->kw : smp->fetch->kw;
 	expr->pat.parse = aclkw ? aclkw->parse : NULL;
+	expr->pat.index = aclkw ? aclkw->index : NULL;
 	expr->pat.match = aclkw ? aclkw->match : NULL;
+	expr->pat.delete = aclkw ? aclkw->delete : NULL;
+	expr->pat.prune = aclkw ? aclkw->prune : NULL;
+	expr->pat.expect_type = smp->fetch->out_type;
 	expr->smp = smp;
 	smp = NULL;
+
+	/* Fill NULL pointers with values provided by the pattern.c arrays */
+	if (aclkw) {
+		if (!expr->pat.parse)
+			expr->pat.parse = pat_parse_fcts[aclkw->match_type];
+
+		if (!expr->pat.index)
+			expr->pat.index = pat_index_fcts[aclkw->match_type];
+
+		if (!expr->pat.match)
+			expr->pat.match = pat_match_fcts[aclkw->match_type];
+
+		if (!expr->pat.delete)
+			expr->pat.delete = pat_delete_fcts[aclkw->match_type];
+
+		if (!expr->pat.prune)
+			expr->pat.prune = pat_prune_fcts[aclkw->match_type];
+	}
 
 	if (!expr->pat.parse) {
 		/* some types can be automatically converted */
@@ -353,17 +391,29 @@ struct acl_expr *parse_acl_expr(const char **args, char **err, struct arg_list *
 		switch (expr->smp ? expr->smp->fetch->out_type : aclkw->smp->out_type) {
 		case SMP_T_BOOL:
 			expr->pat.parse = pat_parse_fcts[PAT_MATCH_BOOL];
+			expr->pat.index = pat_index_fcts[PAT_MATCH_BOOL];
 			expr->pat.match = pat_match_fcts[PAT_MATCH_BOOL];
+			expr->pat.delete = pat_delete_fcts[PAT_MATCH_BOOL];
+			expr->pat.prune = pat_prune_fcts[PAT_MATCH_BOOL];
+			expr->pat.expect_type = pat_match_types[PAT_MATCH_BOOL];
 			break;
 		case SMP_T_SINT:
 		case SMP_T_UINT:
 			expr->pat.parse = pat_parse_fcts[PAT_MATCH_INT];
+			expr->pat.index = pat_index_fcts[PAT_MATCH_INT];
 			expr->pat.match = pat_match_fcts[PAT_MATCH_INT];
+			expr->pat.delete = pat_delete_fcts[PAT_MATCH_INT];
+			expr->pat.prune = pat_prune_fcts[PAT_MATCH_INT];
+			expr->pat.expect_type = pat_match_types[PAT_MATCH_INT];
 			break;
 		case SMP_T_IPV4:
 		case SMP_T_IPV6:
 			expr->pat.parse = pat_parse_fcts[PAT_MATCH_IP];
+			expr->pat.index = pat_index_fcts[PAT_MATCH_IP];
 			expr->pat.match = pat_match_fcts[PAT_MATCH_IP];
+			expr->pat.delete = pat_delete_fcts[PAT_MATCH_IP];
+			expr->pat.prune = pat_prune_fcts[PAT_MATCH_IP];
+			expr->pat.expect_type = pat_match_types[PAT_MATCH_IP];
 			break;
 		}
 	}
@@ -386,26 +436,48 @@ struct acl_expr *parse_acl_expr(const char **args, char **err, struct arg_list *
 	 *   -i : ignore case for all patterns by default
 	 *   -f : read patterns from those files
 	 *   -m : force matching method (must be used before -f)
+	 *   -M : load the file as map file
+	 *   -u : force the unique id of the acl
 	 *   -- : everything after this is not an option
 	 */
 	patflags = 0;
+	is_loaded = 0;
+	unique_id = -1;
 	while (**args == '-') {
 		if ((*args)[1] == 'i')
 			patflags |= PAT_F_IGNORE_CASE;
+		else if ((*args)[1] == 'n')
+			patflags |= PAT_F_NO_DNS;
+		else if ((*args)[1] == 'u') {
+			unique_id = strtol(args[1], &error, 10);
+			if (*error != '\0') {
+				memprintf(err, "the argument of -u must be an integer");
+				goto out_free_expr;
+			}
+
+			/* Check if this id is really unique. */
+			if (pat_ref_lookupid(unique_id)) {
+				memprintf(err, "the id is already used");
+				goto out_free_expr;
+			}
+
+			args++;
+		}
 		else if ((*args)[1] == 'f') {
 			if (!expr->pat.parse) {
 				memprintf(err, "matching method must be specified first (using '-m') when using a sample fetch of this type ('%s')", expr->kw);
 				goto out_free_expr;
 			}
 
-			if (!pattern_read_from_file(&expr->pat, args[1], patflags | PAT_F_FROM_FILE, err))
+			if (!pattern_read_from_file(&expr->pat, PAT_REF_ACL, args[1], patflags, load_as_map, err, file, line))
 				goto out_free_expr;
+			is_loaded = 1;
 			args++;
 		}
 		else if ((*args)[1] == 'm') {
 			int idx;
 
-			if (!LIST_ISEMPTY(&expr->pat.patterns) || !eb_is_empty(&expr->pat.pattern_tree)) {
+			if (is_loaded) {
 				memprintf(err, "'-m' must only be specified before patterns and files in parsing ACL expression");
 				goto out_free_expr;
 			}
@@ -422,8 +494,15 @@ struct acl_expr *parse_acl_expr(const char **args, char **err, struct arg_list *
 				goto out_free_expr;
 			}
 			expr->pat.parse = pat_parse_fcts[idx];
+			expr->pat.index = pat_index_fcts[idx];
 			expr->pat.match = pat_match_fcts[idx];
+			expr->pat.delete = pat_delete_fcts[idx];
+			expr->pat.prune = pat_prune_fcts[idx];
+			expr->pat.expect_type = pat_match_types[idx];
 			args++;
+		}
+		else if ((*args)[1] == 'M') {
+			load_as_map = 1;
 		}
 		else if ((*args)[1] == '-') {
 			args++;
@@ -439,15 +518,154 @@ struct acl_expr *parse_acl_expr(const char **args, char **err, struct arg_list *
 		goto out_free_expr;
 	}
 
+	/* Create displayed reference */
+	snprintf(trash.str, trash.size, "acl '%s' file '%s' line %d", expr->kw, file, line);
+	trash.str[trash.size - 1] = '\0';
+
+	/* Create new patern reference. */
+	ref = pat_ref_newid(unique_id, trash.str, PAT_REF_ACL);
+	if (!ref) {
+		memprintf(err, "memory error");
+		goto out_free_expr;
+	}
+
+	/* Create new pattern expression associated to this reference. */
+	pattern_expr = pattern_new_expr(&expr->pat, ref, err);
+	if (!pattern_expr)
+		goto out_free_expr;
+
 	/* now parse all patterns */
-	pattern = NULL;
-	if (!pattern_register(&expr->pat, args, NULL, &pattern, patflags, err))
-		goto out_free_pattern;
+	while (**args) {
+		arg = *args;
+
+		/* Compatibility layer. Each pattern can parse only one string per pattern,
+		 * but the pat_parser_int() and pat_parse_dotted_ver() parsers were need
+		 * optionnaly two operators. The first operator is the match method: eq,
+		 * le, lt, ge and gt. pat_parse_int() and pat_parse_dotted_ver() functions
+		 * can have a compatibility syntax based on ranges:
+		 *
+		 * pat_parse_int():
+		 *
+		 *   "eq x" -> "x" or "x:x"
+		 *   "le x" -> ":x"
+		 *   "lt x" -> ":y" (with y = x - 1)
+		 *   "ge x" -> "x:"
+		 *   "gt x" -> "y:" (with y = x + 1)
+		 *
+		 * pat_parse_dotted_ver():
+		 *
+		 *   "eq x.y" -> "x.y" or "x.y:x.y"
+		 *   "le x.y" -> ":x.y"
+		 *   "lt x.y" -> ":w.z" (with w.z = x.y - 1)
+		 *   "ge x.y" -> "x.y:"
+		 *   "gt x.y" -> "w.z:" (with w.z = x.y + 1)
+		 *
+		 * If y is not present, assume that is "0".
+		 *
+		 * The syntax eq, le, lt, ge and gt are proper to the acl syntax. The
+		 * following block of code detect the operator, and rewrite each value
+		 * in parsable string.
+		 */
+		if (expr->pat.parse == pat_parse_int ||
+		    expr->pat.parse == pat_parse_dotted_ver) {
+			/* Check for operator. If the argument is operator, memorise it and
+			 * continue to the next argument.
+			 */
+			op = get_std_op(arg);
+			if (op != -1) {
+				operator = op;
+				args++;
+				continue;
+			}
+
+			/* Check if the pattern contain ':' or '-' character. */
+			contain_colon = (strchr(arg, ':') || strchr(arg, '-'));
+
+			/* If the pattern contain ':' or '-' character, give it to the parser as is.
+			 * If no contain ':' and operator is STD_OP_EQ, give it to the parser as is.
+			 * In other case, try to convert the value according with the operator.
+			 */
+			if (!contain_colon && operator != STD_OP_EQ) {
+				/* Search '.' separator. */
+				dot = strchr(arg, '.');
+				if (!dot) {
+					have_dot = 0;
+					minor = 0;
+					dot = arg + strlen(arg);
+				}
+				else
+					have_dot = 1;
+
+				/* convert the integer minor part for the pat_parse_dotted_ver() function. */
+				if (expr->pat.parse == pat_parse_dotted_ver && have_dot) {
+					if (strl2llrc(dot+1, strlen(dot+1), &minor) != 0) {
+						memprintf(err, "'%s' is neither a number nor a supported operator", arg);
+						goto out_free_expr;
+					}
+					if (minor >= 65536) {
+						memprintf(err, "'%s' contains too large a minor value", arg);
+						goto out_free_expr;
+					}
+				}
+
+				/* convert the integer value for the pat_parse_int() function, and the
+				 * integer major part for the pat_parse_dotted_ver() function.
+				 */
+				if (strl2llrc(arg, dot - arg, &value) != 0) {
+					memprintf(err, "'%s' is neither a number nor a supported operator", arg);
+					goto out_free_expr;
+				}
+				if (expr->pat.parse == pat_parse_dotted_ver)  {
+					if (value >= 65536) {
+						memprintf(err, "'%s' contains too large a major value", arg);
+						goto out_free_expr;
+					}
+					value = (value << 16) | (minor & 0xffff);
+				}
+
+				switch (operator) {
+
+				case STD_OP_EQ: /* this case is not possible. */
+					memprintf(err, "internal error");
+					goto out_free_expr;
+
+				case STD_OP_GT:
+					value++; /* gt = ge + 1 */
+
+				case STD_OP_GE:
+					if (expr->pat.parse == pat_parse_int)
+						snprintf(buffer, NB_LLMAX_STR+NB_LLMAX_STR+2, "%lld:", value);
+					else
+						snprintf(buffer, NB_LLMAX_STR+NB_LLMAX_STR+2, "%lld.%lld:",
+						         value >> 16, value & 0xffff);
+					arg = buffer;
+					break;
+
+				case STD_OP_LT:
+					value--; /* lt = le - 1 */
+
+				case STD_OP_LE:
+					if (expr->pat.parse == pat_parse_int)
+						snprintf(buffer, NB_LLMAX_STR+NB_LLMAX_STR+2, ":%lld", value);
+					else
+						snprintf(buffer, NB_LLMAX_STR+NB_LLMAX_STR+2, ":%lld.%lld",
+						         value >> 16, value & 0xffff);
+					arg = buffer;
+					break;
+				}
+			}
+		}
+
+		/* Add sample to the reference, and try to compile it fior each pattern
+		 * using this value.
+		 */
+		if (!pat_ref_add(ref, arg, NULL, err))
+			goto out_free_expr;
+		args++;
+	}
 
 	return expr;
 
- out_free_pattern:
-	pattern_free(pattern);
  out_free_expr:
 	prune_acl_expr(expr);
 	free(expr);
@@ -484,7 +702,8 @@ struct acl *prune_acl(struct acl *acl) {
  *
  * args syntax: <aclname> <acl_expr>
  */
-struct acl *parse_acl(const char **args, struct list *known_acl, char **err, struct arg_list *al)
+struct acl *parse_acl(const char **args, struct list *known_acl, char **err, struct arg_list *al,
+                      const char *file, int line)
 {
 	__label__ out_return, out_free_acl_expr, out_free_name;
 	struct acl *cur_acl;
@@ -497,7 +716,7 @@ struct acl *parse_acl(const char **args, struct list *known_acl, char **err, str
 		goto out_return;
 	}
 
-	acl_expr = parse_acl_expr(args + 1, err, al);
+	acl_expr = parse_acl_expr(args + 1, err, al, file, line);
 	if (!acl_expr) {
 		/* parse_acl_expr will have filled <err> here */
 		goto out_return;
@@ -592,7 +811,8 @@ const struct {
  * to report missing dependencies.
  */
 static struct acl *find_acl_default(const char *acl_name, struct list *known_acl,
-                                    char **err, struct arg_list *al)
+                                    char **err, struct arg_list *al,
+                                    const char *file, int line)
 {
 	__label__ out_return, out_free_acl_expr, out_free_name;
 	struct acl *cur_acl;
@@ -610,7 +830,7 @@ static struct acl *find_acl_default(const char *acl_name, struct list *known_acl
 		return NULL;
 	}
 
-	acl_expr = parse_acl_expr((const char **)default_acl_list[index].expr, err, al);
+	acl_expr = parse_acl_expr((const char **)default_acl_list[index].expr, err, al, file, line);
 	if (!acl_expr) {
 		/* parse_acl_expr must have filled err here */
 		goto out_return;
@@ -671,7 +891,8 @@ struct acl_cond *prune_acl_cond(struct acl_cond *cond)
  * for unresolved dependencies.
  */
 struct acl_cond *parse_acl_cond(const char **args, struct list *known_acl,
-                                enum acl_cond_pol pol, char **err, struct arg_list *al)
+                                enum acl_cond_pol pol, char **err, struct arg_list *al,
+                                const char *file, int line)
 {
 	__label__ out_return, out_free_suite, out_free_term;
 	int arg, neg;
@@ -744,7 +965,7 @@ struct acl_cond *parse_acl_cond(const char **args, struct list *known_acl,
 			args_new[0] = "";
 			memcpy(args_new + 1, args + arg + 1, (arg_end - arg) * sizeof(*args_new));
 			args_new[arg_end - arg] = "";
-			cur_acl = parse_acl(args_new, known_acl, err, al);
+			cur_acl = parse_acl(args_new, known_acl, err, al, file, line);
 			free(args_new);
 
 			if (!cur_acl) {
@@ -762,7 +983,7 @@ struct acl_cond *parse_acl_cond(const char **args, struct list *known_acl,
 			 */
 			cur_acl = find_acl_by_name(word, known_acl);
 			if (cur_acl == NULL) {
-				cur_acl = find_acl_default(word, known_acl, err, al);
+				cur_acl = find_acl_default(word, known_acl, err, al, file, line);
 				if (cur_acl == NULL) {
 					/* note that find_acl_default() must have filled <err> here */
 					goto out_free_suite;
@@ -846,7 +1067,7 @@ struct acl_cond *build_acl_cond(const char *file, int line, struct proxy *px, co
 		return NULL;
 	}
 
-	cond = parse_acl_cond(args, &px->acl, pol, err, &px->conf.args);
+	cond = parse_acl_cond(args, &px->acl, pol, err, &px->conf.args, file, line);
 	if (!cond) {
 		/* note that parse_acl_cond must have filled <err> here */
 		return NULL;
@@ -922,7 +1143,7 @@ enum acl_test_res acl_exec_cond(struct acl_cond *cond, struct proxy *px, struct 
 					continue;
 				}
 
-				acl_res |= pat2acl(pattern_exec_match(&expr->pat, &smp, NULL, NULL, NULL));
+				acl_res |= pat2acl(pattern_exec_match(&expr->pat, &smp, 0));
 				/*
 				 * OK now acl_res holds the result of this expression
 				 * as one of ACL_TEST_FAIL, ACL_TEST_MISS or ACL_TEST_PASS.
@@ -1030,8 +1251,9 @@ int acl_find_targets(struct proxy *p)
 
 	struct acl *acl;
 	struct acl_expr *expr;
-	struct pattern *pattern;
+	struct pattern_list *pattern;
 	int cfgerr = 0;
+	struct pattern_expr_list *pexp;
 
 	list_for_each_entry(acl, &p->acl, list) {
 		list_for_each_entry(expr, &acl->expr, list) {
@@ -1046,25 +1268,30 @@ int acl_find_targets(struct proxy *p)
 					continue;
 				}
 
-				if (LIST_ISEMPTY(&expr->pat.patterns)) {
+				if (LIST_ISEMPTY(&expr->pat.head)) {
 					Alert("proxy %s: acl %s %s(): no groups specified.\n",
 						p->id, acl->name, expr->kw);
 					cfgerr++;
 					continue;
 				}
 
-				list_for_each_entry(pattern, &expr->pat.patterns, list) {
-					/* this keyword only has one argument */
-					pattern->val.group_mask = auth_resolve_groups(expr->smp->arg_p->data.usr, pattern->ptr.str);
-
-					if (!pattern->val.group_mask) {
-						Alert("proxy %s: acl %s %s(): invalid group '%s'.\n",
-						      p->id, acl->name, expr->kw, pattern->ptr.str);
+				/* For each pattern, check if the group exists. */
+				list_for_each_entry(pexp, &expr->pat.head, list) {
+					if (LIST_ISEMPTY(&pexp->expr->patterns)) {
+						Alert("proxy %s: acl %s %s(): no groups specified.\n",
+							p->id, acl->name, expr->kw);
 						cfgerr++;
+						continue;
 					}
-					free(pattern->ptr.str);
-					pattern->ptr.str = NULL;
-					pattern->len = 0;
+
+					list_for_each_entry(pattern, &pexp->expr->patterns, list) {
+						/* this keyword only has one argument */
+						if (!check_group(expr->smp->arg_p->data.usr, pattern->pat.ptr.str)) {
+							Alert("proxy %s: acl %s %s(): invalid group '%s'.\n",
+							      p->id, acl->name, expr->kw, pattern->pat.ptr.str);
+							cfgerr++;
+						}
+					}
 				}
 			}
 		}

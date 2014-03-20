@@ -21,6 +21,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+#include <common/chunk.h>
 #include <common/config.h>
 #include <common/standard.h>
 #include <eb32tree.h>
@@ -790,13 +791,25 @@ int str2mask(const char *str, struct in_addr *mask)
 	return 1;
 }
 
+/* convert <cidr> to struct in_addr <mask>. It returns 1 if the conversion
+ * succeeds otherwise zero.
+ */
+int cidr2dotted(int cidr, struct in_addr *mask) {
+
+	if (cidr < 0 || cidr > 32)
+		return 0;
+
+	mask->s_addr = cidr ? htonl(~0UL << (32 - cidr)) : 0;
+	return 1;
+}
+
 /*
  * converts <str> to two struct in_addr* which must be pre-allocated.
  * The format is "addr[/mask]", where "addr" cannot be empty, and mask
  * is optionnal and either in the dotted or CIDR notation.
  * Note: "addr" can also be a hostname. Returns 1 if OK, 0 if error.
  */
-int str2net(const char *str, struct in_addr *addr, struct in_addr *mask)
+int str2net(const char *str, int resolve, struct in_addr *addr, struct in_addr *mask)
 {
 	__label__ out_free, out_err;
 	char *c, *s;
@@ -820,6 +833,9 @@ int str2net(const char *str, struct in_addr *addr, struct in_addr *mask)
 	}
 	if (!inet_pton(AF_INET, s, addr)) {
 		struct hostent *he;
+
+		if (!resolve)
+			goto out_err;
 
 		if ((he = gethostbyname(s)) == NULL) {
 			goto out_err;
@@ -1045,6 +1061,36 @@ char *encode_string(char *start, char *stop,
 	return start;
 }
 
+/*
+ * Same behavior as encode_string() above, except that it encodes chunk
+ * <chunk> instead of a string.
+ */
+char *encode_chunk(char *start, char *stop,
+		    const char escape, const fd_set *map,
+		    const struct chunk *chunk)
+{
+	char *str = chunk->str;
+	char *end = chunk->str + chunk->len;
+
+	if (start < stop) {
+		stop--; /* reserve one byte for the final '\0' */
+		while (start < stop && str < end) {
+			if (!FD_ISSET((unsigned char)(*str), map))
+				*start++ = *str;
+			else {
+				if (start + 3 >= stop)
+					break;
+				*start++ = escape;
+				*start++ = hextab[(*str >> 4) & 15];
+				*start++ = hextab[*str & 15];
+			}
+			str++;
+		}
+		*start = '\0';
+	}
+	return start;
+}
+
 /* Decode an URL-encoded string in-place. The resulting string might
  * be shorter. If some forbidden characters are found, the conversion is
  * aborted, the string is truncated before the issue and a negative value is
@@ -1223,6 +1269,50 @@ int strl2llrc(const char *s, int len, long long *ret)
 		}
 	}
 	*ret = i;
+	return 0;
+}
+
+/* This function is used with pat_parse_dotted_ver(). It converts a string
+ * composed by two number separated by a dot. Each part must contain in 16 bits
+ * because internally they will be represented as a 32-bit quantity stored in
+ * a 64-bit integer. It returns zero when the number has successfully been
+ * converted, non-zero otherwise. When an error is returned, the <ret> value
+ * is left untouched.
+ *
+ *    "1.3"         -> 0x0000000000010003
+ *    "65535.65535" -> 0x00000000ffffffff
+ */
+int strl2llrc_dotted(const char *text, int len, long long *ret)
+{
+	const char *end = &text[len];
+	const char *p;
+	long long major, minor;
+
+	/* Look for dot. */
+	for (p = text; p < end; p++)
+		if (*p == '.')
+			break;
+
+	/* Convert major. */
+	if (strl2llrc(text, p - text, &major) != 0)
+		return 1;
+
+	/* Check major. */
+	if (major >= 65536)
+		return 1;
+
+	/* Convert minor. */
+	minor = 0;
+	if (p < end)
+		if (strl2llrc(p + 1, end - (p + 1), &minor) != 0)
+			return 1;
+
+	/* Check minor. */
+	if (minor >= 65536)
+		return 1;
+
+	/* Compose value. */
+	*ret = (major << 16) | (minor & 0xffff);
 	return 0;
 }
 

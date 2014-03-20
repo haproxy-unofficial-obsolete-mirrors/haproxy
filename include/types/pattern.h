@@ -61,20 +61,11 @@ enum pat_match_res {
 	PAT_MATCH = 3,           /* sample matched at least one pattern */
 };
 
-/* This enum describe the running mode of the function pat_parse_*().
- * The lookup mode does not allocate memory. The compile mode allocate
- * memory and create any data
- */
-enum pat_usage {
-	PAT_U_LOOKUP,
-	PAT_U_COMPILE,
-};
-
 /* possible flags for expressions or patterns */
 enum {
 	PAT_F_IGNORE_CASE = 1 << 0,       /* ignore case */
-	PAT_F_FROM_FILE   = 1 << 1,       /* pattern comes from a file */
-	PAT_F_TREE        = 1 << 2,       /* some patterns are arranged in a tree */
+	PAT_F_TREE        = 1 << 1,       /* some patterns are arranged in a tree */
+	PAT_F_NO_DNS      = 1 << 2,       /* dont perform any DNS requests */
 };
 
 /* ACL match methods */
@@ -96,6 +87,33 @@ enum {
 	PAT_MATCH_NUM
 };
 
+#define PAT_REF_MAP 0x1 /* Set if the reference is used by at least one map. */
+#define PAT_REF_ACL 0x2 /* Set if the reference is used by at least one acl. */
+#define PAT_REF_SMP 0x4 /* Flag used if the reference contains a sample. */
+
+/* This struct contain a list of reference strings for dunamically
+ * updatable patterns.
+ */
+struct pat_ref {
+	struct list list; /* Used to chain refs. */
+	unsigned int flags; /* flags PAT_REF_*. */
+	char *reference; /* The reference name. */
+	int unique_id; /* Each pattern reference have unique id. */
+	char *display; /* String displayed to identify the pattern origin. */
+	struct list head; /* The head of the list of struct pat_ref_elt. */
+	struct list pat; /* The head of the list of struct pattern_expr. */
+};
+
+/* This is a part of struct pat_ref. Each entry contain one
+ * pattern and one associated value as original string.
+ */
+struct pat_ref_elt {
+	struct list list; /* Used to chain elements. */
+	char *pattern;
+	char *sample;
+	int line;
+};
+
 /* How to store a time range and the valid days in 29 bits */
 struct pat_time {
 	int dow:7;              /* 1 bit per day of week: 0-6 */
@@ -106,8 +124,9 @@ struct pat_time {
 /* This contain each tree indexed entry. This struct permit to associate
  * "sample" with a tree entry. It is used with maps.
  */
-struct pat_idx_elt {
+struct pattern_tree {
 	struct sample_storage *smp;
+	struct pat_ref_elt *ref;
 	struct ebmb_node node;
 };
 
@@ -119,9 +138,7 @@ struct pat_idx_elt {
  * are preferred when there is a doubt.
  */
 struct pattern {
-	struct list list;                       /* chaining */
 	int type;                               /* type of the ACL pattern (SMP_T_*) */
-	int expect_type;                        /* type of the expected sample (SMP_T_*) */
 	union {
 		int i;                          /* integer value */
 		struct {
@@ -138,7 +155,6 @@ struct pattern {
 			unsigned char mask;     /* number of bits */
 		} ipv6;                         /* IPv6 address/mask */
 		struct pat_time time;           /* valid hours and days */
-		unsigned int group_mask;
 		struct eb_root *tree;           /* tree storing all values if any */
 	} val;                                  /* direct value */
 	union {
@@ -146,12 +162,17 @@ struct pattern {
 		char *str;              /* any string  */
 		struct my_regex *reg;   /* a compiled regex */
 	} ptr;                          /* indirect values, allocated */
-	void(*freeptrbuf)(void *ptr);	/* a destructor able to free objects from the ptr */
 	int len;                        /* data length when required  */
 	int flags;                      /* expr or pattern flags. */
 	struct sample_storage *smp;     /* used to store a pointer to sample value associated
 	                                   with the match. It is used with maps */
+	struct pat_ref_elt *ref;
+};
 
+/* This struct is just used for chaining patterns */
+struct pattern_list {
+	struct list list;
+	struct pattern pat;
 };
 
 /* Description of a pattern expression.
@@ -160,15 +181,50 @@ struct pattern {
  * are grouped together in order to optimize caching.
  */
 struct pattern_expr {
-	int (*parse)(const char **text, struct pattern *pattern, enum pat_usage usage, int *opaque, char **err);
-	enum pat_match_res (*match)(struct sample *smp, struct pattern *pattern);
+	struct list list; /* Used for chaining pattern_expr in pat_ref. */
+	struct pat_ref *ref; /* The pattern reference if exists. */
+	struct pattern_head *pat_head; /* Point to the pattern_head that contain manipulation functions.
+	                                * Note that this link point on compatible head but not on the real
+	                                * head. You can use only the function, and you must not use the
+	                                * "head". Dont write "(struct pattern_expr *)any->pat_head->expr".
+	                                */
 	struct list patterns;         /* list of acl_patterns */
 	struct eb_root pattern_tree;  /* may be used for lookup in large datasets */
+	struct eb_root pattern_tree_2;  /* may be used for different types */
+};
+
+/* This is a list of expression. A struct pattern_expr can be used by
+ * more than one "struct pattern_head". this intermediate struct
+ * permit more than one list.
+ */
+struct pattern_expr_list {
+	struct list list; /* Used for chaining pattern_expr in pattern_head. */
+	int do_free;
+	struct pattern_expr *expr; /* The used expr. */
+};
+
+/* This struct contain a list of pattern expr */
+struct pattern_head {
+	int (*parse)(const char *text, struct pattern *pattern, char **err);
+	int (*parse_smp)(const char *text, struct sample_storage *smp);
+	int (*index)(struct pattern_expr *, struct pattern *, char **);
+	void (*delete)(struct pattern_expr *, struct pat_ref_elt *);
+	void (*prune)(struct pattern_expr *);
+	struct pattern *(*match)(struct sample *, struct pattern_expr *, int);
+	int expect_type; /* type of the expected sample (SMP_T_*) */
+
+	struct list head; /* This is a list of struct pattern_expr_list. */
 };
 
 extern char *pat_match_names[PAT_MATCH_NUM];
-extern int (*pat_parse_fcts[PAT_MATCH_NUM])(const char **, struct pattern *, enum pat_usage, int *, char **);
-extern enum pat_match_res (*pat_match_fcts[PAT_MATCH_NUM])(struct sample *, struct pattern *);
+extern int (*pat_parse_fcts[PAT_MATCH_NUM])(const char *, struct pattern *, char **);
+extern int (*pat_index_fcts[PAT_MATCH_NUM])(struct pattern_expr *, struct pattern *, char **);
+extern void (*pat_delete_fcts[PAT_MATCH_NUM])(struct pattern_expr *, struct pat_ref_elt *);
+void (*pat_prune_fcts[PAT_MATCH_NUM])(struct pattern_expr *);
+extern struct pattern *(*pat_match_fcts[PAT_MATCH_NUM])(struct sample *, struct pattern_expr *, int);
 extern int pat_match_types[PAT_MATCH_NUM];
+
+/* This is the root of the list of all pattern_ref avalaibles. */
+extern struct list pattern_reference;
 
 #endif /* _TYPES_PATTERN_H */

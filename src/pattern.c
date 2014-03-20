@@ -40,13 +40,13 @@ char *pat_match_names[PAT_MATCH_NUM] = {
 	[PAT_MATCH_REG]   = "reg",
 };
 
-int (*pat_parse_fcts[PAT_MATCH_NUM])(const char **, struct pattern *, enum pat_usage, int *, char **) = {
+int (*pat_parse_fcts[PAT_MATCH_NUM])(const char *, struct pattern *, char **) = {
 	[PAT_MATCH_FOUND] = pat_parse_nothing,
 	[PAT_MATCH_BOOL]  = pat_parse_nothing,
 	[PAT_MATCH_INT]   = pat_parse_int,
 	[PAT_MATCH_IP]    = pat_parse_ip,
 	[PAT_MATCH_BIN]   = pat_parse_bin,
-	[PAT_MATCH_LEN]   = pat_parse_len,
+	[PAT_MATCH_LEN]   = pat_parse_int,
 	[PAT_MATCH_STR]   = pat_parse_str,
 	[PAT_MATCH_BEG]   = pat_parse_str,
 	[PAT_MATCH_SUB]   = pat_parse_str,
@@ -56,7 +56,55 @@ int (*pat_parse_fcts[PAT_MATCH_NUM])(const char **, struct pattern *, enum pat_u
 	[PAT_MATCH_REG]   = pat_parse_reg,
 };
 
-enum pat_match_res (*pat_match_fcts[PAT_MATCH_NUM])(struct sample *, struct pattern *) = {
+int (*pat_index_fcts[PAT_MATCH_NUM])(struct pattern_expr *, struct pattern *, char **) = {
+	[PAT_MATCH_FOUND] = pat_idx_list_val,
+	[PAT_MATCH_BOOL]  = pat_idx_list_val,
+	[PAT_MATCH_INT]   = pat_idx_list_val,
+	[PAT_MATCH_IP]    = pat_idx_tree_ip,
+	[PAT_MATCH_BIN]   = pat_idx_list_ptr,
+	[PAT_MATCH_LEN]   = pat_idx_list_val,
+	[PAT_MATCH_STR]   = pat_idx_tree_str,
+	[PAT_MATCH_BEG]   = pat_idx_list_str,
+	[PAT_MATCH_SUB]   = pat_idx_list_str,
+	[PAT_MATCH_DIR]   = pat_idx_list_str,
+	[PAT_MATCH_DOM]   = pat_idx_list_str,
+	[PAT_MATCH_END]   = pat_idx_list_str,
+	[PAT_MATCH_REG]   = pat_idx_list_reg,
+};
+
+void (*pat_delete_fcts[PAT_MATCH_NUM])(struct pattern_expr *, struct pat_ref_elt *) = {
+	[PAT_MATCH_FOUND] = pat_del_list_val,
+	[PAT_MATCH_BOOL]  = pat_del_list_val,
+	[PAT_MATCH_INT]   = pat_del_list_val,
+	[PAT_MATCH_IP]    = pat_del_tree_ip,
+	[PAT_MATCH_BIN]   = pat_del_list_ptr,
+	[PAT_MATCH_LEN]   = pat_del_list_val,
+	[PAT_MATCH_STR]   = pat_del_tree_str,
+	[PAT_MATCH_BEG]   = pat_del_list_ptr,
+	[PAT_MATCH_SUB]   = pat_del_list_ptr,
+	[PAT_MATCH_DIR]   = pat_del_list_ptr,
+	[PAT_MATCH_DOM]   = pat_del_list_ptr,
+	[PAT_MATCH_END]   = pat_del_list_ptr,
+	[PAT_MATCH_REG]   = pat_del_list_reg,
+};
+
+void (*pat_prune_fcts[PAT_MATCH_NUM])(struct pattern_expr *) = {
+	[PAT_MATCH_FOUND] = pat_prune_val,
+	[PAT_MATCH_BOOL]  = pat_prune_val,
+	[PAT_MATCH_INT]   = pat_prune_val,
+	[PAT_MATCH_IP]    = pat_prune_val,
+	[PAT_MATCH_BIN]   = pat_prune_ptr,
+	[PAT_MATCH_LEN]   = pat_prune_val,
+	[PAT_MATCH_STR]   = pat_prune_ptr,
+	[PAT_MATCH_BEG]   = pat_prune_ptr,
+	[PAT_MATCH_SUB]   = pat_prune_ptr,
+	[PAT_MATCH_DIR]   = pat_prune_ptr,
+	[PAT_MATCH_DOM]   = pat_prune_ptr,
+	[PAT_MATCH_END]   = pat_prune_ptr,
+	[PAT_MATCH_REG]   = pat_prune_reg,
+};
+
+struct pattern *(*pat_match_fcts[PAT_MATCH_NUM])(struct sample *, struct pattern_expr *, int) = {
 	[PAT_MATCH_FOUND] = NULL,
 	[PAT_MATCH_BOOL]  = pat_match_nothing,
 	[PAT_MATCH_INT]   = pat_match_int,
@@ -78,16 +126,22 @@ int pat_match_types[PAT_MATCH_NUM] = {
 	[PAT_MATCH_BOOL]  = SMP_T_UINT,
 	[PAT_MATCH_INT]   = SMP_T_UINT,
 	[PAT_MATCH_IP]    = SMP_T_ADDR,
-	[PAT_MATCH_BIN]   = SMP_T_CBIN,
-	[PAT_MATCH_LEN]   = SMP_T_CSTR,
-	[PAT_MATCH_STR]   = SMP_T_CSTR,
-	[PAT_MATCH_BEG]   = SMP_T_CSTR,
-	[PAT_MATCH_SUB]   = SMP_T_CSTR,
-	[PAT_MATCH_DIR]   = SMP_T_CSTR,
-	[PAT_MATCH_DOM]   = SMP_T_CSTR,
-	[PAT_MATCH_END]   = SMP_T_CSTR,
-	[PAT_MATCH_REG]   = SMP_T_CSTR,
+	[PAT_MATCH_BIN]   = SMP_T_BIN,
+	[PAT_MATCH_LEN]   = SMP_T_STR,
+	[PAT_MATCH_STR]   = SMP_T_STR,
+	[PAT_MATCH_BEG]   = SMP_T_STR,
+	[PAT_MATCH_SUB]   = SMP_T_STR,
+	[PAT_MATCH_DIR]   = SMP_T_STR,
+	[PAT_MATCH_DOM]   = SMP_T_STR,
+	[PAT_MATCH_END]   = SMP_T_STR,
+	[PAT_MATCH_REG]   = SMP_T_STR,
 };
+
+/* this struct is used to return information */
+static struct pattern static_pattern;
+
+/* This is the root of the list of all pattern_ref avalaibles. */
+struct list pattern_reference = LIST_HEAD_INIT(pattern_reference);
 
 /*
  *
@@ -95,45 +149,6 @@ int pat_match_types[PAT_MATCH_NUM] = {
  * of pattern matching
  *
  */
-
-/* Lookup an IPv4 address in the expression's pattern tree using the longest
- * match method. The node is returned if it exists, otherwise NULL.
- */
-static void *pat_lookup_ip(struct sample *smp, struct pattern_expr *expr)
-{
-	struct in_addr *s;
-
-	if (smp->type != SMP_T_IPV4)
-		return PAT_NOMATCH;
-
-	s = &smp->data.ipv4;
-	return ebmb_lookup_longest(&expr->pattern_tree, &s->s_addr);
-}
-
-/* Free data allocated by pat_parse_reg */
-static void pat_free_reg(void *ptr)
-{
-	regex_free(ptr);
-}
-
-/* Lookup a string in the expression's pattern tree. The node is returned if it
- * exists, otherwise NULL.
- */
-static void *pat_lookup_str(struct sample *smp, struct pattern_expr *expr)
-{
-	/* data are stored in a tree */
-	struct ebmb_node *node;
-	char prev;
-
-	/* we may have to force a trailing zero on the test pattern */
-	prev = smp->data.str.str[smp->data.str.len];
-	if (prev)
-		smp->data.str.str[smp->data.str.len] = '\0';
-	node = ebst_lookup(&expr->pattern_tree, smp->data.str.str);
-	if (prev)
-		smp->data.str.str[smp->data.str.len] = prev;
-	return node;
-}
 
 /* Background: Fast way to find a zero byte in a word
  * http://graphics.stanford.edu/~seander/bithacks.html#ZeroInWord
@@ -163,160 +178,61 @@ static inline unsigned int make_4delim(unsigned char d1, unsigned char d2, unsig
  * These functions are exported and may be used by any other component.
  *
  * The following functions are used for parsing pattern matching
- * input value. The <text> contain a list of word. The last entry
- * must be one NULL character. the <text> contain the string to be
- * parsed. <pattern> must be a preallocated pattern. The pat_parse_*
- * functions fill this structure with the parsed value. <usage> can
- * be PAT_U_COMPILE or PAT_U_LOOKUP. If the value PAT_U_COMPILE is
- * used memory is allocated for filling the pattern. If the value
- * PAT_U_LOOKUP is set, the parser use "trash" or return pointers
- * to the input strings. In both cases, the caller must use the
- * value PAT_U_LOOKUP with caution. <opaque> is used to pass value
- * between two calls to the parser. the interger must ben initilized
- * to 0 (see note below). <err> is filled with an error message built
- * with memprintf() function.
+ * input value. The <text> contain the string to be parsed. <pattern>
+ * must be a preallocated pattern. The pat_parse_* functions fill this
+ * structure with the parsed value. <usage> can be PAT_U_COMPILE or
+ * PAT_U_LOOKUP. If the value PAT_U_COMPILE is used memory is allocated
+ * for filling the pattern. If the value PAT_U_LOOKUP is set, the parser
+ * use "trash" or return pointers to the input strings. In both cases,
+ * the caller must use the value PAT_U_LOOKUP with caution. <err> is
+ * filled with an error message built with memprintf() function.
  *
- * In succes case, the pat_parse_* function return the number of
- * <text> eated. If the function fail, it returns 0 and <err> is
- * filled.
- *
- * NOTE: <opaque>iIt is used with integer range parser. The following 
- * configuration line is processed with this method:
- *
- *    acl ... -m int eq 10 20
- *
- * The first call to the parser eat 2 elements: "eq" and "10". The
- * pattern is filled with "eq 10" content. The <opaque> contain
- * coded value value that represent "eq".
- *
- * The second call to the parser just eat 1 element: "20". The opaque
- * contain the value of the operator. The parser returns pattern filled
- * with "eq 20".
+ * In succes case, the pat_parse_* function return 1. If the function
+ * fail, it returns 0 and <err> is filled.
  *
  */
 
 /* ignore the current line */
-int pat_parse_nothing(const char **text, struct pattern *pattern, enum pat_usage usage, int *opaque, char **err)
+int pat_parse_nothing(const char *text, struct pattern *pattern, char **err)
 {
 	return 1;
 }
 
 /* Parse a string. It is allocated and duplicated. */
-int pat_parse_str(const char **text, struct pattern *pattern, enum pat_usage usage, int *opaque, char **err)
+int pat_parse_str(const char *text, struct pattern *pattern, char **err)
 {
-	pattern->type = SMP_T_CSTR;
-	pattern->expect_type = SMP_T_CSTR;
-	if (usage == PAT_U_COMPILE) {
-		pattern->ptr.str = strdup(*text);
-		if (!pattern->ptr.str) {
-			memprintf(err, "out of memory while loading string pattern");
-			return 0;
-		}
-	}
-	else
-		pattern->ptr.str = (char *)*text;
-	pattern->len = strlen(*text);
+	pattern->type = SMP_T_STR;
+	pattern->ptr.str = (char *)text;
+	pattern->len = strlen(text);
 	return 1;
 }
 
 /* Parse a binary written in hexa. It is allocated. */
-int pat_parse_bin(const char **text, struct pattern *pattern, enum pat_usage usage, int *opaque, char **err)
+int pat_parse_bin(const char *text, struct pattern *pattern, char **err)
 {
 	struct chunk *trash;
 
-	pattern->type = SMP_T_CBIN;
-	pattern->expect_type = SMP_T_CBIN;
-
-	if (usage == PAT_U_COMPILE)
-		/* If the parse_binary fails, it returns 0. In succes case, it returns
-		 * the length of the arsed binary content. The functions pat_parse_* 
-		 * must return 0 if fail and the number of elements eated from **text
-		 * if not fail. In succes case, this function eat always 1 elements.
-		 * The double operator "!" converts the range "1-n" to "1".
-		 */
-		return !!parse_binary(*text, &pattern->ptr.str, &pattern->len, err);
-
+	pattern->type = SMP_T_BIN;
 	trash = get_trash_chunk();
 	pattern->len = trash->size;
 	pattern->ptr.str = trash->str;
-	return !!parse_binary(*text, &pattern->ptr.str, &pattern->len, err);
-}
-
-/* Parse and concatenate all further strings into one. */
-int
-pat_parse_strcat(const char **text, struct pattern *pattern, enum pat_usage usage, int *opaque, char **err)
-{
-	int len = 0, i;
-	char *s;
-	struct chunk *trash;
-
-	for (i = 0; *text[i]; i++)
-		len += strlen(text[i])+1;
-
-	pattern->type = SMP_T_CSTR;
-	if (usage == PAT_U_COMPILE) {
-		pattern->ptr.str = calloc(1, len);
-		if (!pattern->ptr.str) {
-			memprintf(err, "out of memory while loading pattern");
-			return 0;
-		}
-	}
-	else {
-		trash = get_trash_chunk();
-		if (trash->size < len) {
-			memprintf(err, "no space avalaible in the buffer. expect %d, provides %d",
-			          len, trash->size);
-			return 0;
-		}
-		pattern->ptr.str = trash->str;
-	}
-
-	s = pattern->ptr.str;
-
-	for (i = 0; *text[i]; i++)
-		s += sprintf(s, i?" %s":"%s", text[i]);
-
-	pattern->len = len;
-
-	return i;
+	return !!parse_binary(text, &pattern->ptr.str, &pattern->len, err);
 }
 
 /* Parse a regex. It is allocated. */
-int pat_parse_reg(const char **text, struct pattern *pattern, enum pat_usage usage, int *opaque, char **err)
+int pat_parse_reg(const char *text, struct pattern *pattern, char **err)
 {
-	struct my_regex *preg;
 	struct chunk *trash;
 
-	if (usage == PAT_U_COMPILE) {
-
-		preg = calloc(1, sizeof(*preg));
-		if (!preg) {
-			memprintf(err, "out of memory while loading pattern");
-			return 0;
-		}
-
-		if (!regex_comp(*text, preg, !(pattern->flags & PAT_F_IGNORE_CASE), 0, err)) {
-			free(preg);
-			return 0;
-		}
-		pattern->freeptrbuf = &pat_free_reg;
-	}
-	else {
-
-		trash = get_trash_chunk();
-		if (trash->size < sizeof(*preg)) {
-			memprintf(err, "no space avalaible in the buffer. expect %d, provides %d",
-			          (int)sizeof(*preg), trash->size);
-			return 0;
-		}
-
-		preg = (struct my_regex *)trash->str;
-		preg->regstr = (char *)*text;
-		pattern->freeptrbuf = NULL;
+	trash = get_trash_chunk();
+	if (trash->size < sizeof(*pattern->ptr.reg)) {
+		memprintf(err, "no space avalaible in the buffer. expect %d, provides %d",
+		          (int)sizeof(*pattern->ptr.reg), trash->size);
+		return 0;
 	}
 
-	pattern->ptr.reg = preg;
-	pattern->expect_type = SMP_T_CSTR;
+	pattern->ptr.str = (char *)text;
+
 	return 1;
 }
 
@@ -331,89 +247,73 @@ int pat_parse_reg(const char **text, struct pattern *pattern, enum pat_usage usa
  * The operator is stored in the 'opaque' argument.
  *
  * If err is non-NULL, an error message will be returned there on errors and
- * the caller will have to free it.
+ * the caller will have to free it. The function returns zero on error, and
+ * non-zero on success.
  *
  */
-int pat_parse_int(const char **text, struct pattern *pattern, enum pat_usage usage, int *opaque, char **err)
+int pat_parse_int(const char *text, struct pattern *pattern, char **err)
 {
-	signed long long i;
-	unsigned int j, last, skip = 0;
-	const char *ptr = *text;
+	const char *ptr = text;
 
 	pattern->type = SMP_T_UINT;
-	pattern->expect_type = SMP_T_UINT;
 
-	while (!isdigit((unsigned char)*ptr)) {
-		switch (get_std_op(ptr)) {
-		case STD_OP_EQ: *opaque = 0; break;
-		case STD_OP_GT: *opaque = 1; break;
-		case STD_OP_GE: *opaque = 2; break;
-		case STD_OP_LT: *opaque = 3; break;
-		case STD_OP_LE: *opaque = 4; break;
-		default:
-			memprintf(err, "'%s' is neither a number nor a supported operator", ptr);
+	/* Empty string is not valid */
+	if (!*text)
+		goto not_valid_range;
+
+	/* Search ':' or '-' separator. */
+	while (*ptr != '\0' && *ptr != ':' && *ptr != '-')
+		ptr++;
+
+	/* If separator not found. */
+	if (!*ptr) {
+		if (strl2llrc(text, ptr - text, &pattern->val.range.min) != 0) {
+			memprintf(err, "'%s' is not a number", text);
 			return 0;
 		}
-
-		skip++;
-		ptr = text[skip];
-	}
-
-	last = i = 0;
-	while (1) {
-                j = *ptr++;
-		if ((j == '-' || j == ':') && !last) {
-			last++;
-			pattern->val.range.min = i;
-			i = 0;
-			continue;
-		}
-		j -= '0';
-                if (j > 9)
-			// also catches the terminating zero
-                        break;
-                i *= 10;
-                i += j;
-        }
-
-	if (last && *opaque >= 1 && *opaque <= 4) {
-		/* having a range with a min or a max is absurd */
-		memprintf(err, "integer range '%s' specified with a comparison operator", text[skip]);
-		return 0;
-	}
-
-	if (!last)
-		pattern->val.range.min = i;
-	pattern->val.range.max = i;
-
-	switch (*opaque) {
-	case 0: /* eq */
+		pattern->val.range.max = pattern->val.range.min;
 		pattern->val.range.min_set = 1;
 		pattern->val.range.max_set = 1;
-		break;
-	case 1: /* gt */
-		pattern->val.range.min++; /* gt = ge + 1 */
-	case 2: /* ge */
-		pattern->val.range.min_set = 1;
-		pattern->val.range.max_set = 0;
-		break;
-	case 3: /* lt */
-		pattern->val.range.max--; /* lt = le - 1 */
-	case 4: /* le */
+		return 1;
+	}
+
+	/* If the separator is the first character. */
+	if (ptr == text && *(ptr + 1) != '\0') {
+		if (strl2llrc(ptr + 1, strlen(ptr + 1), &pattern->val.range.max) != 0)
+			goto not_valid_range;
+
 		pattern->val.range.min_set = 0;
 		pattern->val.range.max_set = 1;
-		break;
+		return 1;
 	}
-	return skip + 1;
-}
 
-int pat_parse_len(const char **text, struct pattern *pattern, enum pat_usage usage, int *opaque, char **err)
-{
-	int ret;
+	/* If separator is the last character. */
+	if (*(ptr + 1) == '\0') {
+		if (strl2llrc(text, ptr - text, &pattern->val.range.min) != 0)
+			goto not_valid_range;
 
-	ret = pat_parse_int(text, pattern, usage, opaque, err);
-	pattern->expect_type = SMP_T_CSTR;
-	return ret;
+		pattern->val.range.min_set = 1;
+		pattern->val.range.max_set = 0;
+		return 1;
+	}
+
+	/* Else, parse two numbers. */
+	if (strl2llrc(text, ptr - text, &pattern->val.range.min) != 0)
+		goto not_valid_range;
+
+	if (strl2llrc(ptr + 1, strlen(ptr + 1), &pattern->val.range.max) != 0)
+		goto not_valid_range;
+
+	if (pattern->val.range.min > pattern->val.range.max)
+		goto not_valid_range;
+
+	pattern->val.range.min_set = 1;
+	pattern->val.range.max_set = 1;
+	return 1;
+
+ not_valid_range:
+	memprintf(err, "'%s' is not a valid number range", text);
+	return 0;
 }
 
 /* Parse a range of positive 2-component versions delimited by either ':' or
@@ -436,90 +336,66 @@ int pat_parse_len(const char **text, struct pattern *pattern, enum pat_usage usa
  *    acl valid_ssl       ssl_req_proto 3.0-3.1
  *
  */
-int pat_parse_dotted_ver(const char **text, struct pattern *pattern, enum pat_usage usage, int *opaque, char **err)
+int pat_parse_dotted_ver(const char *text, struct pattern *pattern, char **err)
 {
-	signed long long i;
-	unsigned int j, last, skip = 0;
-	const char *ptr = *text;
+	const char *ptr = text;
 
+	pattern->type = SMP_T_UINT;
 
-	while (!isdigit((unsigned char)*ptr)) {
-		switch (get_std_op(ptr)) {
-		case STD_OP_EQ: *opaque = 0; break;
-		case STD_OP_GT: *opaque = 1; break;
-		case STD_OP_GE: *opaque = 2; break;
-		case STD_OP_LT: *opaque = 3; break;
-		case STD_OP_LE: *opaque = 4; break;
-		default:
-			memprintf(err, "'%s' is neither a number nor a supported operator", ptr);
+	/* Search ':' or '-' separator. */
+	while (*ptr != '\0' && *ptr != ':' && *ptr != '-')
+		ptr++;
+
+	/* If separator not found. */
+	if (*ptr == '\0' && ptr > text) {
+		if (strl2llrc_dotted(text, ptr-text, &pattern->val.range.min) != 0) {
+			memprintf(err, "'%s' is not a dotted number", text);
 			return 0;
 		}
-
-		skip++;
-		ptr = text[skip];
-	}
-
-	last = i = 0;
-	while (1) {
-                j = *ptr++;
-		if (j == '.') {
-			/* minor part */
-			if (i >= 65536)
-				return 0;
-			i <<= 16;
-			continue;
-		}
-		if ((j == '-' || j == ':') && !last) {
-			last++;
-			if (i < 65536)
-				i <<= 16;
-			pattern->val.range.min = i;
-			i = 0;
-			continue;
-		}
-		j -= '0';
-                if (j > 9)
-			// also catches the terminating zero
-                        break;
-                i = (i & 0xFFFF0000) + (i & 0xFFFF) * 10;
-                i += j;
-        }
-
-	/* if we only got a major version, let's shift it now */
-	if (i < 65536)
-		i <<= 16;
-
-	if (last && *opaque >= 1 && *opaque <= 4) {
-		/* having a range with a min or a max is absurd */
-		memprintf(err, "version range '%s' specified with a comparison operator", text[skip]);
-		return 0;
-	}
-
-	pattern->expect_type = SMP_T_UINT;
-
-	if (!last)
-		pattern->val.range.min = i;
-	pattern->val.range.max = i;
-
-	switch (*opaque) {
-	case 0: /* eq */
+		pattern->val.range.max = pattern->val.range.min;
 		pattern->val.range.min_set = 1;
 		pattern->val.range.max_set = 1;
-		break;
-	case 1: /* gt */
-		pattern->val.range.min++; /* gt = ge + 1 */
-	case 2: /* ge */
-		pattern->val.range.min_set = 1;
-		pattern->val.range.max_set = 0;
-		break;
-	case 3: /* lt */
-		pattern->val.range.max--; /* lt = le - 1 */
-	case 4: /* le */
+		return 1;
+	}
+
+	/* If the separator is the first character. */
+	if (ptr == text && *(ptr+1) != '\0') {
+		if (strl2llrc_dotted(ptr+1, strlen(ptr+1), &pattern->val.range.max) != 0) {
+			memprintf(err, "'%s' is not a valid dotted number range", text);
+			return 0;
+		}
 		pattern->val.range.min_set = 0;
 		pattern->val.range.max_set = 1;
-		break;
+		return 1;
 	}
-	return skip + 1;
+
+	/* If separator is the last character. */
+	if (ptr == &text[strlen(text)-1]) {
+		if (strl2llrc_dotted(text, ptr-text, &pattern->val.range.min) != 0) {
+			memprintf(err, "'%s' is not a valid dotted number range", text);
+			return 0;
+		}
+		pattern->val.range.min_set = 1;
+		pattern->val.range.max_set = 0;
+		return 1;
+	}
+
+	/* Else, parse two numbers. */
+	if (strl2llrc_dotted(text, ptr-text, &pattern->val.range.min) != 0) {
+		memprintf(err, "'%s' is not a valid dotted number range", text);
+		return 0;
+	}
+	if (strl2llrc_dotted(ptr+1, strlen(ptr+1), &pattern->val.range.max) != 0) {
+		memprintf(err, "'%s' is not a valid dotted number range", text);
+		return 0;
+	}
+	if (pattern->val.range.min > pattern->val.range.max) {
+		memprintf(err, "'%s' is not a valid dotted number range", text);
+		return 0;
+	}
+	pattern->val.range.min_set = 1;
+	pattern->val.range.max_set = 1;
+	return 1;
 }
 
 /* Parse an IP address and an optional mask in the form addr[/mask].
@@ -527,20 +403,19 @@ int pat_parse_dotted_ver(const char **text, struct pattern *pattern, enum pat_us
  * may either be a dotted mask or a number of bits. Returns 1 if OK,
  * otherwise 0. NOTE: IP address patterns are typed (IPV4/IPV6).
  */
-int pat_parse_ip(const char **text, struct pattern *pattern, enum pat_usage usage, int *opaque, char **err)
+int pat_parse_ip(const char *text, struct pattern *pattern, char **err)
 {
-	pattern->expect_type = SMP_T_ADDR;
-	if (str2net(*text, &pattern->val.ipv4.addr, &pattern->val.ipv4.mask)) {
+	if (str2net(text, !(pattern->flags & PAT_F_NO_DNS) && (global.mode & MODE_STARTING),
+	            &pattern->val.ipv4.addr, &pattern->val.ipv4.mask)) {
 		pattern->type = SMP_T_IPV4;
 		return 1;
 	}
-	else if (str62net(*text, &pattern->val.ipv6.addr, &pattern->val.ipv6.mask)) {
-		/* no tree support right now */
+	else if (str62net(text, &pattern->val.ipv6.addr, &pattern->val.ipv6.mask)) {
 		pattern->type = SMP_T_IPV6;
 		return 1;
 	}
 	else {
-		memprintf(err, "'%s' is not a valid IPv4 or IPv6 address", *text);
+		memprintf(err, "'%s' is not a valid IPv4 or IPv6 address", text);
 		return 0;
 	}
 }
@@ -556,107 +431,192 @@ int pat_parse_ip(const char **text, struct pattern *pattern, enum pat_usage usag
  */
 
 /* always return false */
-enum pat_match_res pat_match_nothing(struct sample *smp, struct pattern *pattern)
+struct pattern *pat_match_nothing(struct sample *smp, struct pattern_expr *expr, int fill)
 {
-	return PAT_NOMATCH;
+	if (smp->data.uint) {
+		if (fill) {
+			static_pattern.smp = NULL;
+			static_pattern.ref = NULL;
+			static_pattern.flags = 0;
+			static_pattern.type = 0;
+			static_pattern.ptr.str = NULL;
+		}
+		return &static_pattern;
+	}
+	else
+		return NULL;
 }
 
 
 /* NB: For two strings to be identical, it is required that their lengths match */
-enum pat_match_res pat_match_str(struct sample *smp, struct pattern *pattern)
+struct pattern *pat_match_str(struct sample *smp, struct pattern_expr *expr, int fill)
 {
 	int icase;
+	struct ebmb_node *node;
+	char prev;
+	struct pattern_tree *elt;
+	struct pattern_list *lst;
+	struct pattern *pattern;
 
-	if (pattern->len != smp->data.str.len)
-		return PAT_NOMATCH;
+	/* Lookup a string in the expression's pattern tree. */
+	if (!eb_is_empty(&expr->pattern_tree)) {
+		/* we may have to force a trailing zero on the test pattern */
+		prev = smp->data.str.str[smp->data.str.len];
+		if (prev)
+			smp->data.str.str[smp->data.str.len] = '\0';
+		node = ebst_lookup(&expr->pattern_tree, smp->data.str.str);
+		if (prev)
+			smp->data.str.str[smp->data.str.len] = prev;
 
-	icase = pattern->flags & PAT_F_IGNORE_CASE;
-	if ((icase && strncasecmp(pattern->ptr.str, smp->data.str.str, smp->data.str.len) == 0) ||
-	    (!icase && strncmp(pattern->ptr.str, smp->data.str.str, smp->data.str.len) == 0))
-		return PAT_MATCH;
-	return PAT_NOMATCH;
+		if (node) {
+			if (fill) {
+				elt = ebmb_entry(node, struct pattern_tree, node);
+				static_pattern.smp = elt->smp;
+				static_pattern.ref = elt->ref;
+				static_pattern.flags = PAT_F_TREE;
+				static_pattern.type = SMP_T_STR;
+				static_pattern.ptr.str = (char *)elt->node.key;
+			}
+			return &static_pattern;
+		}
+	}
+
+	/* look in the list */
+	list_for_each_entry(lst, &expr->patterns, list) {
+		pattern = &lst->pat;
+
+		if (pattern->len != smp->data.str.len)
+			continue;
+
+		icase = pattern->flags & PAT_F_IGNORE_CASE;
+		if ((icase && strncasecmp(pattern->ptr.str, smp->data.str.str, smp->data.str.len) == 0) ||
+		    (!icase && strncmp(pattern->ptr.str, smp->data.str.str, smp->data.str.len) == 0))
+			return pattern;
+	}
+
+	return NULL;
 }
 
 /* NB: For two binaries buf to be identical, it is required that their lengths match */
-enum pat_match_res pat_match_bin(struct sample *smp, struct pattern *pattern)
+struct pattern *pat_match_bin(struct sample *smp, struct pattern_expr *expr, int fill)
 {
-	if (pattern->len != smp->data.str.len)
-		return PAT_NOMATCH;
+	struct pattern_list *lst;
+	struct pattern *pattern;
 
-	if (memcmp(pattern->ptr.str, smp->data.str.str, smp->data.str.len) == 0)
-		return PAT_MATCH;
-	return PAT_NOMATCH;
+	/* Look in the list. */
+	list_for_each_entry(lst, &expr->patterns, list) {
+		pattern = &lst->pat;
+
+		if (pattern->len != smp->data.str.len)
+			continue;
+
+		if (memcmp(pattern->ptr.str, smp->data.str.str, smp->data.str.len) == 0)
+			return pattern;
+	}
+
+	return NULL;
 }
 
 /* Executes a regex. It temporarily changes the data to add a trailing zero,
  * and restores the previous character when leaving.
  */
-enum pat_match_res pat_match_reg(struct sample *smp, struct pattern *pattern)
+struct pattern *pat_match_reg(struct sample *smp, struct pattern_expr *expr, int fill)
 {
-	if (regex_exec(pattern->ptr.reg, smp->data.str.str, smp->data.str.len) == 0)
-		return PAT_MATCH;
-	return PAT_NOMATCH;
+	struct pattern_list *lst;
+	struct pattern *pattern;
+
+	/* look in the list */
+	list_for_each_entry(lst, &expr->patterns, list) {
+		pattern = &lst->pat;
+
+		if (regex_exec(pattern->ptr.reg, smp->data.str.str, smp->data.str.len) == 0)
+			return pattern;
+	}
+	return NULL;
 }
 
 /* Checks that the pattern matches the beginning of the tested string. */
-enum pat_match_res pat_match_beg(struct sample *smp, struct pattern *pattern)
+struct pattern *pat_match_beg(struct sample *smp, struct pattern_expr *expr, int fill)
 {
 	int icase;
+	struct pattern_list *lst;
+	struct pattern *pattern;
 
-	if (pattern->len > smp->data.str.len)
-		return PAT_NOMATCH;
+	list_for_each_entry(lst, &expr->patterns, list) {
+		pattern = &lst->pat;
 
-	icase = pattern->flags & PAT_F_IGNORE_CASE;
-	if ((icase && strncasecmp(pattern->ptr.str, smp->data.str.str, pattern->len) != 0) ||
-	    (!icase && strncmp(pattern->ptr.str, smp->data.str.str, pattern->len) != 0))
-		return PAT_NOMATCH;
-	return PAT_MATCH;
+		if (pattern->len > smp->data.str.len)
+			continue;
+
+		icase = pattern->flags & PAT_F_IGNORE_CASE;
+		if ((icase && strncasecmp(pattern->ptr.str, smp->data.str.str, pattern->len) != 0) ||
+		    (!icase && strncmp(pattern->ptr.str, smp->data.str.str, pattern->len) != 0))
+			continue;
+
+		return pattern;
+	}
+	return NULL;
 }
 
 /* Checks that the pattern matches the end of the tested string. */
-enum pat_match_res pat_match_end(struct sample *smp, struct pattern *pattern)
+struct pattern *pat_match_end(struct sample *smp, struct pattern_expr *expr, int fill)
 {
 	int icase;
+	struct pattern_list *lst;
+	struct pattern *pattern;
 
-	if (pattern->len > smp->data.str.len)
-		return PAT_NOMATCH;
-	icase = pattern->flags & PAT_F_IGNORE_CASE;
-	if ((icase && strncasecmp(pattern->ptr.str, smp->data.str.str + smp->data.str.len - pattern->len, pattern->len) != 0) ||
-	    (!icase && strncmp(pattern->ptr.str, smp->data.str.str + smp->data.str.len - pattern->len, pattern->len) != 0))
-		return PAT_NOMATCH;
-	return PAT_MATCH;
+	list_for_each_entry(lst, &expr->patterns, list) {
+		pattern = &lst->pat;
+
+		if (pattern->len > smp->data.str.len)
+			continue;
+
+		icase = pattern->flags & PAT_F_IGNORE_CASE;
+		if ((icase && strncasecmp(pattern->ptr.str, smp->data.str.str + smp->data.str.len - pattern->len, pattern->len) != 0) ||
+		    (!icase && strncmp(pattern->ptr.str, smp->data.str.str + smp->data.str.len - pattern->len, pattern->len) != 0))
+			continue;
+
+		return pattern;
+	}
+	return  NULL;
 }
 
 /* Checks that the pattern is included inside the tested string.
  * NB: Suboptimal, should be rewritten using a Boyer-Moore method.
  */
-enum pat_match_res pat_match_sub(struct sample *smp, struct pattern *pattern)
+struct pattern *pat_match_sub(struct sample *smp, struct pattern_expr *expr, int fill)
 {
 	int icase;
 	char *end;
 	char *c;
+	struct pattern_list *lst;
+	struct pattern *pattern;
 
-	if (pattern->len > smp->data.str.len)
-		return PAT_NOMATCH;
+	list_for_each_entry(lst, &expr->patterns, list) {
+		pattern = &lst->pat;
 
-	end = smp->data.str.str + smp->data.str.len - pattern->len;
-	icase = pattern->flags & PAT_F_IGNORE_CASE;
-	if (icase) {
-		for (c = smp->data.str.str; c <= end; c++) {
-			if (tolower(*c) != tolower(*pattern->ptr.str))
-				continue;
-			if (strncasecmp(pattern->ptr.str, c, pattern->len) == 0)
-				return PAT_MATCH;
-		}
-	} else {
-		for (c = smp->data.str.str; c <= end; c++) {
-			if (*c != *pattern->ptr.str)
-				continue;
-			if (strncmp(pattern->ptr.str, c, pattern->len) == 0)
-				return PAT_MATCH;
+		if (pattern->len > smp->data.str.len)
+			continue;
+
+		end = smp->data.str.str + smp->data.str.len - pattern->len;
+		icase = pattern->flags & PAT_F_IGNORE_CASE;
+		if (icase) {
+			for (c = smp->data.str.str; c <= end; c++) {
+				if (tolower(*c) != tolower(*pattern->ptr.str))
+					continue;
+				if (strncasecmp(pattern->ptr.str, c, pattern->len) == 0)
+					return pattern;
+			}
+		} else {
+			for (c = smp->data.str.str; c <= end; c++) {
+				if (*c != *pattern->ptr.str)
+					continue;
+				if (strncmp(pattern->ptr.str, c, pattern->len) == 0)
+					return pattern;
+			}
 		}
 	}
-	return PAT_NOMATCH;
+	return NULL;
 }
 
 /* This one is used by other real functions. It checks that the pattern is
@@ -718,46 +678,180 @@ static int match_word(struct sample *smp, struct pattern *pattern, unsigned int 
  * between the delimiters '?' or '/' or at the beginning or end of the string.
  * Delimiters at the beginning or end of the pattern are ignored.
  */
-enum pat_match_res pat_match_dir(struct sample *smp, struct pattern *pattern)
+struct pattern *pat_match_dir(struct sample *smp, struct pattern_expr *expr, int fill)
 {
-	return match_word(smp, pattern, make_4delim('/', '?', '?', '?'));
+	struct pattern_list *lst;
+	struct pattern *pattern;
+
+	list_for_each_entry(lst, &expr->patterns, list) {
+		pattern = &lst->pat;
+		if (match_word(smp, pattern, make_4delim('/', '?', '?', '?')))
+			return pattern;
+	}
+	return NULL;
 }
 
 /* Checks that the pattern is included inside the tested string, but enclosed
  * between the delmiters '/', '?', '.' or ":" or at the beginning or end of
  * the string. Delimiters at the beginning or end of the pattern are ignored.
  */
-enum pat_match_res pat_match_dom(struct sample *smp, struct pattern *pattern)
+struct pattern *pat_match_dom(struct sample *smp, struct pattern_expr *expr, int fill)
 {
-	return match_word(smp, pattern, make_4delim('/', '?', '.', ':'));
+	struct pattern_list *lst;
+	struct pattern *pattern;
+
+	list_for_each_entry(lst, &expr->patterns, list) {
+		pattern = &lst->pat;
+		if (match_word(smp, pattern, make_4delim('/', '?', '.', ':')))
+			return pattern;
+	}
+	return NULL;
 }
 
 /* Checks that the integer in <test> is included between min and max */
-enum pat_match_res pat_match_int(struct sample *smp, struct pattern *pattern)
+struct pattern *pat_match_int(struct sample *smp, struct pattern_expr *expr, int fill)
 {
-	if ((!pattern->val.range.min_set || pattern->val.range.min <= smp->data.uint) &&
-	    (!pattern->val.range.max_set || smp->data.uint <= pattern->val.range.max))
-		return PAT_MATCH;
-	return PAT_NOMATCH;
+	struct pattern_list *lst;
+	struct pattern *pattern;
+
+	list_for_each_entry(lst, &expr->patterns, list) {
+		pattern = &lst->pat;
+		if ((!pattern->val.range.min_set || pattern->val.range.min <= smp->data.uint) &&
+		    (!pattern->val.range.max_set || smp->data.uint <= pattern->val.range.max))
+			return pattern;
+	}
+	return NULL;
 }
 
 /* Checks that the length of the pattern in <test> is included between min and max */
-enum pat_match_res pat_match_len(struct sample *smp, struct pattern *pattern)
+struct pattern *pat_match_len(struct sample *smp, struct pattern_expr *expr, int fill)
 {
-	if ((!pattern->val.range.min_set || pattern->val.range.min <= smp->data.str.len) &&
-	    (!pattern->val.range.max_set || smp->data.str.len <= pattern->val.range.max))
-		return PAT_MATCH;
-	return PAT_NOMATCH;
+	struct pattern_list *lst;
+	struct pattern *pattern;
+
+	list_for_each_entry(lst, &expr->patterns, list) {
+		pattern = &lst->pat;
+		if ((!pattern->val.range.min_set || pattern->val.range.min <= smp->data.str.len) &&
+		    (!pattern->val.range.max_set || smp->data.str.len <= pattern->val.range.max))
+			return pattern;
+	}
+	return NULL;
 }
 
-enum pat_match_res pat_match_ip(struct sample *smp, struct pattern *pattern)
+struct pattern *pat_match_ip(struct sample *smp, struct pattern_expr *expr, int fill)
 {
 	unsigned int v4; /* in network byte order */
-	struct in6_addr *v6;
-	int bits, pos;
 	struct in6_addr tmp6;
+	struct in_addr *s;
+	struct ebmb_node *node;
+	struct pattern_tree *elt;
+	struct pattern_list *lst;
+	struct pattern *pattern;
 
-	if (pattern->type == SMP_T_IPV4) {
+	/* The input sample is IPv4. Try to match in the trees. */
+	if (smp->type == SMP_T_IPV4) {
+		/* Lookup an IPv4 address in the expression's pattern tree using
+		 * the longest match method.
+		 */
+		s = &smp->data.ipv4;
+		node = ebmb_lookup_longest(&expr->pattern_tree, &s->s_addr);
+		if (node) {
+			if (fill) {
+				elt = ebmb_entry(node, struct pattern_tree, node);
+				static_pattern.smp = elt->smp;
+				static_pattern.ref = elt->ref;
+				static_pattern.flags = PAT_F_TREE;
+				static_pattern.type = SMP_T_IPV4;
+				memcpy(&static_pattern.val.ipv4.addr.s_addr, elt->node.key, 4);
+				if (!cidr2dotted(elt->node.node.pfx, &static_pattern.val.ipv4.mask))
+					return NULL;
+			}
+			return &static_pattern;
+		}
+
+		/* The IPv4 sample dont match the IPv4 tree. Convert the IPv4
+		 * sample address to IPv6 with the mapping method using the ::ffff:
+		 * prefix, and try to lookup in the IPv6 tree.
+		 */
+		memset(&tmp6, 0, 10);
+		*(uint16_t*)&tmp6.s6_addr[10] = htons(0xffff);
+		*(uint32_t*)&tmp6.s6_addr[12] = smp->data.ipv4.s_addr;
+		node = ebmb_lookup_longest(&expr->pattern_tree_2, &tmp6);
+		if (node) {
+			if (fill) {
+				elt = ebmb_entry(node, struct pattern_tree, node);
+				static_pattern.smp = elt->smp;
+				static_pattern.ref = elt->ref;
+				static_pattern.flags = PAT_F_TREE;
+				static_pattern.type = SMP_T_IPV6;
+				memcpy(&static_pattern.val.ipv6.addr, elt->node.key, 16);
+				static_pattern.val.ipv6.mask = elt->node.node.pfx;
+			}
+			return &static_pattern;
+		}
+	}
+
+	/* The input sample is IPv6. Try to match in the trees. */
+	if (smp->type == SMP_T_IPV6) {
+		/* Lookup an IPv6 address in the expression's pattern tree using
+		 * the longest match method.
+		 */
+		node = ebmb_lookup_longest(&expr->pattern_tree_2, &smp->data.ipv6);
+		if (node) {
+			if (fill) {
+				elt = ebmb_entry(node, struct pattern_tree, node);
+				static_pattern.smp = elt->smp;
+				static_pattern.ref = elt->ref;
+				static_pattern.flags = PAT_F_TREE;
+				static_pattern.type = SMP_T_IPV6;
+				memcpy(&static_pattern.val.ipv6.addr, elt->node.key, 16);
+				static_pattern.val.ipv6.mask = elt->node.node.pfx;
+			}
+			return &static_pattern;
+		}
+
+		/* Try to convert 6 to 4 when the start of the ipv6 address match the
+		 * following forms :
+		 *   - ::ffff:ip:v4 (ipv4 mapped)
+		 *   - ::0000:ip:v4 (old ipv4 mapped)
+		 *   - 2002:ip:v4:: (6to4)
+		 */
+		if ((*(uint32_t*)&smp->data.ipv6.s6_addr[0] == 0 &&
+		     *(uint32_t*)&smp->data.ipv6.s6_addr[4]  == 0 &&
+		     (*(uint32_t*)&smp->data.ipv6.s6_addr[8] == 0 ||
+		      *(uint32_t*)&smp->data.ipv6.s6_addr[8] == htonl(0xFFFF))) ||
+		    *(uint16_t*)&smp->data.ipv6.s6_addr[0] == htons(0x2002)) {
+			if (*(uint32_t*)&smp->data.ipv6.s6_addr[0] == 0)
+				v4 = *(uint32_t*)&smp->data.ipv6.s6_addr[12];
+			else
+				v4 = htonl((ntohs(*(uint16_t*)&smp->data.ipv6.s6_addr[2]) << 16) +
+				            ntohs(*(uint16_t*)&smp->data.ipv6.s6_addr[4]));
+
+			/* Lookup an IPv4 address in the expression's pattern tree using the longest
+			 * match method.
+			 */
+			node = ebmb_lookup_longest(&expr->pattern_tree, &v4);
+			if (node) {
+				if (fill) {
+					elt = ebmb_entry(node, struct pattern_tree, node);
+					static_pattern.smp = elt->smp;
+					static_pattern.ref = elt->ref;
+					static_pattern.flags = PAT_F_TREE;
+					static_pattern.type = SMP_T_IPV4;
+					memcpy(&static_pattern.val.ipv4.addr.s_addr, elt->node.key, 4);
+					if (!cidr2dotted(elt->node.node.pfx, &static_pattern.val.ipv4.mask))
+						return NULL;
+				}
+				return &static_pattern;
+			}
+		}
+	}
+
+	/* Lookup in the list. the list contain only IPv4 patterns */
+	list_for_each_entry(lst, &expr->patterns, list) {
+		pattern = &lst->pat;
+
+		/* The input sample is IPv4, use it as is. */
 		if (smp->type == SMP_T_IPV4) {
 			v4 = smp->data.ipv4.s_addr;
 		}
@@ -779,202 +873,208 @@ enum pat_match_res pat_match_ip(struct sample *smp, struct pattern *pattern)
 				            ntohs(*(uint16_t*)&smp->data.ipv6.s6_addr[4]));
 			}
 			else
-				return PAT_NOMATCH;
+				continue;
 		}
-		else
-			return PAT_NOMATCH;
 
+		/* Check if the input sample match the current pattern. */
 		if (((v4 ^ pattern->val.ipv4.addr.s_addr) & pattern->val.ipv4.mask.s_addr) == 0)
-			return PAT_MATCH;
-		else
-			return PAT_NOMATCH;
+			return pattern;
 	}
-	else if (pattern->type == SMP_T_IPV6) {
-		if (smp->type == SMP_T_IPV4) {
-			/* Convert the IPv4 sample address to IPv4 with the
-			 * mapping method using the ::ffff: prefix.
-			 */
-			memset(&tmp6, 0, 10);
-			*(uint16_t*)&tmp6.s6_addr[10] = htons(0xffff);
-			*(uint32_t*)&tmp6.s6_addr[12] = smp->data.ipv4.s_addr;
-			v6 = &tmp6;
-		}
-		else if (smp->type == SMP_T_IPV6) {
-			v6 = &smp->data.ipv6;
-		}
-		else {
-			return PAT_NOMATCH;
-		}
-
-		bits = pattern->val.ipv6.mask;
-		for (pos = 0; bits > 0; pos += 4, bits -= 32) {
-			v4 = *(uint32_t*)&v6->s6_addr[pos] ^ *(uint32_t*)&pattern->val.ipv6.addr.s6_addr[pos];
-			if (bits < 32)
-				v4 &= htonl((~0U) << (32-bits));
-			if (v4)
-				return PAT_NOMATCH;
-		}
-		return PAT_MATCH;
-	}
-	return PAT_NOMATCH;
-}
-
-/* NB: does nothing if <pat> is NULL */
-void pattern_free(struct pattern *pat)
-{
-	if (!pat)
-		return;
-
-	if (pat->ptr.ptr) {
-		if (pat->freeptrbuf)
-			pat->freeptrbuf(pat->ptr.ptr);
-
-		free(pat->ptr.ptr);
-	}
-
-	free(pat->smp);
-	free(pat);
-}
-
-void free_pattern_list(struct list *head)
-{
-	struct pattern *pat, *tmp;
-	list_for_each_entry_safe(pat, tmp, head, list)
-		pattern_free(pat);
+	return NULL;
 }
 
 void free_pattern_tree(struct eb_root *root)
 {
 	struct eb_node *node, *next;
-	struct pat_idx_elt *elt;
+	struct pattern_tree *elt;
 
 	node = eb_first(root);
 	while (node) {
 		next = eb_next(node);
 		eb_delete(node);
-		elt = container_of(node, struct pat_idx_elt, node);
+		elt = container_of(node, struct pattern_tree, node);
 		free(elt->smp);
 		free(elt);
 		node = next;
 	}
 }
 
-void pattern_prune_expr(struct pattern_expr *expr)
+void pat_prune_val(struct pattern_expr *expr)
 {
-	free_pattern_list(&expr->patterns);
+	struct pattern_list *pat, *tmp;
+
+	list_for_each_entry_safe(pat, tmp, &expr->patterns, list) {
+		free(pat->pat.smp);
+		free(pat);
+	}
+
 	free_pattern_tree(&expr->pattern_tree);
+	free_pattern_tree(&expr->pattern_tree_2);
 	LIST_INIT(&expr->patterns);
 }
 
-void pattern_init_expr(struct pattern_expr *expr)
+void pat_prune_ptr(struct pattern_expr *expr)
 {
+	struct pattern_list *pat, *tmp;
+
+	list_for_each_entry_safe(pat, tmp, &expr->patterns, list) {
+		free(pat->pat.ptr.ptr);
+		free(pat->pat.smp);
+		free(pat);
+	}
+
+	free_pattern_tree(&expr->pattern_tree);
+	free_pattern_tree(&expr->pattern_tree_2);
 	LIST_INIT(&expr->patterns);
-	expr->pattern_tree = EB_ROOT_UNIQUE;
 }
 
-/* return 1 if the process is ok
- * return -1 if the parser fail. The err message is filled.
- * return -2 if out of memory
+void pat_prune_reg(struct pattern_expr *expr)
+{
+	struct pattern_list *pat, *tmp;
+
+	list_for_each_entry_safe(pat, tmp, &expr->patterns, list) {
+		regex_free(pat->pat.ptr.ptr);
+		free(pat->pat.smp);
+		free(pat);
+	}
+
+	free_pattern_tree(&expr->pattern_tree);
+	free_pattern_tree(&expr->pattern_tree_2);
+	LIST_INIT(&expr->patterns);
+}
+
+/*
+ *
+ * The following functions are used for the pattern indexation
+ *
  */
-int pattern_register(struct pattern_expr *expr, const char **args,
-                         struct sample_storage *smp,
-                         struct pattern **pattern,
-                         int patflags, char **err)
+
+int pat_idx_list_val(struct pattern_expr *expr, struct pattern *pat, char **err)
 {
-	int opaque = 0;
-	unsigned int mask = 0;
-	struct pat_idx_elt *node;
-	int len;
-	int ret;
+	struct pattern_list *patl;
 
-	/* eat args */
-	while (**args) {
+	/* allocate pattern */
+	patl = calloc(1, sizeof(*patl));
+	if (!patl) {
+		memprintf(err, "out of memory while indexing pattern");
+		return 0;
+	}
 
-		/* we keep the previous pattern along iterations as long as it's not used */
-		if (!*pattern)
-			*pattern = (struct pattern *)malloc(sizeof(**pattern));
-		if (!*pattern) {
-			memprintf(err, "out of memory while loading pattern");
-			return 0;
-		}
+	/* duplicate pattern */
+	memcpy(&patl->pat, pat, sizeof(*pat));
 
-		memset(*pattern, 0, sizeof(**pattern));
-		(*pattern)->flags = patflags;
+	/* chain pattern in the expression */
+	LIST_ADDQ(&expr->patterns, &patl->list);
 
-		ret = expr->parse(args, *pattern, PAT_U_COMPILE, &opaque, err);
-		if (!ret)
-			return 0;
+	/* that's ok */
+	return 1;
+}
 
-		/* each parser return the number of args eated */
-		args += ret;
+int pat_idx_list_ptr(struct pattern_expr *expr, struct pattern *pat, char **err)
+{
+	struct pattern_list *patl;
 
-		/*
-		 *
-		 * SMP_T_CSTR tree indexation
-		 *
-		 * The match "pat_match_str()" can use tree.
-		 *
+	/* allocate pattern */
+	patl = calloc(1, sizeof(*patl));
+	if (!patl)
+		return 0;
+
+	/* duplicate pattern */
+	memcpy(&patl->pat, pat, sizeof(*pat));
+	patl->pat.ptr.ptr = malloc(patl->pat.len);
+	if (!patl->pat.ptr.ptr) {
+		free(patl);
+		memprintf(err, "out of memory while indexing pattern");
+		return 0;
+	}
+	memcpy(patl->pat.ptr.ptr, pat->ptr.ptr, pat->len);
+
+	/* chain pattern in the expression */
+	LIST_ADDQ(&expr->patterns, &patl->list);
+
+	/* that's ok */
+	return 1;
+}
+
+int pat_idx_list_str(struct pattern_expr *expr, struct pattern *pat, char **err)
+{
+	struct pattern_list *patl;
+
+	/* allocate pattern */
+	patl = calloc(1, sizeof(*patl));
+	if (!patl) {
+		memprintf(err, "out of memory while indexing pattern");
+		return 0;
+	}
+
+	/* duplicate pattern */
+	memcpy(&patl->pat, pat, sizeof(*pat));
+	patl->pat.ptr.str = malloc(patl->pat.len + 1);
+	if (!patl->pat.ptr.str) {
+		free(patl);
+		memprintf(err, "out of memory while indexing pattern");
+		return 0;
+	}
+	memcpy(patl->pat.ptr.ptr, pat->ptr.ptr, pat->len);
+	patl->pat.ptr.str[patl->pat.len] = '\0';
+
+	/* chain pattern in the expression */
+	LIST_ADDQ(&expr->patterns, &patl->list);
+
+	/* that's ok */
+	return 1;
+}
+
+int pat_idx_list_reg(struct pattern_expr *expr, struct pattern *pat, char **err)
+{
+	struct pattern_list *patl;
+
+	/* allocate pattern */
+	patl = calloc(1, sizeof(*patl));
+	if (!patl) {
+		memprintf(err, "out of memory while indexing pattern");
+		return 0;
+	}
+
+	/* duplicate pattern */
+	memcpy(&patl->pat, pat, sizeof(*pat));
+
+	/* allocate regex */
+	patl->pat.ptr.reg = calloc(1, sizeof(*patl->pat.ptr.reg));
+	if (!patl->pat.ptr.reg) {
+		free(patl);
+		memprintf(err, "out of memory while indexing pattern");
+		return 0;
+	}
+
+	/* compile regex */
+	if (!regex_comp(pat->ptr.str, patl->pat.ptr.reg, !(patl->pat.flags & PAT_F_IGNORE_CASE), 0, err)) {
+		free(patl);
+		free(patl->pat.ptr.reg);
+		return 0;
+	}
+
+	/* chain pattern in the expression */
+	LIST_ADDQ(&expr->patterns, &patl->list);
+
+	/* that's ok */
+	return 1;
+}
+
+int pat_idx_tree_ip(struct pattern_expr *expr, struct pattern *pat, char **err)
+{
+	unsigned int mask;
+	struct pattern_tree *node;
+
+	/* Only IPv4 can be indexed */
+	if (pat->type == SMP_T_IPV4) {
+		/* in IPv4 case, check if the mask is contiguous so that we can
+		 * insert the network into the tree. A continuous mask has only
+		 * ones on the left. This means that this mask + its lower bit
+		 * added once again is null.
 		 */
-		if (expr->match == pat_match_str) {
-
-			/* If the flag PAT_F_IGNORE_CASE is set, we cannot use trees */
-			if ((*pattern)->flags & PAT_F_IGNORE_CASE)
-				goto just_chain_the_pattern;
-
-			/* Process the key len */
-			len = strlen((*pattern)->ptr.str) + 1;
-
-			/* node memory allocation */
-			node = calloc(1, sizeof(*node) + len);
-			if (!node) {
-				memprintf(err, "out of memory while loading pattern");
-				return 0;
-			}
-
-			/* copy the pointer to sample associated to this node */
-			node->smp = smp;
-
-			/* copy the string */
-			memcpy(node->node.key, (*pattern)->ptr.str, len);
-
-			/* the "map_parser_str()" function always duplicate string information */
-			free((*pattern)->ptr.str);
-			(*pattern)->ptr.str = NULL;
-
-			/* we pre-set the data pointer to the tree's head so that functions
-			 * which are able to insert in a tree know where to do that.
-			 *
-			 * because "val" is an "union", the previous data are crushed.
-			 */
-			(*pattern)->flags |= PAT_F_TREE;
-			(*pattern)->val.tree = &expr->pattern_tree;
-
-			/* index the new node */
-			if (ebst_insert((*pattern)->val.tree, &node->node) != &node->node)
-				free(node); /* was a duplicate */
-		}
-
-		/*
-		 *
-		 * SMP_T_IPV4 tree indexation
-		 *
-		 * The match "pat_match_ip()" can use tree.
-		 *
-		 */
-		else if (expr->match == pat_match_ip) {
-
-			/* Only IPv4 can be indexed */
-			if ((*pattern)->type != SMP_T_IPV4)
-				goto just_chain_the_pattern;
-
-			/* in IPv4 case, check if the mask is contiguous so that we can
-			 * insert the network into the tree. A continuous mask has only
-			 * ones on the left. This means that this mask + its lower bit
-			 * added once again is null.
-			 */
-			mask = ntohl((*pattern)->val.ipv4.mask.s_addr);
-			if (mask + (mask & -mask) != 0)
-				goto just_chain_the_pattern;
+		mask = ntohl(pat->val.ipv4.mask.s_addr);
+		if (mask + (mask & -mask) == 0) {
 			mask = mask ? 33 - flsnz(mask & -mask) : 0; /* equals cidr value */
 
 			/* node memory allocation */
@@ -985,64 +1085,857 @@ int pattern_register(struct pattern_expr *expr, const char **args,
 			}
 
 			/* copy the pointer to sample associated to this node */
-			node->smp = smp;
+			node->smp = pat->smp;
+			node->ref = pat->ref;
 
 			/* FIXME: insert <addr>/<mask> into the tree here */
-			memcpy(node->node.key, &(*pattern)->val.ipv4.addr, 4); /* network byte order */
-
-			/* we pre-set the data pointer to the tree's head so that functions
-			 * which are able to insert in a tree know where to do that.
-			 *
-			 * because "val" is an "union", the previous data are crushed.
-			 */
-			(*pattern)->flags |= PAT_F_TREE;
-			(*pattern)->val.tree = &expr->pattern_tree;
-
-			/* Index the new node
-			 * FIXME: insert <addr>/<mask> into the tree here
-			 */
+			memcpy(node->node.key, &pat->val.ipv4.addr, 4); /* network byte order */
 			node->node.node.pfx = mask;
-			if (ebmb_insert_prefix((*pattern)->val.tree, &node->node, 4) != &node->node)
-				free(node); /* was a duplicate */
-		}
 
-		/*
-		 *
-		 * if the parser did not feed the tree, let's chain the pattern to the list
-		 *
-		 */
+			/* Insert the entry. */
+			ebmb_insert_prefix(&expr->pattern_tree, &node->node, 4);
+
+			/* that's ok */
+			return 1;
+		}
 		else {
-
-just_chain_the_pattern:
-
-			LIST_ADDQ(&expr->patterns, &(*pattern)->list);
-
-			/* copy the pointer to sample associated to this node */
-			(*pattern)->smp = smp;
-
-			/* get a new one */
-			*pattern = NULL;
+			/* If the mask is not contiguous, just add the pattern to the list */
+			return pat_idx_list_val(expr, pat, err);
 		}
+	}
+	else if (pat->type == SMP_T_IPV6) {
+		/* IPv6 also can be indexed */
+		node = calloc(1, sizeof(*node) + 16);
+		if (!node) {
+			memprintf(err, "out of memory while loading pattern");
+			return 0;
+		}
+
+		/* copy the pointer to sample associated to this node */
+		node->smp = pat->smp;
+		node->ref = pat->ref;
+
+		/* FIXME: insert <addr>/<mask> into the tree here */
+		memcpy(node->node.key, &pat->val.ipv6.addr, 16); /* network byte order */
+		node->node.node.pfx = pat->val.ipv6.mask;
+
+		/* Insert the entry. */
+		ebmb_insert_prefix(&expr->pattern_tree_2, &node->node, 16);
+
+		/* that's ok */
+		return 1;
+	}
+
+	return 0;
+}
+
+int pat_idx_tree_str(struct pattern_expr *expr, struct pattern *pat, char **err)
+{
+	int len;
+	struct pattern_tree *node;
+
+	/* Only string can be indexed */
+	if (pat->type != SMP_T_STR) {
+		memprintf(err, "internal error: string expected, but the type is '%s'",
+		          smp_to_type[pat->type]);
+		return 0;
+	}
+
+	/* If the flag PAT_F_IGNORE_CASE is set, we cannot use trees */
+	if (pat->flags & PAT_F_IGNORE_CASE)
+		return pat_idx_list_str(expr, pat, err);
+
+	/* Process the key len */
+	len = strlen(pat->ptr.str) + 1;
+
+	/* node memory allocation */
+	node = calloc(1, sizeof(*node) + len);
+	if (!node) {
+		memprintf(err, "out of memory while loading pattern");
+		return 0;
+	}
+
+	/* copy the pointer to sample associated to this node */
+	node->smp = pat->smp;
+	node->ref = pat->ref;
+
+	/* copy the string */
+	memcpy(node->node.key, pat->ptr.str, len);
+
+	/* index the new node */
+	ebst_insert(&expr->pattern_tree, &node->node);
+
+	/* that's ok */
+	return 1;
+}
+
+void pat_del_list_val(struct pattern_expr *expr, struct pat_ref_elt *ref)
+{
+	struct pattern_list *pat;
+	struct pattern_list *safe;
+
+	list_for_each_entry_safe(pat, safe, &expr->patterns, list) {
+		/* Check equality. */
+		if (pat->pat.ref != ref)
+			continue;
+
+		/* Delete and free entry. */
+		LIST_DEL(&pat->list);
+		free(pat->pat.smp);
+		free(pat);
+	}
+}
+
+void pat_del_tree_ip(struct pattern_expr *expr, struct pat_ref_elt *ref)
+{
+	struct ebmb_node *node, *next_node;
+	struct pattern_tree *elt;
+
+	/* browse each node of the tree for IPv4 addresses. */
+	for (node = ebmb_first(&expr->pattern_tree), next_node = node ? ebmb_next(node) : NULL;
+	     node;
+	     node = next_node, next_node = node ? ebmb_next(node) : NULL) {
+		/* Extract container of the tree node. */
+		elt = container_of(node, struct pattern_tree, node);
+
+		/* Check equality. */
+		if (elt->ref != ref)
+			continue;
+
+		/* Delete and free entry. */
+		ebmb_delete(node);
+		free(elt->smp);
+		free(elt);
+	}
+
+	/* Browse each node of the list for IPv4 addresses. */
+	pat_del_list_val(expr, ref);
+
+	/* browse each node of the tree for IPv6 addresses. */
+	for (node = ebmb_first(&expr->pattern_tree_2), next_node = node ? ebmb_next(node) : NULL;
+	     node;
+	     node = next_node, next_node = node ? ebmb_next(node) : NULL) {
+		/* Extract container of the tree node. */
+		elt = container_of(node, struct pattern_tree, node);
+
+		/* Check equality. */
+		if (elt->ref != ref)
+			continue;
+
+		/* Delete and free entry. */
+		ebmb_delete(node);
+		free(elt->smp);
+		free(elt);
+	}
+}
+
+void pat_del_list_ptr(struct pattern_expr *expr, struct pat_ref_elt *ref)
+{
+	struct pattern_list *pat;
+	struct pattern_list *safe;
+
+	list_for_each_entry_safe(pat, safe, &expr->patterns, list) {
+		/* Check equality. */
+		if (pat->pat.ref != ref)
+			continue;
+
+		/* Delete and free entry. */
+		LIST_DEL(&pat->list);
+		free(pat->pat.ptr.ptr);
+		free(pat->pat.smp);
+		free(pat);
+	}
+}
+
+void pat_del_tree_str(struct pattern_expr *expr, struct pat_ref_elt *ref)
+{
+	struct ebmb_node *node, *next_node;
+	struct pattern_tree *elt;
+
+	/* browse each node of the tree. */
+	for (node = ebmb_first(&expr->pattern_tree), next_node = node ? ebmb_next(node) : NULL;
+	     node;
+	     node = next_node, next_node = node ? ebmb_next(node) : NULL) {
+		/* Extract container of the tree node. */
+		elt = container_of(node, struct pattern_tree, node);
+
+		/* Check equality. */
+		if (elt->ref != ref)
+			continue;
+
+		/* Delete and free entry. */
+		ebmb_delete(node);
+		free(elt->smp);
+		free(elt);
+	}
+}
+
+void pat_del_list_reg(struct pattern_expr *expr, struct pat_ref_elt *ref)
+{
+	struct pattern_list *pat;
+	struct pattern_list *safe;
+
+	list_for_each_entry_safe(pat, safe, &expr->patterns, list) {
+		/* Check equality. */
+		if (pat->pat.ref != ref)
+			continue;
+
+		/* Delete and free entry. */
+		LIST_DEL(&pat->list);
+		regex_free(pat->pat.ptr.ptr);
+		free(pat->pat.smp);
+		free(pat);
+	}
+}
+
+void pattern_init_expr(struct pattern_expr *expr)
+{
+	LIST_INIT(&expr->patterns);
+	expr->pattern_tree = EB_ROOT;
+	expr->pattern_tree_2 = EB_ROOT;
+}
+
+void pattern_init_head(struct pattern_head *head)
+{
+	LIST_INIT(&head->head);
+}
+
+/* The following functions are relative to the management of the reference
+ * lists. These lists are used to store the original pattern and associated
+ * value as string form.
+ *
+ * This is used with modifiable ACL and MAPS
+ *
+ * The pattern reference are stored with two identifiers: the unique_id and
+ * the reference.
+ *
+ * The reference identify a file. Each file with the same name point to the
+ * same reference. We can register many times one file. If the file is modified,
+ * all his dependencies are also modified. The reference can be used with map or
+ * acl.
+ *
+ * The unique_id identify inline acl. The unique id is unique for each acl.
+ * You cannot force the same id in the configuration file, because this repoort
+ * an error.
+ *
+ * A particular case appears if the filename is a number. In this case, the
+ * unique_id is set with the number represented by the filename and the
+ * reference is also set. This method prevent double unique_id.
+ *
+ */
+
+/* This function lookup for reference. If the reference is found, they return
+ * pointer to the struct pat_ref, else return NULL.
+ */
+struct pat_ref *pat_ref_lookup(const char *reference)
+{
+	struct pat_ref *ref;
+
+	list_for_each_entry(ref, &pattern_reference, list)
+		if (ref->reference && strcmp(reference, ref->reference) == 0)
+			return ref;
+	return NULL;
+}
+
+/* This function lookup for unique id. If the reference is found, they return
+ * pointer to the struct pat_ref, else return NULL.
+ */
+struct pat_ref *pat_ref_lookupid(int unique_id)
+{
+	struct pat_ref *ref;
+
+	list_for_each_entry(ref, &pattern_reference, list)
+		if (ref->unique_id == unique_id)
+			return ref;
+	return NULL;
+}
+
+/* This function remove all pattern matching the pointer <refelt> from
+ * the the reference and from each expr member of the reference. This
+ * function returns 1 if the deletion is done and return 0 is the entry
+ * is not found.
+ */
+int pat_ref_delete_by_id(struct pat_ref *ref, struct pat_ref_elt *refelt)
+{
+	struct pattern_expr *expr;
+	struct pat_ref_elt *elt, *safe;
+
+	/* delete pattern from reference */
+	list_for_each_entry_safe(elt, safe, &ref->head, list) {
+		if (elt == refelt) {
+			LIST_DEL(&elt->list);
+			free(elt->sample);
+			free(elt->pattern);
+			free(elt);
+
+			list_for_each_entry(expr, &ref->pat, list)
+				pattern_delete(expr, elt);
+
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* This function remove all pattern match <key> from the the reference
+ * and from each expr member of the reference. This fucntion returns 1
+ * if the deletion is done and return 0 is the entry is not found.
+ */
+int pat_ref_delete(struct pat_ref *ref, const char *key)
+{
+	struct pattern_expr *expr;
+	struct pat_ref_elt *elt, *safe;
+	int found = 0;
+
+	/* delete pattern from reference */
+	list_for_each_entry_safe(elt, safe, &ref->head, list) {
+		if (strcmp(key, elt->pattern) == 0) {
+			LIST_DEL(&elt->list);
+			free(elt->sample);
+			free(elt->pattern);
+			free(elt);
+
+			list_for_each_entry(expr, &ref->pat, list)
+				pattern_delete(expr, elt);
+
+			found = 1;
+		}
+	}
+
+	if (!found)
+		return 0;
+	return 1;
+}
+
+  /* This function modify the sample of the first pattern that match the <key>. */
+static inline int pat_ref_set_elt(struct pat_ref *ref, struct pat_ref_elt *elt,
+                                  const char *value, char **err)
+{
+	struct pattern_expr *expr;
+	struct sample_storage **smp;
+	char *sample;
+	struct sample_storage test;
+
+	/* Try all needed converters. */
+	list_for_each_entry(expr, &ref->pat, list) {
+		if (!expr->pat_head->parse_smp)
+			continue;
+
+		if (!expr->pat_head->parse_smp(value, &test)) {
+			memprintf(err, "unable to parse '%s'", value);
+			return 0;
+		}
+	}
+
+	/* Modify pattern from reference. */
+	sample = strdup(value);
+	if (!sample) {
+		memprintf(err, "out of memory error");
+		return 0;
+	}
+	free(elt->sample);
+	elt->sample = sample;
+
+	/* Load sample in each reference. All the conversion are tested
+	 * below, normally these calls dosn't fail.
+	 */
+	list_for_each_entry(expr, &ref->pat, list) {
+		if (!expr->pat_head->parse_smp)
+			continue;
+
+		smp = pattern_find_smp(expr, elt);
+		if (smp && *smp && !expr->pat_head->parse_smp(sample, *smp))
+			*smp = NULL;
 	}
 
 	return 1;
 }
 
+/* This function modify the sample of the first pattern that match the <key>. */
+int pat_ref_set_by_id(struct pat_ref *ref, struct pat_ref_elt *refelt, const char *value, char **err)
+{
+	struct pat_ref_elt *elt;
+
+	/* Look for pattern in the reference. */
+	list_for_each_entry(elt, &ref->head, list) {
+		if (elt == refelt) {
+			if (!pat_ref_set_elt(ref, elt, value, err))
+				return 0;
+			return 1;
+		}
+	}
+
+	memprintf(err, "key or pattern not found");
+	return 0;
+}
+
+/* This function modify the sample of the first pattern that match the <key>. */
+int pat_ref_set(struct pat_ref *ref, const char *key, const char *value, char **err)
+{
+	struct pat_ref_elt *elt;
+	int found = 0;
+	char *_merr;
+	char **merr;
+
+	if (err) {
+		merr = &_merr;
+		*merr = NULL;
+	}
+	else
+		merr = NULL;
+
+	/* Look for pattern in the reference. */
+	list_for_each_entry(elt, &ref->head, list) {
+		if (strcmp(key, elt->pattern) == 0) {
+			if (!pat_ref_set_elt(ref, elt, value, merr)) {
+				if (!found)
+					*err = *merr;
+				else {
+					memprintf(err, "%s, %s", *err, *merr);
+					free(*merr);
+					*merr = NULL;
+				}
+			}
+			found = 1;
+		}
+	}
+
+	if (!found) {
+		memprintf(err, "entry not found");
+		return 0;
+	}
+	return 1;
+}
+
+/* This function create new reference. <ref> is the reference name.
+ * <flags> are PAT_REF_*. /!\ The reference is not checked, and must
+ * be unique. The user must check the reference with "pat_ref_lookup()"
+ * before calling this function. If the fucntion fail, it return NULL,
+ * else return new struct pat_ref.
+ */
+struct pat_ref *pat_ref_new(const char *reference, const char *display, unsigned int flags)
+{
+	struct pat_ref *ref;
+
+	ref = malloc(sizeof(*ref));
+	if (!ref)
+		return NULL;
+
+	if (display) {
+		ref->display = strdup(display);
+		if (!ref->display) {
+			free(ref);
+			return NULL;
+		}
+	}
+	else
+		ref->display = NULL;
+
+	ref->reference = strdup(reference);
+	if (!ref->reference) {
+		free(ref->display);
+		free(ref);
+		return NULL;
+	}
+
+	ref->flags = flags;
+	ref->unique_id = -1;
+
+	LIST_INIT(&ref->head);
+	LIST_INIT(&ref->pat);
+
+	LIST_ADDQ(&pattern_reference, &ref->list);
+
+	return ref;
+}
+
+/* This function create new reference. <unique_id> is the unique id. If
+ * the value of <unique_id> is -1, the unique id is calculated later.
+ * <flags> are PAT_REF_*. /!\ The reference is not checked, and must
+ * be unique. The user must check the reference with "pat_ref_lookup()"
+ * or pat_ref_lookupid before calling this function. If the function
+ * fail, it return NULL, else return new struct pat_ref.
+ */
+struct pat_ref *pat_ref_newid(int unique_id, const char *display, unsigned int flags)
+{
+	struct pat_ref *ref;
+
+	ref = malloc(sizeof(*ref));
+	if (!ref)
+		return NULL;
+
+	if (display) {
+		ref->display = strdup(display);
+		if (!ref->display) {
+			free(ref);
+			return NULL;
+		}
+	}
+	else
+		ref->display = NULL;
+
+	ref->reference = NULL;
+	ref->flags = flags;
+	ref->unique_id = unique_id;
+	LIST_INIT(&ref->head);
+	LIST_INIT(&ref->pat);
+
+	LIST_ADDQ(&pattern_reference, &ref->list);
+
+	return ref;
+}
+
+/* This function adds entry to <ref>. It can failed with memory error.
+ * If the function fails, it returns 0.
+ */
+int pat_ref_append(struct pat_ref *ref, char *pattern, char *sample, int line)
+{
+	struct pat_ref_elt *elt;
+
+	elt = malloc(sizeof(*elt));
+	if (!elt)
+		return 0;
+
+	elt->line = line;
+
+	elt->pattern = strdup(pattern);
+	if (!elt->pattern) {
+		free(elt);
+		return 0;
+	}
+
+	if (sample) {
+		elt->sample = strdup(sample);
+		if (!elt->sample) {
+			free(elt->pattern);
+			free(elt);
+			return 0;
+		}
+	}
+	else
+		elt->sample = NULL;
+
+	LIST_ADDQ(&ref->head, &elt->list);
+
+	return 1;
+}
+
+/* This function create sample found in <elt>, parse the pattern also
+ * found in <elt> and insert it in <expr>. The function copy <patflags>
+ * in <expr>. If the function fails, it returns0 and <err> is filled.
+ * In succes case, the function returns 1.
+ */
+static inline
+int pat_ref_push(struct pat_ref_elt *elt, struct pattern_expr *expr,
+                 int patflags, char **err)
+{
+	struct sample_storage *smp;
+	struct pattern pattern;
+
+	/* Create sample */
+	if (elt->sample && expr->pat_head->parse_smp) {
+		/* New sample. */
+		smp = malloc(sizeof(*smp));
+		if (!smp)
+			return 0;
+
+		/* Parse value. */
+		if (!expr->pat_head->parse_smp(elt->sample, smp)) {
+			memprintf(err, "unable to parse '%s'", elt->sample);
+			free(smp);
+			return 0;
+		}
+
+	}
+	else
+		smp = NULL;
+
+	/* initialise pattern */
+	memset(&pattern, 0, sizeof(pattern));
+	pattern.flags = patflags;
+	pattern.smp = smp;
+	pattern.ref = elt;
+
+	/* parse pattern */
+	if (!expr->pat_head->parse(elt->pattern, &pattern, err)) {
+		free(smp);
+		return 0;
+	}
+
+	/* index pattern */
+	if (!expr->pat_head->index(expr, &pattern, err)) {
+		free(smp);
+		return 0;
+	}
+
+	return 1;
+}
+
+/* This function adds entry to <ref>. It can failed with memory error. The new
+ * entry is added at all the pattern_expr registered in this reference. The
+ * function stop on the first error encountered. It returns 0 and err is
+ * filled. If an error is encountered, the complete add operation is cancelled.
+ * If the insertion is a success the function returns 1.
+ */
+int pat_ref_add(struct pat_ref *ref,
+                const char *pattern, const char *sample,
+                char **err)
+{
+	struct pat_ref_elt *elt;
+	struct pattern_expr *expr;
+
+	elt = malloc(sizeof(*elt));
+	if (!elt) {
+		memprintf(err, "out of memory error");
+		return 0;
+	}
+
+	elt->line = -1;
+
+	elt->pattern = strdup(pattern);
+	if (!elt->pattern) {
+		free(elt);
+		memprintf(err, "out of memory error");
+		return 0;
+	}
+
+	if (sample) {
+		elt->sample = strdup(sample);
+		if (!elt->sample) {
+			free(elt->pattern);
+			free(elt);
+			memprintf(err, "out of memory error");
+			return 0;
+		}
+	}
+	else
+		elt->sample = NULL;
+
+	LIST_ADDQ(&ref->head, &elt->list);
+
+	list_for_each_entry(expr, &ref->pat, list) {
+		if (!pat_ref_push(elt, expr, 0, err)) {
+			/* If the insertion fails, try to delete all the added entries. */
+			pat_ref_delete_by_id(ref, elt);
+			return 0;
+		}
+	}
+	return 1;
+}
+
+/* This function prune all entries of <ref>. This function
+ * prune the associated pattern_expr.
+ */
+void pat_ref_prune(struct pat_ref *ref)
+{
+	struct pat_ref_elt *elt, *safe;
+	struct pattern_expr *expr;
+
+	list_for_each_entry_safe(elt, safe, &ref->head, list) {
+		LIST_DEL(&elt->list);
+		free(elt->pattern);
+		free(elt->sample);
+		free(elt);
+	}
+
+	list_for_each_entry(expr, &ref->pat, list)
+		expr->pat_head->prune(expr);
+}
+
+/* This function lookup for existing reference <ref> in pattern_head <head>. */
+struct pattern_expr *pattern_lookup_expr(struct pattern_head *head, struct pat_ref *ref)
+{
+	struct pattern_expr_list *expr;
+
+	list_for_each_entry(expr, &head->head, list)
+		if (expr->expr->ref == ref)
+			return expr->expr;
+	return NULL;
+}
+
+/* This function create new pattern_expr associated to the reference <ref>.
+ * <ref> can be NULL. If an error is occured, the function returns NULL and
+ * <err> is filled. Otherwise, the function returns new pattern_expr linked
+ * with <head> and <ref>.
+ */
+struct pattern_expr *pattern_new_expr(struct pattern_head *head, struct pat_ref *ref, char **err)
+{
+	struct pattern_expr *expr;
+	struct pattern_expr_list *list;
+
+	/* Memory and initialization of the chain element. */
+	list = malloc(sizeof(*list));
+	if (!list) {
+		memprintf(err, "out of memory");
+		return NULL;
+	}
+
+	/* Look for existing similar expr. No that only the index, parse and
+	 * parse_smp function must be identical for having similar pattern.
+	 * The other function depends of theses first.
+	 */
+	if (ref) {
+		list_for_each_entry(expr, &ref->pat, list)
+			if (expr->pat_head->index     == head->index &&
+			    expr->pat_head->parse     == head->parse &&
+			    expr->pat_head->parse_smp == head->parse_smp)
+				break;
+		if (&expr->list == &ref->pat)
+			expr = NULL;
+	}
+	else
+		expr = NULL;
+
+	/* If no similar expr was found, we create new expr. */
+	if (!expr) {
+		/* Get a lot of memory for the expr struct. */
+		expr = malloc(sizeof(*expr));
+		if (!expr) {
+			memprintf(err, "out of memory");
+			return NULL;
+		}
+
+		/* Initialize this new expr. */
+		pattern_init_expr(expr);
+
+		/* This new pattern expression reference one of his heads. */
+		expr->pat_head = head;
+
+		/* Link with ref, or to self to facilitate LIST_DEL() */
+		if (ref)
+			LIST_ADDQ(&ref->pat, &expr->list);
+		else
+			LIST_INIT(&expr->list);
+
+		expr->ref = ref;
+
+		/* We must free this pattern if it is no more used. */
+		list->do_free = 1;
+	}
+	else {
+		/* If the pattern used already exists, it is already linked
+		 * with ref and we must not free it.
+		 */
+		list->do_free = 0;
+	}
+
+	/* The new list element reference the pattern_expr. */
+	list->expr = expr;
+
+	/* Link the list element with the pattern_head. */
+	LIST_ADDQ(&head->head, &list->list);
+	return expr;
+}
+
+/* Reads patterns from a file. If <err_msg> is non-NULL, an error message will
+ * be returned there on errors and the caller will have to free it.
+ *
+ * The file contains one key + value per line. Lines which start with '#' are
+ * ignored, just like empty lines. Leading tabs/spaces are stripped. The key is
+ * then the first "word" (series of non-space/tabs characters), and the value is
+ * what follows this series of space/tab till the end of the line excluding
+ * trailing spaces/tabs.
+ *
+ * Example :
+ *
+ *     # this is a comment and is ignored
+ *        62.212.114.60     1wt.eu      \n
+ *     <-><-----------><---><----><---->
+ *      |       |        |     |     `--- trailing spaces ignored
+ *      |       |        |      `-------- value
+ *      |       |        `--------------- middle spaces ignored
+ *      |       `------------------------ key
+ *      `-------------------------------- leading spaces ignored
+ *
+ * Return non-zero in case of succes, otherwise 0.
+ */
+int pat_ref_read_from_file_smp(struct pat_ref *ref, const char *filename, char **err)
+{
+	FILE *file;
+	char *c;
+	int ret = 0;
+	int line = 0;
+	char *key_beg;
+	char *key_end;
+	char *value_beg;
+	char *value_end;
+
+	file = fopen(filename, "r");
+	if (!file) {
+		memprintf(err, "failed to open pattern file <%s>", filename);
+		return 0;
+	}
+
+	/* now parse all patterns. The file may contain only one pattern
+	 * followed by one value per line. The start spaces, separator spaces
+	 * and and spaces are stripped. Each can contain comment started by '#'
+	 */
+	while (fgets(trash.str, trash.size, file) != NULL) {
+		line++;
+		c = trash.str;
+
+		/* ignore lines beginning with a dash */
+		if (*c == '#')
+			continue;
+
+		/* strip leading spaces and tabs */
+		while (*c == ' ' || *c == '\t')
+			c++;
+
+		/* empty lines are ignored too */
+		if (*c == '\0' || *c == '\r' || *c == '\n')
+			continue;
+
+		/* look for the end of the key */
+		key_beg = c;
+		while (*c && *c != ' ' && *c != '\t' && *c != '\n' && *c != '\r')
+			c++;
+
+		key_end = c;
+
+		/* strip middle spaces and tabs */
+		while (*c == ' ' || *c == '\t')
+			c++;
+
+		/* look for the end of the value, it is the end of the line */
+		value_beg = c;
+		while (*c && *c != '\n' && *c != '\r')
+			c++;
+		value_end = c;
+
+		/* trim possibly trailing spaces and tabs */
+		while (value_end > value_beg && (value_end[-1] == ' ' || value_end[-1] == '\t'))
+			value_end--;
+
+		/* set final \0 and check entries */
+		*key_end = '\0';
+		*value_end = '\0';
+
+		/* insert values */
+		if (!pat_ref_append(ref, key_beg, value_beg, line)) {
+			memprintf(err, "out of memory");
+			goto out_close;
+		}
+	}
+
+	/* succes */
+	ret = 1;
+
+ out_close:
+	fclose(file);
+	return ret;
+}
+
 /* Reads patterns from a file. If <err_msg> is non-NULL, an error message will
  * be returned there on errors and the caller will have to free it.
  */
-int pattern_read_from_file(struct pattern_expr *expr,
-                                const char *filename, int patflags,
-                                char **err)
+int pat_ref_read_from_file(struct pat_ref *ref, const char *filename, char **err)
 {
 	FILE *file;
 	char *c;
 	char *arg;
-	struct pattern *pattern;
 	int ret = 0;
 	int line = 0;
-	int code;
-	const char *args[2];
 
 	file = fopen(filename, "r");
 	if (!file) {
@@ -1054,7 +1947,6 @@ int pattern_read_from_file(struct pattern_expr *expr,
 	 * line. If the line contains spaces, they will be part of the pattern.
 	 * The pattern stops at the first CR, LF or EOF encountered.
 	 */
-	pattern = NULL;
 	while (fgets(trash.str, trash.size, file) != NULL) {
 		line++;
 		c = trash.str;
@@ -1077,254 +1969,255 @@ int pattern_read_from_file(struct pattern_expr *expr,
 		if (c == arg)
 			continue;
 
-		args[0] = arg;
-		args[1] = "";
-
-		code = pattern_register(expr, args, NULL, &pattern, patflags, err);
-		if (code == -2) {
+		if (!pat_ref_append(ref, arg, NULL, line)) {
 			memprintf(err, "out of memory when loading patterns from file <%s>", filename);
 			goto out_close;
-		}
-		else if (code < 0) {
-			memprintf(err, "%s when loading patterns from file <%s>", *err, filename);
-			goto out_free_pattern;
 		}
 	}
 
 	ret = 1; /* success */
 
- out_free_pattern:
-	pattern_free(pattern);
  out_close:
 	fclose(file);
 	return ret;
 }
 
-/* This function matches a sample <smp> against a set of patterns presented in
- * pattern expression <expr>. Upon success, if <sample> is not NULL, it is fed
- * with the pointer associated with the matching pattern. This function returns
- * PAT_NOMATCH or PAT_MATCH.
- */
-enum pat_match_res pattern_exec_match(struct pattern_expr *expr, struct sample *smp,
-                                      struct sample_storage **sample,
-                                      struct pattern **pat, struct pat_idx_elt **idx_elt)
+int pattern_read_from_file(struct pattern_head *head, unsigned int refflags,
+                           const char *filename, int patflags, int load_smp,
+                           char **err, const char *file, int line)
 {
-	enum pat_match_res pat_res = PAT_NOMATCH;
-	struct pattern *pattern;
-	struct ebmb_node *node = NULL;
-	struct pat_idx_elt *elt;
+	struct pat_ref *ref;
+	struct pattern_expr *expr;
+	struct pat_ref_elt *elt;
 
-	if (expr->match == pat_match_nothing) {
-		if (smp->data.uint)
-			pat_res |= PAT_MATCH;
-		else
-			pat_res |= PAT_NOMATCH;
-	}
-	else if (!expr->match) {
-		/* just check for existence */
-		pat_res |= PAT_MATCH;
-	}
-	else {
-		if (!eb_is_empty(&expr->pattern_tree)) {
-			/* a tree is present, let's check what type it is */
-			if (expr->match == pat_match_str) {
-				if (sample_convert(smp, SMP_T_STR))
-					node = pat_lookup_str(smp, expr);
-			}
-			else if (expr->match == pat_match_ip) {
-				if (sample_convert(smp, SMP_T_IPV4))
-					node = pat_lookup_ip(smp, expr);
-			}
-			if (node) {
-				pat_res |= PAT_MATCH;
-				elt = ebmb_entry(node, struct pat_idx_elt, node);
-				if (sample)
-					*sample = elt->smp;
-				if (idx_elt)
-					*idx_elt = elt;
-			}
-		}
+	/* Lookup for the existing reference. */
+	ref = pat_ref_lookup(filename);
 
-		/* call the match() function for all tests on this value */
-		list_for_each_entry(pattern, &expr->patterns, list) {
-			if (pat_res == PAT_MATCH)
-				break;
-			if (sample_convert(smp, pattern->expect_type))
-				pat_res |= expr->match(smp, pattern);
-			if (sample)
-				*sample = pattern->smp;
-			if (pat)
-				*pat = pattern;
-		}
-	}
+	/* If the reference doesn't exists, create it and load associated file. */
+	if (!ref) {
+		chunk_printf(&trash,
+		             "pattern loaded from file '%s' used by %s at file '%s' line %d",
+		             filename, refflags & PAT_REF_MAP ? "map" : "acl", file, line);
 
-	return pat_res;
-}
-
-/* This function browse the pattern expr <expr> to lookup the key <key>. On
- * error it returns 0. On success, it returns 1 and fills either <pat_elt>
- * or <idx_elt> with the respectively matched pointers, and the other one with
- * NULL. Pointers are not set if they're passed as NULL.
- */
-int pattern_lookup(const char *key, struct pattern_expr *expr,
-                   struct pattern **pat_elt, struct pat_idx_elt **idx_elt, char **err)
-{
-	struct pattern pattern;
-	struct pattern *pat;
-	struct ebmb_node *node;
-	struct pat_idx_elt *elt;
-	const char *args[2];
-	int opaque = 0;
-	unsigned int mask = 0;
-
-	/* no real pattern */
-	if (!expr->match || expr->match == pat_match_nothing)
-		return 0;
-
-	/* build lookup pattern */
-	args[0] = key;
-	args[1] = "";
-	if (!expr->parse(args, &pattern, PAT_U_LOOKUP, &opaque, NULL))
-		return 0;
-
-	pat = NULL;
-	elt = NULL;
-
-	/* Try to look up the tree first. IPv6 is not indexed */
-	if (!eb_is_empty(&expr->pattern_tree) && pattern.type != SMP_T_IPV6) {
-		/* Check the pattern type */
-		if (pattern.type != SMP_T_STR &&
-		    pattern.type != SMP_T_CSTR &&
-		    pattern.type != SMP_T_IPV4) {
-			memprintf(err, "Unexpected pattern type.");
+		ref = pat_ref_new(filename, trash.str, refflags);
+		if (!ref) {
+			memprintf(err, "out of memory");
 			return 0;
 		}
 
-		/* Convert mask. If the mask is not contiguous, ignore the lookup
-		 * in the tree, and browse the list.
+		if (load_smp) {
+			ref->flags |= PAT_REF_SMP;
+			if (!pat_ref_read_from_file_smp(ref, filename, err))
+				return 0;
+		}
+		else {
+			if (!pat_ref_read_from_file(ref, filename, err))
+				return 0;
+		}
+	}
+	else {
+		/* The reference already exists, check the map compatibility. */
+
+		/* If the load require samples and the flag PAT_REF_SMP is not set,
+		 * the reference doesn't contain sample, and cannot be used.
 		 */
-		if (expr->match == pat_match_ip) {
-			mask = ntohl(pattern.val.ipv4.mask.s_addr);
-			if (mask + (mask & -mask) != 0)
-				goto browse_list;
-			mask = mask ? 33 - flsnz(mask & -mask) : 0; /* equals cidr value */
+		if (load_smp) {
+			if (!(ref->flags & PAT_REF_SMP)) {
+				memprintf(err, "The file \"%s\" is already used as one column file "
+				               "and cannot be used by as two column file.",
+				               filename);
+				return 0;
+			}
+		}
+		else {
+			/* The load doesn't require samples. If the flag PAT_REF_SMP is
+			 * set, the reference contains a sample, and cannot be used.
+			 */
+			if (ref->flags & PAT_REF_SMP) {
+				memprintf(err, "The file \"%s\" is already used as two column file "
+				               "and cannot be used by as one column file.",
+				               filename);
+				return 0;
+			}
 		}
 
-		/* browse each node of the tree, and check string */
-		if (expr->match == pat_match_str) {
-			for (node = ebmb_first(&expr->pattern_tree);
-			     node;
-			     node = ebmb_next(node)) {
-				elt = container_of(node, struct pat_idx_elt, node);
-				if (strcmp(pattern.ptr.str, (char *)elt->node.key) == 0)
-					goto found;
-			}
+		/* Extends display */
+		chunk_printf(&trash, "%s", ref->display);
+		chunk_appendf(&trash, ", by %s at file '%s' line %d",
+		              refflags & PAT_REF_MAP ? "map" : "acl", file, line);
+		free(ref->display);
+		ref->display = strdup(trash.str);
+		if (!ref->display) {
+			memprintf(err, "out of memory");
+			return 0;
 		}
-		else if (expr->match == pat_match_ip) {
-			for (node = ebmb_first(&expr->pattern_tree);
-			     node;
-			     node = ebmb_next(node)) {
-				elt = container_of(node, struct pat_idx_elt, node);
-				if (elt->node.node.pfx == mask &&
-				    memcmp(&pattern.val.ipv4.addr.s_addr, elt->node.key, 4) == 0)
-					goto found;
-			}
-		}
+
+		/* Merge flags. */
+		ref->flags |= refflags;
 	}
 
-browse_list:
-	elt = NULL;
-	if (expr->parse == pat_parse_int ||
-	         expr->parse == pat_parse_len) {
-		list_for_each_entry(pat, &expr->patterns, list) {
-			if (pat->flags & PAT_F_TREE)
-				continue;
-			if (pattern.val.range.min_set != pat->val.range.min_set)
-				continue;
-			if (pattern.val.range.max_set != pat->val.range.max_set)
-				continue;
-			if (pattern.val.range.min_set &&
-			    pattern.val.range.min != pat->val.range.min)
-				continue;
-			if (pattern.val.range.max_set &&
-			    pattern.val.range.max != pat->val.range.max)
-				continue;
-			goto found;
-		}
-	}
-	else if (expr->parse == pat_parse_ip) {
-		list_for_each_entry(pat, &expr->patterns, list) {
-			if (pat->flags & PAT_F_TREE)
-				continue;
-			if (pattern.type != pat->type)
-				continue;
-			if (pattern.type == SMP_T_IPV4 &&
-			    memcmp(&pattern.val.ipv4.addr, &pat->val.ipv4.addr, sizeof(pat->val.ipv4.addr)) != 0)
-				continue;
-			if (pattern.type == SMP_T_IPV4 &&
-			    memcmp(&pattern.val.ipv4.mask, &pat->val.ipv4.mask, sizeof(pat->val.ipv4.addr)) != 0)
-				continue;
-			if (pattern.type == SMP_T_IPV6 &&
-			    memcmp(&pattern.val.ipv6.addr, &pat->val.ipv6.addr, sizeof(pat->val.ipv6.addr)) != 0)
-				continue;
-			if (pattern.type == SMP_T_IPV6 &&
-			    pattern.val.ipv6.mask != pat->val.ipv6.mask)
-				continue;
-			goto found;
-		}
-	}
-	else if (expr->parse == pat_parse_str) {
-		list_for_each_entry(pat, &expr->patterns, list) {
-			if (pat->flags & PAT_F_TREE)
-				continue;
-			if (pattern.len != pat->len)
-				continue;
-			if (pat->flags & PAT_F_IGNORE_CASE) {
-				if (strncasecmp(pattern.ptr.str, pat->ptr.str, pat->len) != 0)
-					continue;
-			}
-			else {
-				if (strncmp(pattern.ptr.str, pat->ptr.str, pat->len) != 0)
-					continue;
-			}
-			goto found;
-		}
-	}
-	else if (expr->parse == pat_parse_bin) {
-		list_for_each_entry(pat, &expr->patterns, list) {
-			if (pat->flags & PAT_F_TREE)
-				continue;
-			if (pattern.len != pat->len)
-				continue;
-			if (memcmp(pattern.ptr.ptr, pat->ptr.ptr, pat->len) != 0)
-				continue;
-			goto found;
-		}
-	}
-	else if (expr->parse == pat_parse_reg) {
-		list_for_each_entry(pat, &expr->patterns, list) {
-			if (pat->flags & PAT_F_TREE)
-				continue;
-			if (pat->flags & PAT_F_IGNORE_CASE) {
-				if (strcasecmp(pattern.ptr.reg->regstr, pat->ptr.reg->regstr) != 0)
-					continue;
-			}
-			else {
-				if (strcmp(pattern.ptr.reg->regstr, pat->ptr.reg->regstr) != 0)
-					continue;
-			}
-			goto found;
-		}
+	/* Now, we can loading patterns from the reference. */
+
+	/* Lookup for existing reference in the head. If the reference
+	 * doesn't exists, create it.
+	 */
+	expr = pattern_lookup_expr(head, ref);
+	if (!expr) {
+		expr = pattern_new_expr(head, ref, err);
+		if (!expr)
+			return 0;
 	}
 
-	/* if we get there, we didn't find the pattern */
-	return 0;
-found:
-	if (idx_elt)
-		*idx_elt = elt;
-
-	if (pat_elt)
-		*pat_elt = pat;
+	/* Load reference content in the pattern expression. */
+	list_for_each_entry(elt, &ref->head, list) {
+		if (!pat_ref_push(elt, expr, patflags, err)) {
+			if (elt->line > 0)
+				memprintf(err, "%s at line %d of file '%s'",
+				          *err, elt->line, filename);
+			return 0;
+		}
+	}
 
 	return 1;
+}
+
+/* This function executes a pattern match on a sample. It applies pattern <expr>
+ * to sample <smp>. The function returns NULL if the sample dont match. It returns
+ * non-null if the sample match. If <fill> is true and the sample match, the
+ * function returns the matched pattern. In many cases, this pattern can be a
+ * static buffer.
+ */
+struct pattern *pattern_exec_match(struct pattern_head *head, struct sample *smp, int fill)
+{
+	struct pattern_expr_list *list;
+	struct pattern *pat;
+
+	if (!head->match) {
+		if (fill) {
+			static_pattern.smp = NULL;
+			static_pattern.ref = NULL;
+			static_pattern.flags = 0;
+			static_pattern.type = SMP_T_UINT;
+			static_pattern.val.i = 1;
+		}
+		return &static_pattern;
+	}
+
+	/* convert input to string */
+	if (!sample_convert(smp, head->expect_type))
+		return NULL;
+
+	list_for_each_entry(list, &head->head, list) {
+		pat = head->match(smp, list->expr, fill);
+		if (pat)
+			return pat;
+	}
+	return NULL;
+}
+
+/* This function prune the pattern expression. */
+void pattern_prune(struct pattern_head *head)
+{
+	struct pattern_expr_list *list, *safe;
+
+	list_for_each_entry_safe(list, safe, &head->head, list) {
+		LIST_DEL(&list->list);
+		if (list->do_free) {
+			LIST_DEL(&list->expr->list);
+			head->prune(list->expr);
+			free(list->expr);
+		}
+		free(list);
+	}
+}
+
+/* This function lookup for a pattern matching the <key> and return a
+ * pointer to a pointer of the sample stoarge. If the <key> dont match,
+ * the function returns NULL. If the key cannot be parsed, the function
+ * fill <err>.
+ */
+struct sample_storage **pattern_find_smp(struct pattern_expr *expr, struct pat_ref_elt *ref)
+{
+	struct ebmb_node *node;
+	struct pattern_tree *elt;
+	struct pattern_list *pat;
+
+	for (node = ebmb_first(&expr->pattern_tree);
+	     node;
+	     node = ebmb_next(node)) {
+		elt = container_of(node, struct pattern_tree, node);
+		if (elt->ref == ref)
+			return &elt->smp;
+	}
+
+	for (node = ebmb_first(&expr->pattern_tree_2);
+	     node;
+	     node = ebmb_next(node)) {
+		elt = container_of(node, struct pattern_tree, node);
+		if (elt->ref == ref)
+			return &elt->smp;
+	}
+
+	list_for_each_entry(pat, &expr->patterns, list)
+		if (pat->pat.ref == ref)
+			return &pat->pat.smp;
+
+	return NULL;
+}
+
+/* This function search all the pattern matching the <key> and delete it.
+ * If the parsing of the input key fails, the function returns 0 and the
+ * <err> is filled, else return 1;
+ */
+int pattern_delete(struct pattern_expr *expr, struct pat_ref_elt *ref)
+{
+	expr->pat_head->delete(expr, ref);
+	return 1;
+}
+
+/* This function finalize the configuration parsing. Its set all the
+ * automatic ids
+ */
+void pattern_finalize_config(void)
+{
+	int i = 0;
+	struct pat_ref *ref, *ref2, *ref3;
+	struct list pr = LIST_HEAD_INIT(pr);
+
+	list_for_each_entry(ref, &pattern_reference, list) {
+		if (ref->unique_id == -1) {
+			/* Look for the first free id. */
+			while (1) {
+				list_for_each_entry(ref2, &pattern_reference, list) {
+					if (ref2->unique_id == i) {
+						i++;
+						break;
+					}
+				}
+				if (&ref2->list == &pattern_reference);
+					break;
+			}
+
+			/* Uses the unique id and increment it for the next entry. */
+			ref->unique_id = i;
+			i++;
+		}
+	}
+
+	/* This sort the reference list by id. */
+	list_for_each_entry_safe(ref, ref2, &pattern_reference, list) {
+		LIST_DEL(&ref->list);
+		list_for_each_entry(ref3, &pr, list) {
+			if (ref->unique_id < ref3->unique_id) {
+				LIST_ADDQ(&ref3->list, &ref->list);
+				break;
+			}
+		}
+		if (&ref3->list == &pr)
+			LIST_ADDQ(&pr, &ref->list);
+	}
+
+	/* swap root */
+	LIST_ADD(&pr, &pattern_reference);
+	LIST_DEL(&pr);
 }

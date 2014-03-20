@@ -7676,7 +7676,7 @@ unique-id-format <string>
 
   Example:
 
-        unique-id-format %{+X}o\ %Ci:%Cp_%Fi:%Fp_%Ts_%rt:%pid
+        unique-id-format %{+X}o\ %ci:%cp_%fi:%fp_%Ts_%rt:%pid
 
         will generate:
 
@@ -7696,7 +7696,7 @@ unique-id-header <name>
 
   Example:
 
-        unique-id-format %{+X}o\ %Ci:%Cp_%Fi:%Fp_%Ts_%rt:%pid
+        unique-id-format %{+X}o\ %ci:%cp_%fi:%fp_%Ts_%rt:%pid
         unique-id-header X-Unique-ID
 
         will generate:
@@ -8909,6 +8909,9 @@ The following ACL flags are currently supported :
    -i : ignore case during matching of all subsequent patterns.
    -f : load patterns from a file.
    -m : use a specific pattern matching method
+   -n : forbid the DNS resolutions
+   -M : load the file pointed by -f like a map file.
+   -u : force the unique id of the ACL
    -- : force end of flags. Useful when a string looks like one of the flags.
 
 The "-f" flag is followed by the name of a file from which all lines will be
@@ -8920,6 +8923,16 @@ beginning with a sharp, just prefix it with a space so that it is not taken for
 a comment. Depending on the data type and match method, haproxy may load the
 lines into a binary tree, allowing very fast lookups. This is true for IPv4 and
 exact string matching. In this case, duplicates will automatically be removed.
+
+The "-M" flag allows an ACL to use a map file. If this flag is set, the file is
+parsed as two column file. The first column contains the patterns used by the
+ACL, and the second column contain the samples. The sample can be used later by
+a map. This can be useful in some rare cases where an ACL would just be used to
+check for the existence of a pattern in a map before a mapping is applied.
+
+The "-u" flag forces the unique id of the ACL. This unique id is used with the
+socket interface to identify ACL and dynamically change its values. Note that a
+file is always identified by its name even if an id is set.
 
 Also, note that the "-i" flag applies to subsequent entries and not to entries
 loaded from files preceding it. For instance :
@@ -8941,6 +8954,15 @@ followed by a pattern matching method name, this method is used instead of the
 default one for the criterion. This makes it possible to match contents in ways
 that were not initially planned, or with sample fetch methods which return a
 string. The matching method also affects the way the patterns are parsed.
+
+The "-n" flag forbids the dns resolutions. It is used with the load of ip files.
+By default, if the parser cannot parse ip address it considers that the parsed
+string is maybe a domain name and try dns resolution. The flag "-n" disable this
+resolution. It is useful for detecting malformed ip lists. Note that if the DNS
+server is not reachable, the haproxy configuration parsing may last many minutes
+waiting fir the timeout. During this time no error messages are displayed. The
+flag "-n" disable this behavior. Note also that during the runtime, this
+function is disabled for the dynamic acl modifications.
 
 There are some restrictions however. Not all methods can be used with all
 sample fetch methods. Also, if "-m" is used in conjunction with "-f", it must
@@ -9342,6 +9364,11 @@ The currently available list of transformation keywords include :
   upper          Convert a string sample to upper case. This can only be placed
                  after a string sample fetch function or after a transformation
                  keyword returning a string type. The result is of type string.
+
+  hex            Converts a binary input sample to an hex string containing two
+                 hex digits per input byte. It is used to log or transfer hex
+                 dumps of some binary input data in a way that can be reliably
+                 transferred (eg: an SSL ID can be copied in a header).
 
   ipmask(<mask>) Apply a mask to an IPv4 address, and use the result for
                  lookups and storage. This can be used to make all hosts within
@@ -10745,15 +10772,19 @@ http_auth(<userlist>) : boolean
   fetch function is not really useful outside of ACLs. Currently only http
   basic auth is supported.
 
-http_auth_group(<userlist>) : group
-  Returns a boolean indicating whether the authentication data received from
-  the client match a username & password stored in the specified userlist, and
-  whether that username belongs to one of the groups supplied in ACL patterns.
+http_auth_group(<userlist>) : string
+  Returns a string corresponding to the user name found in the authentication
+  data received from the client if both the user name and password are valid
+  according to the specified userlist. The main purpose is to use it in ACLs
+  where it is then checked whether the user belongs to any group within a list.
   This fetch function is not really useful outside of ACLs. Currently only http
   basic auth is supported.
 
   ACL derivatives :
-    http_auth_group(<userlist>) : user group match
+    http_auth_group(<userlist>) : group ...
+    Returns true when the user extracted from the request and whose password is
+    valid according to the specified userlist belongs to at least one of the
+    groups.
 
 http_first_req : boolean
   Returns true when the request being processed is the first one of the
@@ -12613,10 +12644,18 @@ If an unknown command is sent, haproxy displays the usage message which reminds
 all supported commands. Some commands support a more complex syntax, generally
 it will explain what part of the command is invalid when this happens.
 
+add acl <acl> <pattern>
+  Add an entry into the acl <acl>. This command does not verify if the entry
+  already exists. This command cannot be used if the reference <acl> is a file
+  also used with a map. In this case, you must use the command 'add map' in
+  place of 'add acl'.
+
 add map <map> <key> <value>
   Add an entry into the map <map> to associate the value <value> to the key
   <key>. This command does not verify if the entry already exists. It is
-  mainly used to fill a map after a clear operation.
+  mainly used to fill a map after a clear operation. Note that if the reference
+  <map> is a file and is shared with a map, this map will contain also a new
+  pattern entry.
 
 clear counters
   Clear the max values of the statistics counters in each proxy (frontend &
@@ -12630,8 +12669,13 @@ clear counters all
   server. This has the same effect as restarting. This command is restricted
   and can only be issued on sockets configured for level "admin".
 
+clear acl <acl>
+  Remove all entries from the acl <acl>. Note that if the reference <acl> is a
+  file and is shared with a map, this map will be also cleared.
+
 clear map <map>
-  Remove all entries from the map <map>.
+  Remove all entries from the map <map>. Note that if the reference <map> is a
+  file and is shared with a acl, this acl will be also cleared.
 
 clear table <table> [ data.<type> <operator> <value> ] | [ key <key> ]
   Remove entries from the stick-table <table>.
@@ -12681,8 +12725,19 @@ clear table <table> [ data.<type> <operator> <value> ] | [ key <key> ]
         $ echo "show table http_proxy" | socat stdio /tmp/sock1
     >>> # table: http_proxy, type: ip, size:204800, used:1
 
-del map <map> <key>
+del acl <acl> [<key>|#<ref>]
+  Delete all the acl entries from the acl <acl> corresponding to the key <key>.
+  If the <ref> is used, this command delete only the listed reference. The
+  reference can be found with listing the content of the acl. Note that if the
+  reference <acl> is a file and is shared with a map, the entry will be also
+  deleted in the map.
+
+del map <map> [<key>|#<ref>]
   Delete all the map entries from the map <map> corresponding to the key <key>.
+  If the <ref> is used, this command delete only the listed reference. The
+  reference can be found with listing the content of the map. Note that if the
+  reference <map> is a file and is shared with a acl, the entry will be also
+  deleted in the map.
 
 disable agent <backend>/<server>
   Mark the auxiliary agent check as temporarily stopped.
@@ -12769,6 +12824,40 @@ enable server <backend>/<server>
   This command is restricted and can only be issued on sockets configured for
   level "admin".
 
+get map <map> <value>
+get acl <map> <value>
+  Lookup the value <value> in the map <map>. This command returns all the
+  matching patterns associated with this map. This is useful for debugging maps
+  and ACLs. The output format is composed by one line par matching type. Each
+  line is composed by space-delimited series of words.
+
+  The first two words are:
+
+     <match method>:   The match method applied. It can be "found", "bool",
+                       "int", "ip", "bin", "len", "str", "beg", "sub", "dir",
+                       "dom", "end" or "reg".
+
+     <match result>:   The result. Can be "match" or "no-match".
+
+  The following words are returned only if the pattern matches an entry.
+
+     <index type>:     "tree" or "list". The internal lookup algorithm.
+
+     <case>:           "case-insensitive" or "case-sensitive". The
+                       interpretation of the case.
+
+     <entry matched>:  match="<entry>". Return the matched pattern. It is
+                       useful with regular expressions.
+
+  The two last word are used to show the returned value and its type. With the
+  "acl" case, the pattern doesn't exist.
+
+     return=nothing:        No return because there are no "map".
+     return="<value>":      The value returned in the string format.
+     return=cannot-display: The value cannot be converted as string.
+
+     type="<type>":         The type of the returned sample.
+
 get weight <backend>/<server>
   Report the current weight and the initial weight of server <server> in
   backend <backend> or an error if either doesn't exist. The initial weight is
@@ -12794,9 +12883,10 @@ prompt
 quit
   Close the connection when in interactive mode.
 
-set map <map> <key> <value>
-  Modify the value corresponding to each key <key> in a map <map>. The new value
-  is <value>.
+set map <map> [<key>|#<ref>] <value>
+  Modify the value corresponding to each key <key> in a map <map>. If the <ref>
+  is used in place of <key>, only the entry pointed by <ref> is changed. The new
+  value is <value>.
 
 set maxconn frontend <frontend> <value>
   Dynamically change the specified frontend's maxconn setting. Any positive
@@ -12928,7 +13018,15 @@ show info
 
 show map [<map>]
   Dump info about map converters. Without argument, the list of all available
-  maps is returned. If a <map> is specified, its contents are dumped.
+  maps is returned. If a <map> is specified, its contents are dumped. The first
+  column is a unique identifier. It can be used as reference for the operation
+  "del map" and "set map". The second column is the pattern and the third column
+  is the sample if available.
+
+show acl [<acl>]
+  Dump info about acl converters. Without argument, the list of all available
+  acls is returned. If a <acl> is specified, its contents are dumped. The dump
+  format is the same than the map even for the sample value.
 
 show pools
   Dump the status of internal memory pools. This is useful to track memory

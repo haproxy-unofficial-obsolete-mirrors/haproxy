@@ -137,14 +137,17 @@ struct appctx {
 		} table;
 		struct {
 			const char *msg;	/* pointer to a persistent message to be returned in PRINT state */
+			char *err;        /* pointer to a 'must free' message to be returned in PRINT_FREE state */
 		} cli;
 		struct {
 			void *ptr;              /* multi-purpose pointer for peers */
 		} peers;
 		struct {
-			struct map_reference *ref;
-			struct map_entry *ent;
+			unsigned int display_flags;
+			struct pat_ref *ref;
+			struct pat_ref_elt *elt;
 			struct map_descriptor *desc;
+			struct pattern_expr *expr;
 			struct chunk chunk;
 		} map;
 	} ctx;					/* used by stats I/O handlers to dump the stats */

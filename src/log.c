@@ -338,7 +338,7 @@ void add_to_logformat_list(char *start, char *end, int type, struct list *list_f
  * success. At the moment, sample converters are not yet supported but fetch arguments
  * should work. The curpx->conf.args.ctx must be set by the caller.
  */
-void add_sample_to_logformat_list(char *text, char *arg, int arg_len, struct proxy *curpx, struct list *list_format, int options, int cap)
+void add_sample_to_logformat_list(char *text, char *arg, int arg_len, struct proxy *curpx, struct list *list_format, int options, int cap, const char *file, int line)
 {
 	char *cmd[2];
 	struct sample_expr *expr;
@@ -350,7 +350,7 @@ void add_sample_to_logformat_list(char *text, char *arg, int arg_len, struct pro
 	cmd[1] = "";
 	cmd_arg = 0;
 
-	expr = sample_parse_expr(cmd, &cmd_arg, &errmsg, &curpx->conf.args);
+	expr = sample_parse_expr(cmd, &cmd_arg, file, line, &errmsg, &curpx->conf.args);
 	if (!expr) {
 		Warning("parsing [%s:%d] : '%s' : sample fetch <%s> failed with : %s\n",
 		        curpx->conf.args.file, curpx->conf.args.line, fmt_directive(curpx),
@@ -403,7 +403,7 @@ void add_sample_to_logformat_list(char *text, char *arg, int arg_len, struct pro
  *  options: LOG_OPT_* to force on every node
  *  cap: all SMP_VAL_* flags supported by the consumer
  */
-void parse_logformat_string(const char *fmt, struct proxy *curproxy, struct list *list_format, int options, int cap)
+void parse_logformat_string(const char *fmt, struct proxy *curproxy, struct list *list_format, int options, int cap, const char *file, int line)
 {
 	char *sp, *str, *backfmt; /* start pointer for text parts */
 	char *arg = NULL; /* start pointer for args */
@@ -522,7 +522,7 @@ void parse_logformat_string(const char *fmt, struct proxy *curproxy, struct list
 				parse_logformat_var(arg, arg_len, var, var_len, curproxy, list_format, &options);
 				break;
 			case LF_STEXPR:
-				add_sample_to_logformat_list(var, arg, arg_len, curproxy, list_format, options, cap);
+				add_sample_to_logformat_list(var, arg, arg_len, curproxy, list_format, options, cap, file, line);
 				break;
 			case LF_TEXT:
 			case LF_SEPARATOR:
@@ -885,6 +885,7 @@ void __send_log(struct proxy *p, int level, char *message, size_t size)
 
 extern fd_set hdr_encode_map[];
 extern fd_set url_encode_map[];
+extern fd_set http_encode_map[];
 
 
 const char sess_cookie[8]     = "NIDVEOU7";	/* No cookie, Invalid cookie, cookie for a Down server, Valid cookie, Expired cookie, Old cookie, Unused, unknown */
@@ -940,6 +941,7 @@ int build_logline(struct session *s, char *dst, size_t maxsize, struct list *lis
 		struct connection *conn;
 		const char *src = NULL;
 		struct sample *key;
+		const struct chunk empty = { NULL, 0, 0 };
 
 		switch (tmp->type) {
 			case LOG_FMT_SEPARATOR:
@@ -964,7 +966,11 @@ int build_logline(struct session *s, char *dst, size_t maxsize, struct list *lis
 					key = sample_fetch_string(be, s, txn, SMP_OPT_DIR_REQ|SMP_OPT_FINAL, tmp->expr);
 				if (!key && (tmp->options & LOG_OPT_RES_CAP))
 					key = sample_fetch_string(be, s, txn, SMP_OPT_DIR_RES|SMP_OPT_FINAL, tmp->expr);
-				ret = lf_text_len(tmplog, key ? key->data.str.str : NULL, key ? key->data.str.len : 0, dst + maxsize - tmplog, tmp);
+				if (tmp->options & LOG_OPT_HTTP)
+					ret = encode_chunk(tmplog, dst + maxsize,
+					                   '%', http_encode_map, key ? &key->data.str : &empty);
+				else
+					ret = lf_text_len(tmplog, key ? key->data.str.str : NULL, key ? key->data.str.len : 0, dst + maxsize - tmplog, tmp);
 				if (ret == 0)
 					goto out;
 				tmplog = ret;
