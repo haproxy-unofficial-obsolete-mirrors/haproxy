@@ -689,7 +689,7 @@ void session_process_counters(struct session *s)
 			if (objt_server(s->target))
 				objt_server(s->target)->counters.bytes_in += bytes;
 
-			if (s->listener->counters)
+			if (s->listener && s->listener->counters)
 				s->listener->counters->bytes_in += bytes;
 
 			for (i = 0; i < MAX_SESS_STKCTR; i++) {
@@ -723,7 +723,7 @@ void session_process_counters(struct session *s)
 			if (objt_server(s->target))
 				objt_server(s->target)->counters.bytes_out += bytes;
 
-			if (s->listener->counters)
+			if (s->listener && s->listener->counters)
 				s->listener->counters->bytes_out += bytes;
 
 			for (i = 0; i < MAX_SESS_STKCTR; i++) {
@@ -1244,7 +1244,24 @@ static int process_switching_rules(struct session *s, struct channel *req, int a
 				ret = !ret;
 
 			if (ret) {
-				if (!session_set_backend(s, rule->be.backend))
+				/* If the backend name is dynamic, try to resolve the name.
+				 * If we can't resolve the name, or if any error occurs, break
+				 * the loop and fallback to the default backend.
+				 */
+				struct proxy *backend;
+
+				if (rule->dynamic) {
+					struct chunk *tmp = get_trash_chunk();
+					if (!build_logline(s, tmp->str, tmp->size, &rule->be.expr))
+						break;
+					backend = findproxy(tmp->str, PR_CAP_BE);
+					if (!backend)
+						break;
+				}
+				else
+					backend = rule->be.backend;
+
+				if (!session_set_backend(s, backend))
 					goto sw_failed;
 				break;
 			}
@@ -2447,20 +2464,22 @@ struct task *process_session(struct task *t)
 	s->fe->feconn--;
 	if (s->flags & SN_BE_ASSIGNED)
 		s->be->beconn--;
-	if (!(s->listener->options & LI_O_UNLIMITED))
-		actconn--;
 	jobs--;
-	s->listener->nbconn--;
-	if (s->listener->state == LI_FULL)
-		resume_listener(s->listener);
+	if (s->listener) {
+		if (!(s->listener->options & LI_O_UNLIMITED))
+			actconn--;
+		s->listener->nbconn--;
+		if (s->listener->state == LI_FULL)
+			resume_listener(s->listener);
 
-	/* Dequeues all of the listeners waiting for a resource */
-	if (!LIST_ISEMPTY(&global_listener_queue))
-		dequeue_all_listeners(&global_listener_queue);
+		/* Dequeues all of the listeners waiting for a resource */
+		if (!LIST_ISEMPTY(&global_listener_queue))
+			dequeue_all_listeners(&global_listener_queue);
 
-	if (!LIST_ISEMPTY(&s->fe->listener_queue) &&
-	    (!s->fe->fe_sps_lim || freq_ctr_remain(&s->fe->fe_sess_per_sec, s->fe->fe_sps_lim, 0) > 0))
-		dequeue_all_listeners(&s->fe->listener_queue);
+		if (!LIST_ISEMPTY(&s->fe->listener_queue) &&
+		    (!s->fe->fe_sps_lim || freq_ctr_remain(&s->fe->fe_sess_per_sec, s->fe->fe_sps_lim, 0) > 0))
+			dequeue_all_listeners(&s->fe->listener_queue);
+	}
 
 	if (unlikely((global.mode & MODE_DEBUG) &&
 		     (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)))) {
