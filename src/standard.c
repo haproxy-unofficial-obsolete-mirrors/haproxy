@@ -552,25 +552,8 @@ static struct sockaddr_storage *str2ip(const char *str, struct sockaddr_storage 
 		return sa;
 	}
 
-	/* try to resolve an IPv4/IPv6 hostname */
-	he = gethostbyname(str);
-	if (he) {
-		if (!sa->ss_family || sa->ss_family == AF_UNSPEC)
-			sa->ss_family = he->h_addrtype;
-		else if (sa->ss_family != he->h_addrtype)
-			goto fail;
-
-		switch (sa->ss_family) {
-		case AF_INET:
-			((struct sockaddr_in *)sa)->sin_addr = *(struct in_addr *) *(he->h_addr_list);
-			return sa;
-		case AF_INET6:
-			((struct sockaddr_in6 *)sa)->sin6_addr = *(struct in6_addr *) *(he->h_addr_list);
-			return sa;
-		}
-	}
 #ifdef USE_GETADDRINFO
-	else {
+	if (global.tune.options & GTUNE_USE_GAI) {
 		struct addrinfo hints, *result;
 
 		memset(&result, 0, sizeof(result));
@@ -600,6 +583,24 @@ static struct sockaddr_storage *str2ip(const char *str, struct sockaddr_storage 
 			freeaddrinfo(result);
 	}
 #endif
+	/* try to resolve an IPv4/IPv6 hostname */
+	he = gethostbyname(str);
+	if (he) {
+		if (!sa->ss_family || sa->ss_family == AF_UNSPEC)
+			sa->ss_family = he->h_addrtype;
+		else if (sa->ss_family != he->h_addrtype)
+			goto fail;
+
+		switch (sa->ss_family) {
+		case AF_INET:
+			((struct sockaddr_in *)sa)->sin_addr = *(struct in_addr *) *(he->h_addr_list);
+			return sa;
+		case AF_INET6:
+			((struct sockaddr_in6 *)sa)->sin6_addr = *(struct in6_addr *) *(he->h_addr_list);
+			return sa;
+		}
+	}
+
 	/* unsupported address family */
  fail:
 	return NULL;
@@ -700,6 +701,7 @@ struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high, char
 	else if (ss.ss_family == AF_UNIX) {
 		int prefix_path_len;
 		int max_path_len;
+		int adr_len;
 
 		/* complete unix socket path name during startup or soft-restart is
 		 * <unix_bind_prefix><path>.<pid>.<bak|tmp>
@@ -708,18 +710,15 @@ struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high, char
 		max_path_len = (sizeof(((struct sockaddr_un *)&ss)->sun_path) - 1) -
 			(prefix_path_len ? prefix_path_len + 1 + 5 + 1 + 3 : 0);
 
-		if (strlen(str2) > max_path_len) {
+		adr_len = strlen(str2);
+		if (adr_len > max_path_len) {
 			memprintf(err, "socket path '%s' too long (max %d)\n", str, max_path_len);
 			goto out;
 		}
 
-		if (pfx) {
+		if (prefix_path_len)
 			memcpy(((struct sockaddr_un *)&ss)->sun_path, pfx, prefix_path_len);
-			strcpy(((struct sockaddr_un *)&ss)->sun_path + prefix_path_len, str2);
-		}
-		else {
-			strcpy(((struct sockaddr_un *)&ss)->sun_path, str2);
-		}
+		memcpy(((struct sockaddr_un *)&ss)->sun_path + prefix_path_len, str2, adr_len + 1);
 	}
 	else { /* IPv4 and IPv6 */
 		port1 = strrchr(str2, ':');
@@ -2040,10 +2039,11 @@ int v6tov4(struct in_addr *sin_addr, struct in6_addr *sin6_addr)
 char *human_time(int t, short hz_div) {
 	static char rv[sizeof("24855d23h")+1];	// longest of "23h59m" and "59m59s"
 	char *p = rv;
+	char *end = rv + sizeof(rv);
 	int cnt=2;				// print two numbers
 
 	if (unlikely(t < 0 || hz_div <= 0)) {
-		sprintf(p, "?");
+		snprintf(p, end - p, "?");
 		return rv;
 	}
 
@@ -2051,22 +2051,22 @@ char *human_time(int t, short hz_div) {
 		t /= hz_div;
 
 	if (t >= DAY) {
-		p += sprintf(p, "%dd", t / DAY);
+		p += snprintf(p, end - p, "%dd", t / DAY);
 		cnt--;
 	}
 
 	if (cnt && t % DAY / HOUR) {
-		p += sprintf(p, "%dh", t % DAY / HOUR);
+		p += snprintf(p, end - p, "%dh", t % DAY / HOUR);
 		cnt--;
 	}
 
 	if (cnt && t % HOUR / MINUTE) {
-		p += sprintf(p, "%dm", t % HOUR / MINUTE);
+		p += snprintf(p, end - p, "%dm", t % HOUR / MINUTE);
 		cnt--;
 	}
 
 	if ((cnt && t % MINUTE) || !t)					// also display '0s'
-		p += sprintf(p, "%ds", t % MINUTE / SEC);
+		p += snprintf(p, end - p, "%ds", t % MINUTE / SEC);
 
 	return rv;
 }

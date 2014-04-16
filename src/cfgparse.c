@@ -506,6 +506,9 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 	else if (!strcmp(args[0], "nosplice")) {
 		global.tune.options &= ~GTUNE_USE_SPLICE;
 	}
+	else if (!strcmp(args[0], "nogetaddrinfo")) {
+		global.tune.options &= ~GTUNE_USE_GAI;
+	}
 	else if (!strcmp(args[0], "quiet")) {
 		global.mode |= MODE_QUIET;
 	}
@@ -1033,17 +1036,17 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
-		for(i=1; *args[i]; i++)
-			len += strlen(args[i])+1;
+		for (i = 1; *args[i]; i++)
+			len += strlen(args[i]) + 1;
 
 		if (global.desc)
 			free(global.desc);
 
 		global.desc = d = (char *)calloc(1, len);
 
-		d += sprintf(d, "%s", args[1]);
-		for(i=2; *args[i]; i++)
-			d += sprintf(d, " %s", args[i]);
+		d += snprintf(d, global.desc + len - d, "%s", args[1]);
+		for (i = 2; *args[i]; i++)
+			d += snprintf(d, global.desc + len - d, " %s", args[i]);
 	}
 	else if (!strcmp(args[0], "node")) {
 		int i;
@@ -2255,15 +2258,15 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			return -1;
 		}
 
-		for(i=1; *args[i]; i++)
-			len += strlen(args[i])+1;
+		for (i = 1; *args[i]; i++)
+			len += strlen(args[i]) + 1;
 
 		d = (char *)calloc(1, len);
 		curproxy->desc = d;
 
-		d += sprintf(d, "%s", args[1]);
-		for(i=2; *args[i]; i++)
-			d += sprintf(d, " %s", args[i]);
+		d += snprintf(d, curproxy->desc + len - d, "%s", args[1]);
+		for (i = 2; *args[i]; i++)
+			d += snprintf(d, curproxy->desc + len - d, " %s", args[i]);
 
 	}
 	else if (!strcmp(args[0], "disabled")) {  /* disables this proxy */
@@ -3422,14 +3425,14 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 				int i, len=0;
 				char *d;
 
-				for(i=2; *args[i]; i++)
-					len += strlen(args[i])+1;
+				for (i = 2; *args[i]; i++)
+					len += strlen(args[i]) + 1;
 
 				desc = d = (char *)calloc(1, len);
 
-				d += sprintf(d, "%s", args[2]);
-				for(i=3; *args[i]; i++)
-					d += sprintf(d, " %s", args[i]);
+				d += snprintf(d, desc + len - d, "%s", args[2]);
+				for (i = 3; *args[i]; i++)
+					d += snprintf(d, desc + len - d, " %s", args[i]);
 			}
 
 			if (!*args[2] && !global.desc)
@@ -5138,11 +5141,13 @@ stats_error_parsing:
 
 		errnum = atol(args[1]);
 		if (!strcmp(args[0], "errorloc303")) {
-			err = malloc(strlen(HTTP_303) + strlen(args[2]) + 5);
-			errlen = sprintf(err, "%s%s\r\n\r\n", HTTP_303, args[2]);
+			errlen = strlen(HTTP_303) + strlen(args[2]) + 5;
+			err = malloc(errlen);
+			errlen = snprintf(err, errlen, "%s%s\r\n\r\n", HTTP_303, args[2]);
 		} else {
-			err = malloc(strlen(HTTP_302) + strlen(args[2]) + 5);
-			errlen = sprintf(err, "%s%s\r\n\r\n", HTTP_302, args[2]);
+			errlen = strlen(HTTP_302) + strlen(args[2]) + 5;
+			err = malloc(errlen);
+			errlen = snprintf(err, errlen, "%s%s\r\n\r\n", HTTP_302, args[2]);
 		}
 
 		for (rc = 0; rc < HTTP_ERR_SIZE; rc++) {
