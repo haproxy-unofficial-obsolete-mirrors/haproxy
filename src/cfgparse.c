@@ -320,6 +320,19 @@ int warnif_rule_after_block(struct proxy *proxy, const char *file, int line, con
 	return 0;
 }
 
+/* Report a warning if a rule is placed after an 'http_request' rule.
+ * Return 1 if the warning has been emitted, otherwise 0.
+ */
+int warnif_rule_after_http_req(struct proxy *proxy, const char *file, int line, const char *arg)
+{
+	if (!LIST_ISEMPTY(&proxy->http_req_rules)) {
+		Warning("parsing [%s:%d] : a '%s' rule placed after an 'http-request' rule will still be processed before.\n",
+			file, line, arg);
+		return 1;
+	}
+	return 0;
+}
+
 /* Report a warning if a rule is placed after a reqrewrite rule.
  * Return 1 if the warning has been emitted, otherwise 0.
  */
@@ -372,13 +385,38 @@ int warnif_rule_after_use_backend(struct proxy *proxy, const char *file, int lin
 	return 0;
 }
 
+/* Report a warning if a rule is placed after a 'use-server' rule.
+ * Return 1 if the warning has been emitted, otherwise 0.
+ */
+int warnif_rule_after_use_server(struct proxy *proxy, const char *file, int line, const char *arg)
+{
+	if (!LIST_ISEMPTY(&proxy->server_rules)) {
+		Warning("parsing [%s:%d] : a '%s' rule placed after a 'use-server' rule will still be processed before.\n",
+			file, line, arg);
+		return 1;
+	}
+	return 0;
+}
+
 /* report a warning if a block rule is dangerously placed */
 int warnif_misplaced_block(struct proxy *proxy, const char *file, int line, const char *arg)
+{
+	return	warnif_rule_after_http_req(proxy, file, line, arg) ||
+		warnif_rule_after_reqxxx(proxy, file, line, arg) ||
+		warnif_rule_after_reqadd(proxy, file, line, arg) ||
+		warnif_rule_after_redirect(proxy, file, line, arg) ||
+		warnif_rule_after_use_backend(proxy, file, line, arg) ||
+		warnif_rule_after_use_server(proxy, file, line, arg);
+}
+
+/* report a warning if an http-request rule is dangerously placed */
+int warnif_misplaced_http_req(struct proxy *proxy, const char *file, int line, const char *arg)
 {
 	return	warnif_rule_after_reqxxx(proxy, file, line, arg) ||
 		warnif_rule_after_reqadd(proxy, file, line, arg) ||
 		warnif_rule_after_redirect(proxy, file, line, arg) ||
-		warnif_rule_after_use_backend(proxy, file, line, arg);
+		warnif_rule_after_use_backend(proxy, file, line, arg) ||
+		warnif_rule_after_use_server(proxy, file, line, arg);
 }
 
 /* report a warning if a reqxxx rule is dangerously placed */
@@ -386,14 +424,23 @@ int warnif_misplaced_reqxxx(struct proxy *proxy, const char *file, int line, con
 {
 	return	warnif_rule_after_reqadd(proxy, file, line, arg) ||
 		warnif_rule_after_redirect(proxy, file, line, arg) ||
-		warnif_rule_after_use_backend(proxy, file, line, arg);
+		warnif_rule_after_use_backend(proxy, file, line, arg) ||
+		warnif_rule_after_use_server(proxy, file, line, arg);
 }
 
 /* report a warning if a reqadd rule is dangerously placed */
 int warnif_misplaced_reqadd(struct proxy *proxy, const char *file, int line, const char *arg)
 {
 	return	warnif_rule_after_redirect(proxy, file, line, arg) ||
-		warnif_rule_after_use_backend(proxy, file, line, arg);
+		warnif_rule_after_use_backend(proxy, file, line, arg) ||
+		warnif_rule_after_use_server(proxy, file, line, arg);
+}
+
+/* report a warning if a redirect rule is dangerously placed */
+int warnif_misplaced_redirect(struct proxy *proxy, const char *file, int line, const char *arg)
+{
+	return	warnif_rule_after_use_backend(proxy, file, line, arg) ||
+		warnif_rule_after_use_server(proxy, file, line, arg);
 }
 
 /* Report it if a request ACL condition uses some keywords that are incompatible
@@ -1294,6 +1341,28 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 		}
 	}
+	else if (!strcmp(args[0], "max-spread-checks")) {  /* maximum time between first and last check */
+		const char *err;
+		unsigned int val;
+
+
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d]: '%s' expects an integer argument (0..50).\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
+		err = parse_time_err(args[1], &val, TIME_UNIT_MS);
+		if (err) {
+			Alert("parsing [%s:%d]: unsupported character '%c' in '%s' (wants an integer delay).\n", file, linenum, *err, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+		}
+		global.max_spread_checks = val;
+		if (global.max_spread_checks < 0) {
+			Alert("parsing [%s:%d]: '%s' needs a positive delay in milliseconds.\n",file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+		}
+	}
 	else if (strcmp(args[0], "cpu-map") == 0) {  /* map a process list to a CPU set */
 #ifdef USE_CPU_AFFINITY
 		int cur_arg, i;
@@ -1861,6 +1930,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		if (curproxy->cap & PR_CAP_BE) {
 			curproxy->fullconn = defproxy.fullconn;
 			curproxy->conn_retries = defproxy.conn_retries;
+			curproxy->max_ka_queue = defproxy.max_ka_queue;
 
 			if (defproxy.check_req) {
 				curproxy->check_req = calloc(1, defproxy.check_len);
@@ -1924,7 +1994,6 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			curproxy->timeout.tarpit = defproxy.timeout.tarpit;
 			curproxy->timeout.httpreq = defproxy.timeout.httpreq;
 			curproxy->timeout.httpka = defproxy.timeout.httpka;
-			curproxy->uri_auth  = defproxy.uri_auth;
 			curproxy->mon_net = defproxy.mon_net;
 			curproxy->mon_mask = defproxy.mon_mask;
 			if (defproxy.monitor_uri)
@@ -1960,6 +2029,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		}
 
 		curproxy->mode = defproxy.mode;
+		curproxy->uri_auth = defproxy.uri_auth; /* for stats */
 
 		/* copy default logsrvs to curproxy */
 		list_for_each_entry(tmplogsrv, &defproxy.logsrvs, list) {
@@ -2748,6 +2818,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
+		err_code |= warnif_misplaced_http_req(curproxy, file, linenum, args[0]);
 		err_code |= warnif_cond_conflicts(rule->cond,
 	                                          (curproxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR,
 	                                          file, linenum);
@@ -2843,7 +2914,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		}
 
 		LIST_ADDQ(&curproxy->redirect_rules, &rule->list);
-		err_code |= warnif_rule_after_use_backend(curproxy, file, linenum, args[0]);
+		err_code |= warnif_misplaced_redirect(curproxy, file, linenum, args[0]);
 		err_code |= warnif_cond_conflicts(rule->cond,
 	                                          (curproxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR,
 	                                          file, linenum);
@@ -2866,21 +2937,16 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
-		if (strcmp(args[2], "if") != 0 && strcmp(args[2], "unless") != 0) {
-			Alert("parsing [%s:%d] : '%s' requires either 'if' or 'unless' followed by a condition.\n",
-			      file, linenum, args[0]);
-			err_code |= ERR_ALERT | ERR_FATAL;
-			goto out;
-		}
+		if (strcmp(args[2], "if") == 0 || strcmp(args[2], "unless") == 0) {
+			if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args + 2, &errmsg)) == NULL) {
+				Alert("parsing [%s:%d] : error detected while parsing switching rule : %s.\n",
+				      file, linenum, errmsg);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
 
-		if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args + 2, &errmsg)) == NULL) {
-			Alert("parsing [%s:%d] : error detected while parsing switching rule : %s.\n",
-			      file, linenum, errmsg);
-			err_code |= ERR_ALERT | ERR_FATAL;
-			goto out;
+			err_code |= warnif_cond_conflicts(cond, SMP_VAL_FE_SET_BCK, file, linenum);
 		}
-
-		err_code |= warnif_cond_conflicts(cond, SMP_VAL_FE_SET_BCK, file, linenum);
 
 		rule = (struct switching_rule *)calloc(1, sizeof(*rule));
 		rule->cond = cond;
@@ -2998,10 +3064,10 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			else if (strcmp(args[myidx], "peers") == 0) {
 				myidx++;
 				if (!*(args[myidx])) {
-				        Alert("parsing [%s:%d] : stick-table: missing argument after '%s'.\n",
-				              file, linenum, args[myidx-1]);
-				        err_code |= ERR_ALERT | ERR_FATAL;
-				        goto out;
+					Alert("parsing [%s:%d] : stick-table: missing argument after '%s'.\n",
+					      file, linenum, args[myidx-1]);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
 				}
 				curproxy->table.peers.name = strdup(args[myidx++]);
 			}
@@ -3241,9 +3307,6 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			LIST_ADDQ(&curproxy->sticking_rules, &rule->list);
 	}
 	else if (!strcmp(args[0], "stats")) {
-		if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], NULL))
-			err_code |= ERR_WARN;
-
 		if (curproxy != &defproxy && curproxy->uri_auth == defproxy.uri_auth)
 			curproxy->uri_auth = NULL; /* we must detach from the default config */
 

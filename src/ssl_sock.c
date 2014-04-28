@@ -79,6 +79,8 @@
 #define SSL_SOCK_ST_FL_VERIFY_DONE  0x00000001
 #define SSL_SOCK_ST_FL_16K_WBFSIZE  0x00000002
 #define SSL_SOCK_SEND_UNLIMITED     0x00000004
+#define SSL_SOCK_RECV_HEARTBEAT     0x00000008
+
 /* bits 0xFFFF0000 are reserved to store verify errors */
 
 /* Verify errors macros */
@@ -180,6 +182,49 @@ int ssl_sock_bind_verifycbk(int ok, X509_STORE_CTX *x_store)
 	return 0;
 }
 
+/* Callback is called for ssl protocol analyse */
+void ssl_sock_msgcbk(int write_p, int version, int content_type, const void *buf, size_t len, SSL *ssl, void *arg)
+{
+#ifdef TLS1_RT_HEARTBEAT
+	/* test heartbeat received (write_p is set to 0
+	   for a received record) */
+	if ((content_type == TLS1_RT_HEARTBEAT) && (write_p == 0)) {
+		struct connection *conn = (struct connection *)SSL_get_app_data(ssl);
+		const unsigned char *p = buf;
+		unsigned int payload;
+
+		conn->xprt_st |= SSL_SOCK_RECV_HEARTBEAT;
+
+		/* Check if this is a CVE-2014-0160 exploitation attempt. */
+		if (*p != TLS1_HB_REQUEST)
+			return;
+
+		if (len < 1 + 2 + 16) /* 1 type + 2 size + 0 payload + 16 padding */
+			goto kill_it;
+
+		payload = (p[1] * 256) + p[2];
+		if (3 + payload + 16 <= len)
+			return; /* OK no problem */
+	kill_it:
+		/* We have a clear heartbleed attack (CVE-2014-0160), the
+		 * advertised payload is larger than the advertised packet
+		 * length, so we have garbage in the buffer between the
+		 * payload and the end of the buffer (p+len). We can't know
+		 * if the SSL stack is patched, and we don't know if we can
+		 * safely wipe out the area between p+3+len and payload.
+		 * So instead, we prevent the response from being sent by
+		 * setting the max_send_fragment to 0 and we report an SSL
+		 * error, which will kill this connection. It will be reported
+		 * above as SSL_ERROR_SSL while an other handshake failure with
+		 * a heartbeat message will be reported as SSL_ERROR_SYSCALL.
+		 */
+		ssl->max_send_fragment = 0;
+		SSLerr(SSL_F_TLS1_HEARTBEAT, SSL_R_SSL_HANDSHAKE_FAILURE);
+		return;
+	}
+#endif
+}
+
 #ifdef OPENSSL_NPN_NEGOTIATED
 /* This callback is used so that the server advertises the list of
  * negociable protocols for NPN.
@@ -270,149 +315,36 @@ static int ssl_sock_switchctx_cbk(SSL *ssl, int *al, struct bind_conf *s)
 #endif /* SSL_CTRL_SET_TLSEXT_HOSTNAME */
 
 #ifndef OPENSSL_NO_DH
-
-static DH *ssl_get_dh_1024(void)
-{
-	DH *dh = DH_new();
-	if (dh) {
-		dh->p = get_rfc2409_prime_1024(NULL);
-		/* See RFC 2409, Section 6 "Oakley Groups"
-		   for the reason why we use 2 as a generator.
-		*/
-		BN_dec2bn(&dh->g, "2");
-		if (!dh->p || !dh->g) {
-			DH_free(dh);
-			dh = NULL;
-		}
-	}
-	return dh;
-}
-
-static DH *ssl_get_dh_2048(void)
-{
-	DH *dh = DH_new();
-	if (dh) {
-		dh->p = get_rfc3526_prime_2048(NULL);
-		/* See RFC 3526, Section 3 "2048-bit MODP Group"
-		   for the reason why we use 2 as a generator.
-		 */
-		BN_dec2bn(&dh->g, "2");
-		if (!dh->p || !dh->g) {
-			DH_free(dh);
-			dh = NULL;
-		}
-	}
-	return dh;
-}
-
-static DH *ssl_get_dh_3072(void)
-{
-	DH *dh = DH_new();
-	if (dh) {
-		dh->p = get_rfc3526_prime_3072(NULL);
-		/* See RFC 3526, Section 4 "3072-bit MODP Group"
-		   for the reason why we use 2 as a generator.
-		 */
-		BN_dec2bn(&dh->g, "2");
-		if (!dh->p || !dh->g) {
-			DH_free(dh);
-			dh = NULL;
-		}
-	}
-	return dh;
-}
-
-static DH *ssl_get_dh_4096(void)
-{
-	DH *dh = DH_new();
-	if (dh) {
-		dh->p = get_rfc3526_prime_4096(NULL);
-		/* See RFC 3526, Section 5 "4096-bit MODP Group"
-		   for the reason why we use 2 as a generator.
-		 */
-		BN_dec2bn(&dh->g, "2");
-		if (!dh->p || !dh->g) {
-			DH_free(dh);
-			dh = NULL;
-		}
-	}
-	return dh;
-}
-
-static DH *ssl_get_dh_6144(void)
-{
-	DH *dh = DH_new();
-	if (dh) {
-		dh->p = get_rfc3526_prime_6144(NULL);
-		/* See RFC 3526, Section 6 "6144-bit MODP Group"
-		   for the reason why we use 2 as a generator.
-		 */
-		BN_dec2bn(&dh->g, "2");
-		if (!dh->p || !dh->g) {
-			DH_free(dh);
-			dh = NULL;
-		}
-	}
-	return dh;
-}
-
-static DH *ssl_get_dh_8192(void)
-{
-	DH *dh = DH_new();
-	if (dh) {
-		dh->p = get_rfc3526_prime_8192(NULL);
-		/* See RFC 3526, Section 7 "8192-bit MODP Group"
-		   for the reason why we use 2 as a generator.
-		 */
-		BN_dec2bn(&dh->g, "2");
-		if (!dh->p || !dh->g) {
-			DH_free(dh);
-			dh = NULL;
-		}
-	}
-	return dh;
-}
-
-/* Returns Diffie-Hellman parameters matching the private key length */
-static DH *ssl_get_tmp_dh(SSL *ssl, int export, int keylen)
-{
-	DH *dh = NULL;
-	EVP_PKEY *pkey = SSL_get_privatekey(ssl);
-	int type = pkey ? EVP_PKEY_type(pkey->type) : EVP_PKEY_NONE;
-
-	if (type == EVP_PKEY_RSA || type == EVP_PKEY_DSA) {
-		keylen = EVP_PKEY_bits(pkey);
-	}
-
-	if (keylen >= 8192) {
-		dh = ssl_get_dh_8192();
-	}
-	else if (keylen >= 6144) {
-		dh = ssl_get_dh_6144();
-	}
-	else if (keylen >= 4096) {
-		dh = ssl_get_dh_4096();
-	}
-	else if (keylen >= 3072) {
-		dh = ssl_get_dh_3072();
-	}
-	else if (keylen >= 2048) {
-		dh = ssl_get_dh_2048();
-	}
-	else {
-		dh = ssl_get_dh_1024();
-	}
-
-	return dh;
-}
-
 /* Loads Diffie-Hellman parameter from a file. Returns 1 if loaded, else -1
    if an error occured, and 0 if parameter not found. */
-static int ssl_sock_load_dh_params(SSL_CTX *ctx, const char *file)
+int ssl_sock_load_dh_params(SSL_CTX *ctx, const char *file)
 {
 	int ret = -1;
 	BIO *in;
 	DH *dh = NULL;
+	/* If not present, use parameters generated using 'openssl dhparam 1024 -C':
+	 * -----BEGIN DH PARAMETERS-----
+	 * MIGHAoGBAJJAJDXDoS5E03MNjnjK36eOL1tRqVa/9NuOVlI+lpXmPjJQbP65EvKn
+	 * fSLnG7VMhoCJO4KtG88zf393ltP7loGB2bofcDSr+x+XsxBM8yA/Zj6BmQt+CQ9s
+	 * TF7hoOV+wXTT6ErZ5y5qx9pq6hLfKXwTGFT78hrE6HnCO7xgtPdTAgEC
+	 * -----END DH PARAMETERS-----
+	*/
+	static const unsigned char dh1024_p[] = {
+		0x92, 0x40, 0x24, 0x35, 0xC3, 0xA1, 0x2E, 0x44, 0xD3, 0x73, 0x0D, 0x8E,
+		0x78, 0xCA, 0xDF, 0xA7, 0x8E, 0x2F, 0x5B, 0x51, 0xA9, 0x56, 0xBF, 0xF4,
+		0xDB, 0x8E, 0x56, 0x52, 0x3E, 0x96, 0x95, 0xE6, 0x3E, 0x32, 0x50, 0x6C,
+		0xFE, 0xB9, 0x12, 0xF2, 0xA7, 0x7D, 0x22, 0xE7, 0x1B, 0xB5, 0x4C, 0x86,
+		0x80, 0x89, 0x3B, 0x82, 0xAD, 0x1B, 0xCF, 0x33, 0x7F, 0x7F, 0x77, 0x96,
+		0xD3, 0xFB, 0x96, 0x81, 0x81, 0xD9, 0xBA, 0x1F, 0x70, 0x34, 0xAB, 0xFB,
+		0x1F, 0x97, 0xB3, 0x10, 0x4C, 0xF3, 0x20, 0x3F, 0x66, 0x3E, 0x81, 0x99,
+		0x0B, 0x7E, 0x09, 0x0F, 0x6C, 0x4C, 0x5E, 0xE1, 0xA0, 0xE5, 0x7E, 0xC1,
+		0x74, 0xD3, 0xE8, 0x4A, 0xD9, 0xE7, 0x2E, 0x6A, 0xC7, 0xDA, 0x6A, 0xEA,
+		0x12, 0xDF, 0x29, 0x7C, 0x13, 0x18, 0x54, 0xFB, 0xF2, 0x1A, 0xC4, 0xE8,
+		0x79, 0xC2, 0x3B, 0xBC, 0x60, 0xB4, 0xF7, 0x53,
+	};
+	static const unsigned char dh1024_g[] = {
+		0x02,
+	};
 
 	in = BIO_new(BIO_s_file());
 	if (in == NULL)
@@ -422,17 +354,28 @@ static int ssl_sock_load_dh_params(SSL_CTX *ctx, const char *file)
 		goto end;
 
 	dh = PEM_read_bio_DHparams(in, NULL, ctx->default_passwd_callback, ctx->default_passwd_callback_userdata);
-	if (dh) {
-		ret = 1;
-		SSL_CTX_set_tmp_dh(ctx, dh);
-	}
-	else {
+	if (!dh) {
 		/* Clear openssl global errors stack */
 		ERR_clear_error();
 
-		SSL_CTX_set_tmp_dh_callback(ctx, ssl_get_tmp_dh);
+		dh = DH_new();
+		if (dh == NULL)
+			goto end;
+
+		dh->p = BN_bin2bn(dh1024_p, sizeof(dh1024_p), NULL);
+		if (dh->p == NULL)
+			goto end;
+
+		dh->g = BN_bin2bn(dh1024_g, sizeof(dh1024_g), NULL);
+		if (dh->g == NULL)
+			goto end;
+
 		ret = 0; /* DH params not found */
 	}
+	else
+		ret = 1;
+
+	SSL_CTX_set_tmp_dh(ctx, dh);
 
 end:
 	if (dh)
@@ -887,6 +830,8 @@ int ssl_sock_prepare_ctx(struct bind_conf *bind_conf, SSL_CTX *ctx, struct proxy
 	}
 
 	SSL_CTX_set_info_callback(ctx, ssl_sock_infocbk);
+	SSL_CTX_set_msg_callback(ctx, ssl_sock_msgcbk);
+
 #ifdef OPENSSL_NPN_NEGOTIATED
 	if (bind_conf->npn_str)
 		SSL_CTX_set_next_protos_advertised_cb(ctx, ssl_sock_advertise_npn_protos, bind_conf);
@@ -1394,13 +1339,26 @@ int ssl_sock_handshake(struct connection *conn, unsigned int flag)
 				if (!errno && conn->flags & CO_FL_WAIT_L4_CONN)
 					conn->flags &= ~CO_FL_WAIT_L4_CONN;
 				if (!conn->err_code) {
-					if (!((SSL *)conn->xprt_ctx)->packet_length)
-						if (!errno)
-							conn->err_code = CO_ER_SSL_EMPTY;
+					if (!((SSL *)conn->xprt_ctx)->packet_length) {
+						if (!errno) {
+							if (conn->xprt_st & SSL_SOCK_RECV_HEARTBEAT)
+								conn->err_code = CO_ER_SSL_HANDSHAKE_HB;
+							else
+								conn->err_code = CO_ER_SSL_EMPTY;
+						}
+						else {
+							if (conn->xprt_st & SSL_SOCK_RECV_HEARTBEAT)
+								conn->err_code = CO_ER_SSL_HANDSHAKE_HB;
+							else
+								conn->err_code = CO_ER_SSL_ABORT;
+						}
+					}
+					else {
+						if (conn->xprt_st & SSL_SOCK_RECV_HEARTBEAT)
+							conn->err_code = CO_ER_SSL_HANDSHAKE_HB;
 						else
-							conn->err_code = CO_ER_SSL_ABORT;
-					else
-						conn->err_code = CO_ER_SSL_HANDSHAKE;
+							conn->err_code = CO_ER_SSL_HANDSHAKE;
+					}
 				}
 				goto out_error;
 			}
@@ -1413,7 +1371,8 @@ int ssl_sock_handshake(struct connection *conn, unsigned int flag)
 				 */
 				conn_drain(conn);
 				if (!conn->err_code)
-					conn->err_code = CO_ER_SSL_HANDSHAKE;
+					conn->err_code = (conn->xprt_st & SSL_SOCK_RECV_HEARTBEAT) ?
+						CO_ER_SSL_KILLED_HB : CO_ER_SSL_HANDSHAKE;
 				goto out_error;
 			}
 		}
@@ -1447,13 +1406,26 @@ int ssl_sock_handshake(struct connection *conn, unsigned int flag)
 			if (!errno && conn->flags & CO_FL_WAIT_L4_CONN)
 				conn->flags &= ~CO_FL_WAIT_L4_CONN;
 
-			if (!((SSL *)conn->xprt_ctx)->packet_length)
-				if (!errno)
-					conn->err_code = CO_ER_SSL_EMPTY;
+			if (!((SSL *)conn->xprt_ctx)->packet_length) {
+				if (!errno) {
+					if (conn->xprt_st & SSL_SOCK_RECV_HEARTBEAT)
+						conn->err_code = CO_ER_SSL_HANDSHAKE_HB;
+					else
+						conn->err_code = CO_ER_SSL_EMPTY;
+				}
+				else {
+					if (conn->xprt_st & SSL_SOCK_RECV_HEARTBEAT)
+						conn->err_code = CO_ER_SSL_HANDSHAKE_HB;
+					else
+						conn->err_code = CO_ER_SSL_ABORT;
+				}
+			}
+			else {
+				if (conn->xprt_st & SSL_SOCK_RECV_HEARTBEAT)
+					conn->err_code = CO_ER_SSL_HANDSHAKE_HB;
 				else
-					conn->err_code = CO_ER_SSL_ABORT;
-			else
-				conn->err_code = CO_ER_SSL_HANDSHAKE;
+					conn->err_code = CO_ER_SSL_HANDSHAKE;
+			}
 			goto out_error;
 		}
 		else {
@@ -1465,7 +1437,8 @@ int ssl_sock_handshake(struct connection *conn, unsigned int flag)
 			 */
 			conn_drain(conn);
 			if (!conn->err_code)
-				conn->err_code = CO_ER_SSL_HANDSHAKE;
+				conn->err_code = (conn->xprt_st & SSL_SOCK_RECV_HEARTBEAT) ?
+					CO_ER_SSL_KILLED_HB : CO_ER_SSL_HANDSHAKE;
 			goto out_error;
 		}
 	}

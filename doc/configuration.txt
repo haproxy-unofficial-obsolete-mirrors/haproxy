@@ -1,10 +1,10 @@
                          ----------------------
-                                 HAProxy
+                                HAProxy
                           Configuration Manual
                          ----------------------
-                             version 1.5
+                              version 1.5
                              willy tarreau
-                              2014/02/03
+                              2014/04/26
 
 
 This document covers the configuration language as implemented in the version
@@ -69,11 +69,12 @@ Summary
 7.1.6.      Matching IPv4 and IPv6 addresses
 7.2.      Using ACLs to form conditions
 7.3.      Fetching samples
-7.3.1.        Fetching samples from internal states
-7.3.2.        Fetching samples at Layer 4
-7.3.3.        Fetching samples at Layer 5
-7.3.4.        Fetching samples from buffer contents (Layer 6)
-7.3.5.        Fetching HTTP samples (Layer 7)
+7.3.1.        Converters
+7.3.2.        Fetching samples from internal states
+7.3.3.        Fetching samples at Layer 4
+7.3.4.        Fetching samples at Layer 5
+7.3.5.        Fetching samples from buffer contents (Layer 6)
+7.3.6.        Fetching HTTP samples (Layer 7)
 7.4.      Pre-defined ACLs
 
 8.    Logging
@@ -463,6 +464,7 @@ The following keywords are supported in the "global" section :
    - unix-bind
 
  * Performance tuning
+   - max-spread-checks
    - maxconn
    - maxconnrate
    - maxcomprate
@@ -718,6 +720,16 @@ description <text>
 
 3.2. Performance tuning
 -----------------------
+
+max-spread-checks <delay in milliseconds>
+  By default, haproxy tries to spread the start of health checks across the
+  smallest health check interval of all the servers in a farm. The principle is
+  to avoid hammering services running on the same server. But when using large
+  check intervals (10 seconds or more), the last servers in the farm take some
+  time before starting to be tested, which can be a problem. This parameter is
+  used to enforce an upper bound on delay between the first and the last check,
+  even if the servers' check intervals are larger. When servers run with
+  shorter intervals, their intervals will be respected though.
 
 maxconn <number>
   Sets the maximum per-process number of concurrent connections to <number>. It
@@ -1255,14 +1267,11 @@ http-check expect                         -          -         X         X
 http-check send-state                     X          -         X         X
 http-request                              -          X         X         X
 http-response                             -          X         X         X
-tcp-check connect                         -          -         X         X
-tcp-check expect                          -          -         X         X
-tcp-check send                            -          -         X         X
-tcp-check send-binary                     -          -         X         X
 http-send-name-header                     -          -         X         X
 id                                        -          X         X         X
 ignore-persist                            -          X         X         X
 log                                  (*)  X          X         X         X
+max-keep-alive-queue                      X          -         X         X
 maxconn                                   X          X         X         -
 mode                                      X          X         X         X
 monitor fail                              -          X         X         -
@@ -1366,6 +1375,10 @@ stick on                                  -          -         X         X
 stick store-request                       -          -         X         X
 stick store-response                      -          -         X         X
 stick-table                               -          -         X         X
+tcp-check connect                         -          -         X         X
+tcp-check expect                          -          -         X         X
+tcp-check send                            -          -         X         X
+tcp-check send-binary                     -          -         X         X
 tcp-request connection                    -          X         X         -
 tcp-request content                       -          X         X         X
 tcp-request inspect-delay                 -          X         X         X
@@ -1504,7 +1517,7 @@ backlog <conns>
 
 
 balance <algorithm> [ <arguments> ]
-balance url_param <param> [check_post [<max_wait>]]
+balance url_param <param> [check_post]
   Define the load balancing algorithm to be used in a backend.
   May be used in sections :   defaults | frontend | listen | backend
                                  yes   |    no    |   yes  |   yes
@@ -1609,23 +1622,13 @@ balance url_param <param> [check_post [<max_wait>]]
                   If the modifier "check_post" is used, then an HTTP POST
                   request entity will be searched for the parameter argument,
                   when it is not found in a query string after a question mark
-                  ('?') in the URL. Optionally, specify a number of octets to
-                  wait for before attempting to search the message body. If the
-                  entity can not be searched, then round robin is used for each
-                  request. For instance, if your clients always send the LB
-                  parameter in the first 128 bytes, then specify that. The
-                  default is 48. The entity data will not be scanned until the
-                  required number of octets have arrived at the gateway, this
-                  is the minimum of: (default/max_wait, Content-Length or first
-                  chunk length). If Content-Length is missing or zero, it does
-                  not need to wait for more data than the client promised to
-                  send. When Content-Length is present and larger than
-                  <max_wait>, then waiting is limited to <max_wait> and it is
-                  assumed that this will be enough data to search for the
-                  presence of the parameter. In the unlikely event that
-                  Transfer-Encoding: chunked is used, only the first chunk is
+                  ('?') in the URL. The message body will only start to be
+                  analyzed once either the advertised amount of data has been
+                  received or the request buffer is full. In the unlikely event
+                  that chunked encoding is used, only the first chunk is
                   scanned. Parameter values separated by a chunk boundary, may
-                  be randomly balanced if at all.
+                  be randomly balanced if at all. This keyword used to support
+                  an optional <max_wait> parameter which is now ignored.
 
                   If the parameter is found followed by an equal sign ('=') and
                   a value, then the value is hashed and divided by the total
@@ -1681,9 +1684,6 @@ balance url_param <param> [check_post [<max_wait>]]
     <arguments> is an optional list of arguments which may be needed by some
                 algorithms. Right now, only "url_param" and "uri" support an
                 optional argument.
-
-                balance uri [len <len>] [depth <depth>]
-                balance url_param <param> [check_post [<max_wait>]]
 
   The load balancing algorithm of a backend is set to roundrobin when no other
   algorithm, mode nor option have been set. The algorithm may only be set once
@@ -2847,8 +2847,13 @@ http-check send-state
 
 http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
               add-header <name> <fmt> | set-header <name> <fmt> |
-              set-nice <nice> | set-log-level <level> | set-tos <tos> |
-              set-mark <mark> }
+              del-header <name> | set-nice <nice> | set-log-level <level> |
+              set-tos <tos> | set-mark <mark> |
+              add-acl(<file name>) <key fmt> |
+              del-acl(<file name>) <key fmt> |
+              del-map(<file name>) <key fmt> |
+              set-map(<file name>) <key fmt> <value fmt>
+             }
              [ { if | unless } <condition> ]
   Access control for Layer 7 requests
 
@@ -2907,6 +2912,9 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
       information to the server, where the header must not be manipulated by
       external users.
 
+    - "del-header" removes all HTTP header fields whose name is specified in
+      <name>.
+
     - "set-nice" sets the "nice" factor of the current request being processed.
       It only has effect against the other requests being processed at the same
       time. The default value is 0, unless altered by the "nice" setting on the
@@ -2941,6 +2949,39 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
       downloads). This works on Linux kernels 2.6.32 and above and requires
       admin privileges.
 
+    - "add-acl" is used to add a new entry into an ACL. The ACL must be loaded
+      from a file (even a dummy empty file). The file name of the ACL to be
+      updated is passed between parentheses. It takes one argument: <key fmt>,
+      which follows log-format rules, to collect content of the new entry. It
+      performs a lookup in the ACL before insertion, to avoid duplicated (or
+      more) values. This lookup is done by a linear search and can be expensive
+      with large lists! It is the equivalent of the "add acl" command from the
+      stats socket, but can be triggered by an HTTP request.
+
+    - "del-acl" is used to delete an entry from an ACL. The ACL must be loaded
+      from a file (even a dummy empty file). The file name of the ACL to be
+      updated is passed between parentheses. It takes one argument: <key fmt>,
+      which follows log-format rules, to collect content of the entry to delete.
+      It is the equivalent of the "del acl" command from the stats socket, but
+      can be triggered by an HTTP request.
+
+    - "del-map" is used to delete an entry from a MAP. The MAP must be loaded
+      from a file (even a dummy empty file). The file name of the MAP to be
+      updated is passed between parentheses. It takes one argument: <key fmt>,
+      which follows log-format rules, to collect content of the entry to delete.
+      It takes one argument: "file name" It is the equivalent of the "del map"
+      command from the stats socket, but can be triggered by an HTTP request.
+
+    - "set-map" is used to add a new entry into a MAP. The MAP must be loaded
+      from a file (even a dummy empty file). The file name of the MAP to be
+      updated is passed between parentheses. It takes 2 arguments: <key fmt>,
+      which follows log-format rules, used to collect MAP key, and <value fmt>,
+      which follows log-format rules, used to collect content for the new entry.
+      It performs a lookup in the MAP before insertion, to avoid duplicated (or
+      more) values. This lookup is done by a linear search and can be expensive
+      with large lists! It is the equivalent of the "set map" command from the
+      stats socket, but can be triggered by an HTTP request.
+
   There is no limit to the number of http-request statements per instance.
 
   It is important to know that http-request rules are processed very early in
@@ -2973,12 +3014,37 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
         http-request set-header X-SSL-Client-NotBefore %{+Q}[ssl_c_notbefore]
         http-request set-header X-SSL-Client-NotAfter  %{+Q}[ssl_c_notafter]
 
+  Example:
+        acl key req.hdr(X-Add-Acl-Key) -m found
+        acl add path /addacl
+        acl del path /delacl
+
+        acl myhost hdr(Host) -f myhost.lst
+
+        http-request add-acl(myhost.lst) %[req.hdr(X-Add-Acl-Key)] if key add
+        http-request del-acl(myhost.lst) %[req.hdr(X-Add-Acl-Key)] if key del
+
+  Example:
+        acl value  req.hdr(X-Value) -m found
+        acl setmap path /setmap
+        acl delmap path /delmap
+
+        use_backend bk_appli if { hdr(Host),map_str(map.lst) -m found }
+
+        http-request set-map(map.lst) %[src] %[req.hdr(X-Value)] if setmap value
+        http-request del-map(map.lst) %[src]                     if delmap
+
   See also : "stats http-request", section 3.4 about userlists and section 7
              about ACL usage.
 
 http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
-                set-header <name> <fmt> | set-log-level <level> |
-                set-mark <mark> | set-tos <tos> }
+                set-header <name> <fmt> | del-header <name> |
+                set-log-level <level> | set-mark <mark> | set-tos <tos> |
+                add-acl(<file name>) <key fmt> |
+                del-acl(<file name>) <key fmt> |
+                del-map(<file name>) <key fmt> |
+                set-map(<file name>) <key fmt> <value fmt>
+              }
               [ { if | unless } <condition> ]
   Access control for Layer 7 responses
 
@@ -3014,6 +3080,9 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
       information to the server, where the header must not be manipulated by
       external users.
 
+    - "del-header" removes all HTTP header fields whose name is specified in
+      <name>.
+
     - "set-nice" sets the "nice" factor of the current request being processed.
       It only has effect against the other requests being processed at the same
       time. The default value is 0, unless altered by the "nice" setting on the
@@ -3048,6 +3117,39 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
       downloads). This works on Linux kernels 2.6.32 and above and requires
       admin privileges.
 
+    - "add-acl" is used to add a new entry into an ACL. The ACL must be loaded
+      from a file (even a dummy empty file). The file name of the ACL to be
+      updated is passed between parentheses. It takes one argument: <key fmt>,
+      which follows log-format rules, to collect content of the new entry. It
+      performs a lookup in the ACL before insertion, to avoid duplicated (or
+      more) values. This lookup is done by a linear search and can be expensive
+      with large lists! It is the equivalent of the "add acl" command from the
+      stats socket, but can be triggered by an HTTP response.
+
+    - "del-acl" is used to delete an entry from an ACL. The ACL must be loaded
+      from a file (even a dummy empty file). The file name of the ACL to be
+      updated is passed between parentheses. It takes one argument: <key fmt>,
+      which follows log-format rules, to collect content of the entry to delete.
+      It is the equivalent of the "del acl" command from the stats socket, but
+      can be triggered by an HTTP response.
+
+    - "del-map" is used to delete an entry from a MAP. The MAP must be loaded
+      from a file (even a dummy empty file). The file name of the MAP to be
+      updated is passed between parentheses. It takes one argument: <key fmt>,
+      which follows log-format rules, to collect content of the entry to delete.
+      It takes one argument: "file name" It is the equivalent of the "del map"
+      command from the stats socket, but can be triggered by an HTTP response.
+
+    - "set-map" is used to add a new entry into a MAP. The MAP must be loaded
+      from a file (even a dummy empty file). The file name of the MAP to be
+      updated is passed between parentheses. It takes 2 arguments: <key fmt>,
+      which follows log-format rules, used to collect MAP key, and <value fmt>,
+      which follows log-format rules, used to collect content for the new entry.
+      It performs a lookup in the MAP before insertion, to avoid duplicated (or
+      more) values. This lookup is done by a linear search and can be expensive
+      with large lists! It is the equivalent of the "set map" command from the
+      stats socket, but can be triggered by an HTTP response.
+
   There is no limit to the number of http-response statements per instance.
 
   It is important to know that http-response rules are processed very early in
@@ -3055,189 +3157,24 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
   added by "add-header"/"set-header" are visible by almost all further ACL
   rules.
 
+  Example:
+         acl key_acl res.hdr(X-Acl-Key) -m found
+
+         acl myhost hdr(Host) -f myhost.lst
+
+         http-response add-acl(myhost.lst) %[res.hdr(X-Acl-Key)] if key_acl
+         http-response del-acl(myhost.lst) %[res.hdr(X-Acl-Key)] if key_acl
+
+  Example:
+         acl value  res.hdr(X-Value) -m found
+
+         use_backend bk_appli if { hdr(Host),map_str(map.lst) -m found }
+
+         http-response set-map(map.lst) %[src] %[res.hdr(X-Value)] if value
+         http-response del-map(map.lst) %[src]                     if ! value
+
   See also : "http-request", section 3.4 about userlists and section 7 about
              ACL usage.
-
-
-tcp-check connect [params*]
-  Opens a new connection
-  May be used in sections:   defaults | frontend | listen | backend
-                               no     |    no    |   yes  |   yes
-
-  When an application lies on more than a single TCP port or when HAProxy
-  load-balance many services in a single backend, it makes sense to probe all
-  the services individually before considering a server as operational.
-
-  When there are no TCP port configured on the server line neither server port
-  directive, then the 'tcp-check connect port <port>' must be the first step
-  of the sequence.
-
-  In a tcp-check ruleset a 'connect' is required, it is also mandatory to start
-  the ruleset with a 'connect' rule. Purpose is to ensure admin know what they
-  do.
-
-  Parameters :
-    They are optional and can be used to describe how HAProxy should open and
-    use the TCP connection.
-
-    port      if not set, check port or server port is used.
-              It tells HAProxy where to open the connection to.
-              <port> must be a valid TCP port source integer, from 1 to 65535.
-
-    send-proxy   send a PROXY protocol string
-
-    ssl          opens a ciphered connection
-
-    Examples:
-         # check HTTP and HTTPs services on a server.
-         # first open port 80 thanks to server line port directive, then
-         # tcp-check opens port 443, ciphered and run a request on it:
-         option tcp-check
-         tcp-check connect
-         tcp-check send GET\ /\ HTTP/1.0\r\n
-         tcp-check send Host:\ haproxy.1wt.eu\r\n
-         tcp-check send \r\n
-         tcp-check expect rstring (2..|3..)
-         tcp-check connect port 443 ssl
-         tcp-check send GET\ /\ HTTP/1.0\r\n
-         tcp-check send Host:\ haproxy.1wt.eu\r\n
-         tcp-check send \r\n
-         tcp-check expect rstring (2..|3..)
-         server www 10.0.0.1 check port 80
-
-         # check both POP and IMAP from a single server:
-         option tcp-check
-         tcp-check connect port 110
-         tcp-check expect string +OK\ POP3\ ready
-         tcp-check connect port 143
-         tcp-check expect string *\ OK\ IMAP4\ ready
-         server mail 10.0.0.1 check
-
-  See also : "option tcp-check", "tcp-check send", "tcp-check expect"
-
-
-tcp-check expect [!] <match> <pattern>
-  Specify data to be collected and analysed during a generic health check
-  May be used in sections:   defaults | frontend | listen | backend
-                               no     |    no    |   yes  |   yes
-
-  Arguments :
-    <match>   is a keyword indicating how to look for a specific pattern in the
-              response. The keyword may be one of "string", "rstring" or
-              binary.
-              The keyword may be preceded by an exclamation mark ("!") to negate
-              the match. Spaces are allowed between the exclamation mark and the
-              keyword. See below for more details on the supported keywords.
-
-    <pattern> is the pattern to look for. It may be a string or a regular
-              expression. If the pattern contains spaces, they must be escaped
-              with the usual backslash ('\').
-              If the match is set to binary, then the pattern must be passed as
-              a serie of hexadecimal digits in an even number. Each sequence of
-              two digits will represent a byte. The hexadecimal digits may be
-              used upper or lower case.
-
-
-  The available matches are intentionally similar to their http-check cousins :
-
-    string <string> : test the exact string matches in the response buffer.
-                      A health check response will be considered valid if the
-                      response's buffer contains this exact string. If the
-                      "string" keyword is prefixed with "!", then the response
-                      will be considered invalid if the body contains this
-                      string. This can be used to look for a mandatory pattern
-                      in a protocol response, or to detect a failure when a
-                      specific error appears in a protocol banner.
-
-    rstring <regex> : test a regular expression on the response buffer.
-                      A health check response will be considered valid if the
-                      response's buffer matches this expression. If the
-                      "rstring" keyword is prefixed with "!", then the response
-                      will be considered invalid if the body matches the
-                      expression.
-
-    binary <hexstring> : test the exact string in its hexadecimal form matches
-                         in the response buffer. A health check response will
-                         be considered valid if the response's buffer contains
-                         this exact hexadecimal string.
-                         Purpose is to match data on binary protocols.
-
-  It is important to note that the responses will be limited to a certain size
-  defined by the global "tune.chksize" option, which defaults to 16384 bytes.
-  Thus, too large responses may not contain the mandatory pattern when using
-  "string", "rstring" or binary. If a large response is absolutely required, it
-  is possible to change the default max size by setting the global variable.
-  However, it is worth keeping in mind that parsing very large responses can
-  waste some CPU cycles, especially when regular expressions are used, and that
-  it is always better to focus the checks on smaller resources. Also, in its
-  current state, the check will not find any string nor regex past a null
-  character in the response. Similarly it is not possible to request matching
-  the null character.
-
-  Examples :
-         # perform a POP check
-         option tcp-check
-         tcp-check expect string +OK\ POP3\ ready
-
-         # perform an IMAP check
-         option tcp-check
-         tcp-check expect string *\ OK\ IMAP4\ ready
-
-         # look for the redis master server
-         option tcp-check
-         tcp-check send PING\r\n
-         tcp-check expect +PONG
-         tcp-check send info\ replication\r\n
-         tcp-check expect string role:master
-         tcp-check send QUIT\r\n
-         tcp-check expect string +OK
-
-
-  See also : "option tcp-check", "tcp-check connect", "tcp-check send",
-             "tcp-check send-binary", "http-check expect", tune.chksize
-
-
-tcp-check send <data>
-  Specify a string to be sent as a question during a generic health check
-  May be used in sections:   defaults | frontend | listen | backend
-                               no     |    no    |   yes  |   yes
-
-    <data> : the data to be sent as a question during a generic health check
-             session. For now, <data> must be a string.
-
-  Examples :
-         # look for the redis master server
-         option tcp-check
-         tcp-check send info\ replication\r\n
-         tcp-check expect string role:master
-
-  See also : "option tcp-check", "tcp-check connect", "tcp-check expect",
-             "tcp-check send-binary", tune.chksize
-
-
-tcp-check send-binary <hexastring>
-  Specify an hexa digits string to be sent as a binary question during a raw
-  tcp health check
-  May be used in sections:   defaults | frontend | listen | backend
-                               no     |    no    |   yes  |   yes
-
-    <data> : the data to be sent as a question during a generic health check
-             session. For now, <data> must be a string.
-    <hexastring> : test the exact string in its hexadecimal form matches in the
-                   response buffer. A health check response will be considered
-                   valid if the response's buffer contains this exact
-                   hexadecimal string.
-                   Purpose is to send binary data to ask on binary protocols.
-
-  Examples :
-         # redis check in binary
-         option tcp-check
-         tcp-check send-binary 50494e470d0a # PING\r\n
-         tcp-check expect binary 2b504F4e47 # +PONG
-
-
-  See also : "option tcp-check", "tcp-check connect", "tcp-check expect",
-             "tcp-check send", tune.chksize
 
 
 http-send-name-header [<header>]
@@ -3372,6 +3309,34 @@ log-format <string>
    Allows you to custom a log line.
 
    See also : Custom Log Format (8.2.4)
+
+
+max-keep-alive-queue <value>
+  Set the maximum server queue size for maintaining keep-alive connections
+  May be used in sections:    defaults | frontend | listen | backend
+                                 yes   |     no   |   yes  |   yes
+
+  HTTP keep-alive tries to reuse the same server connection whenever possible,
+  but sometimes it can be counter-productive, for example if a server has a lot
+  of connections while other ones are idle. This is especially true for static
+  servers.
+
+  The purpose of this setting is to set a threshold on the number of queued
+  connections at which haproxy stops trying to reuse the same server and prefers
+  to find another one. The default value, -1, means there is no limit. A value
+  of zero means that keep-alive requests will never be queued. For very close
+  servers which can be reached with a low latency and which are not sensible to
+  breaking keep-alive, a low value is recommended (eg: local static server can
+  use a value of 10 or less). For remote servers suffering from a high latency,
+  higher values might be needed to cover for the latency and/or the cost of
+  picking a different server.
+
+  Note that this has no impact on responses which are maintained to the same
+  server consecutively to a 401 response. They will still go to the same server
+  even if they have to be queued.
+
+  See also : "option http-server-close", "option prefer-last-server", server
+             "maxconn" and cookie persistence.
 
 
 maxconn <conns>
@@ -5989,7 +5954,7 @@ srvtimeout <timeout> (deprecated)
 stats admin { if | unless } <cond>
   Enable statistics admin level if/unless a condition is matched
   May be used in sections :   defaults | frontend | listen | backend
-                                 no    |    no    |   yes  |   yes
+                                 no    |    yes   |   yes  |   yes
 
   This statement enables the statistics admin level if/unless a condition is
   matched.
@@ -6042,7 +6007,7 @@ stats admin { if | unless } <cond>
 stats auth <user>:<passwd>
   Enable statistics with authentication and grant access to an account
   May be used in sections :   defaults | frontend | listen | backend
-                                 yes   |    no    |   yes  |   yes
+                                 yes   |    yes   |   yes  |   yes
   Arguments :
     <user>    is a user name to grant access to
 
@@ -6091,7 +6056,7 @@ stats auth <user>:<passwd>
 stats enable
   Enable statistics reporting with default settings
   May be used in sections :   defaults | frontend | listen | backend
-                                 yes   |    no    |   yes  |   yes
+                                 yes   |    yes   |   yes  |   yes
   Arguments : none
 
   This statement enables statistics reporting with default settings defined
@@ -6129,7 +6094,7 @@ stats enable
 stats hide-version
   Enable statistics and hide HAProxy version reporting
   May be used in sections :   defaults | frontend | listen | backend
-                                 yes   |    no    |   yes  |   yes
+                                 yes   |    yes   |   yes  |   yes
   Arguments : none
 
   By default, the stats page reports some useful status information along with
@@ -6188,7 +6153,7 @@ stats http-request { allow | deny | auth [realm <realm>] }
 stats realm <realm>
   Enable statistics and set authentication realm
   May be used in sections :   defaults | frontend | listen | backend
-                                 yes   |    no    |   yes  |   yes
+                                 yes   |    yes   |   yes  |   yes
   Arguments :
     <realm>   is the name of the HTTP Basic Authentication realm reported to
               the browser. The browser uses it to display it in the pop-up
@@ -6228,7 +6193,7 @@ stats realm <realm>
 stats refresh <delay>
   Enable statistics with automatic refresh
   May be used in sections :   defaults | frontend | listen | backend
-                                 yes   |    no    |   yes  |   yes
+                                 yes   |    yes   |   yes  |   yes
   Arguments :
     <delay>   is the suggested refresh delay, specified in seconds, which will
               be returned to the browser consulting the report page. While the
@@ -6270,7 +6235,7 @@ stats refresh <delay>
 stats scope { <name> | "." }
   Enable statistics and limit access scope
   May be used in sections :   defaults | frontend | listen | backend
-                                 yes   |    no    |   yes  |   yes
+                                 yes   |    yes   |   yes  |   yes
   Arguments :
     <name>    is the name of a listen, frontend or backend section to be
               reported. The special name "." (a single dot) designates the
@@ -6311,7 +6276,7 @@ stats scope { <name> | "." }
 stats show-desc [ <desc> ]
   Enable reporting of a description on the statistics page.
   May be used in sections :   defaults | frontend | listen | backend
-                                 yes   |    no    |   yes  |   yes
+                                 yes   |    yes   |   yes  |   yes
 
     <desc>    is an optional description to be reported. If unspecified, the
               description from global section is automatically used instead.
@@ -6336,6 +6301,11 @@ stats show-desc [ <desc> ]
 
 
 stats show-legends
+  Enable reporting additional information on the statistics page
+  May be used in sections :   defaults | frontend | listen | backend
+                                 yes   |    yes   |   yes  |   yes
+  Arguments : none
+
   Enable reporting additional information on the statistics page :
     - cap: capabilities (proxy)
     - mode: one of tcp, http or health (proxy)
@@ -6353,7 +6323,7 @@ stats show-legends
 stats show-node [ <name> ]
   Enable reporting of a host name on the statistics page.
   May be used in sections :   defaults | frontend | listen | backend
-                                 yes   |    no    |   yes  |   yes
+                                 yes   |    yes   |   yes  |   yes
   Arguments:
     <name>    is an optional name to be reported. If unspecified, the
               node name from global section is automatically used instead.
@@ -6381,7 +6351,7 @@ stats show-node [ <name> ]
 stats uri <prefix>
   Enable statistics and define the URI prefix to access them
   May be used in sections :   defaults | frontend | listen | backend
-                                 yes   |    no    |   yes  |   yes
+                                 yes   |    yes   |   yes  |   yes
   Arguments :
     <prefix>  is the prefix of any URI which will be redirected to stats. This
               prefix may contain a question mark ('?') to indicate part of a
@@ -6953,6 +6923,187 @@ stick store-response <pattern> [table <table>] [{if | unless} <condition>]
 
   See also : "stick-table", "stick on", and section 7 about ACLs and pattern
              extraction.
+
+
+tcp-check connect [params*]
+  Opens a new connection
+  May be used in sections:   defaults | frontend | listen | backend
+                               no     |    no    |   yes  |   yes
+
+  When an application lies on more than a single TCP port or when HAProxy
+  load-balance many services in a single backend, it makes sense to probe all
+  the services individually before considering a server as operational.
+
+  When there are no TCP port configured on the server line neither server port
+  directive, then the 'tcp-check connect port <port>' must be the first step
+  of the sequence.
+
+  In a tcp-check ruleset a 'connect' is required, it is also mandatory to start
+  the ruleset with a 'connect' rule. Purpose is to ensure admin know what they
+  do.
+
+  Parameters :
+    They are optional and can be used to describe how HAProxy should open and
+    use the TCP connection.
+
+    port      if not set, check port or server port is used.
+              It tells HAProxy where to open the connection to.
+              <port> must be a valid TCP port source integer, from 1 to 65535.
+
+    send-proxy   send a PROXY protocol string
+
+    ssl          opens a ciphered connection
+
+    Examples:
+         # check HTTP and HTTPs services on a server.
+         # first open port 80 thanks to server line port directive, then
+         # tcp-check opens port 443, ciphered and run a request on it:
+         option tcp-check
+         tcp-check connect
+         tcp-check send GET\ /\ HTTP/1.0\r\n
+         tcp-check send Host:\ haproxy.1wt.eu\r\n
+         tcp-check send \r\n
+         tcp-check expect rstring (2..|3..)
+         tcp-check connect port 443 ssl
+         tcp-check send GET\ /\ HTTP/1.0\r\n
+         tcp-check send Host:\ haproxy.1wt.eu\r\n
+         tcp-check send \r\n
+         tcp-check expect rstring (2..|3..)
+         server www 10.0.0.1 check port 80
+
+         # check both POP and IMAP from a single server:
+         option tcp-check
+         tcp-check connect port 110
+         tcp-check expect string +OK\ POP3\ ready
+         tcp-check connect port 143
+         tcp-check expect string *\ OK\ IMAP4\ ready
+         server mail 10.0.0.1 check
+
+  See also : "option tcp-check", "tcp-check send", "tcp-check expect"
+
+
+tcp-check expect [!] <match> <pattern>
+  Specify data to be collected and analysed during a generic health check
+  May be used in sections:   defaults | frontend | listen | backend
+                               no     |    no    |   yes  |   yes
+
+  Arguments :
+    <match>   is a keyword indicating how to look for a specific pattern in the
+              response. The keyword may be one of "string", "rstring" or
+              binary.
+              The keyword may be preceded by an exclamation mark ("!") to negate
+              the match. Spaces are allowed between the exclamation mark and the
+              keyword. See below for more details on the supported keywords.
+
+    <pattern> is the pattern to look for. It may be a string or a regular
+              expression. If the pattern contains spaces, they must be escaped
+              with the usual backslash ('\').
+              If the match is set to binary, then the pattern must be passed as
+              a serie of hexadecimal digits in an even number. Each sequence of
+              two digits will represent a byte. The hexadecimal digits may be
+              used upper or lower case.
+
+
+  The available matches are intentionally similar to their http-check cousins :
+
+    string <string> : test the exact string matches in the response buffer.
+                      A health check response will be considered valid if the
+                      response's buffer contains this exact string. If the
+                      "string" keyword is prefixed with "!", then the response
+                      will be considered invalid if the body contains this
+                      string. This can be used to look for a mandatory pattern
+                      in a protocol response, or to detect a failure when a
+                      specific error appears in a protocol banner.
+
+    rstring <regex> : test a regular expression on the response buffer.
+                      A health check response will be considered valid if the
+                      response's buffer matches this expression. If the
+                      "rstring" keyword is prefixed with "!", then the response
+                      will be considered invalid if the body matches the
+                      expression.
+
+    binary <hexstring> : test the exact string in its hexadecimal form matches
+                         in the response buffer. A health check response will
+                         be considered valid if the response's buffer contains
+                         this exact hexadecimal string.
+                         Purpose is to match data on binary protocols.
+
+  It is important to note that the responses will be limited to a certain size
+  defined by the global "tune.chksize" option, which defaults to 16384 bytes.
+  Thus, too large responses may not contain the mandatory pattern when using
+  "string", "rstring" or binary. If a large response is absolutely required, it
+  is possible to change the default max size by setting the global variable.
+  However, it is worth keeping in mind that parsing very large responses can
+  waste some CPU cycles, especially when regular expressions are used, and that
+  it is always better to focus the checks on smaller resources. Also, in its
+  current state, the check will not find any string nor regex past a null
+  character in the response. Similarly it is not possible to request matching
+  the null character.
+
+  Examples :
+         # perform a POP check
+         option tcp-check
+         tcp-check expect string +OK\ POP3\ ready
+
+         # perform an IMAP check
+         option tcp-check
+         tcp-check expect string *\ OK\ IMAP4\ ready
+
+         # look for the redis master server
+         option tcp-check
+         tcp-check send PING\r\n
+         tcp-check expect +PONG
+         tcp-check send info\ replication\r\n
+         tcp-check expect string role:master
+         tcp-check send QUIT\r\n
+         tcp-check expect string +OK
+
+
+  See also : "option tcp-check", "tcp-check connect", "tcp-check send",
+             "tcp-check send-binary", "http-check expect", tune.chksize
+
+
+tcp-check send <data>
+  Specify a string to be sent as a question during a generic health check
+  May be used in sections:   defaults | frontend | listen | backend
+                               no     |    no    |   yes  |   yes
+
+    <data> : the data to be sent as a question during a generic health check
+             session. For now, <data> must be a string.
+
+  Examples :
+         # look for the redis master server
+         option tcp-check
+         tcp-check send info\ replication\r\n
+         tcp-check expect string role:master
+
+  See also : "option tcp-check", "tcp-check connect", "tcp-check expect",
+             "tcp-check send-binary", tune.chksize
+
+
+tcp-check send-binary <hexastring>
+  Specify an hexa digits string to be sent as a binary question during a raw
+  tcp health check
+  May be used in sections:   defaults | frontend | listen | backend
+                               no     |    no    |   yes  |   yes
+
+    <data> : the data to be sent as a question during a generic health check
+             session. For now, <data> must be a string.
+    <hexastring> : test the exact string in its hexadecimal form matches in the
+                   response buffer. A health check response will be considered
+                   valid if the response's buffer contains this exact
+                   hexadecimal string.
+                   Purpose is to send binary data to ask on binary protocols.
+
+  Examples :
+         # redis check in binary
+         option tcp-check
+         tcp-check send-binary 50494e470d0a # PING\r\n
+         tcp-check expect binary 2b504F4e47 # +PONG
+
+
+  See also : "option tcp-check", "tcp-check connect", "tcp-check expect",
+             "tcp-check send", tune.chksize
 
 
 tcp-request connection <action> [{if | unless} <condition>]
@@ -7712,8 +7863,7 @@ unique-id-header <name>
 
     See also: "unique-id-format"
 
-use_backend <backend> if <condition>
-use_backend <backend> unless <condition>
+use_backend <backend> [{if | unless} <condition>]
   Switch to a specific backend if/unless an ACL-based condition is matched.
   May be used in sections :   defaults | frontend | listen | backend
                                   no   |    yes   |   yes  |   no
@@ -7721,7 +7871,8 @@ use_backend <backend> unless <condition>
     <backend>   is the name of a valid backend or "listen" section, or a
                 "log-format" string resolving to a backend name.
 
-    <condition> is a condition composed of ACLs, as described in section 7.
+    <condition> is a condition composed of ACLs, as described in section 7. If
+                it is omitted, the rule is unconditionally applied.
 
   When doing content-switching, connections arrive on a frontend and are then
   dispatched to various backends depending on a number of conditions. The
@@ -7925,7 +8076,7 @@ crt <cert>
 
   Some CAs (such as Godaddy) offer a drop down list of server types that do not
   include HAProxy when obtaining a certificate. If this happens be sure to
-  choose a webserver that the CA believes requires a intermediate CA (for
+  choose a webserver that the CA believes requires an intermediate CA (for
   Godaddy, selection Apache Tomcat will get the correct bundle, but many
   others, e.g. nginx, result in a wrong bundle that will not work for some
   clients).
@@ -9366,6 +9517,10 @@ Thus, the syntax of a standard sample fetch method is one of the following :
    - name(arg1)
    - name(arg1,arg2)
 
+
+7.3.1. Converters
+-----------------
+
 Sample fetch methods may be combined with transformations to be applied on top
 of the fetched sample (also called "converters"). These combinations form what
 is called "sample expressions" and the result is a "sample". Initially this
@@ -9380,118 +9535,120 @@ support some arguments (eg: a netmask) which must be passed in parenthesis.
 
 The currently available list of transformation keywords include :
 
-  lower          Convert a string sample to lower case. This can only be placed
-                 after a string sample fetch function or after a transformation
-                 keyword returning a string type. The result is of type string.
+lower
+  Convert a string sample to lower case. This can only be placed after a string
+  sample fetch function or after a transformation keyword returning a string
+  type. The result is of type string.
 
-  upper          Convert a string sample to upper case. This can only be placed
-                 after a string sample fetch function or after a transformation
-                 keyword returning a string type. The result is of type string.
+upper
+  Convert a string sample to upper case. This can only be placed after a string
+  sample fetch function or after a transformation keyword returning a string
+  type. The result is of type string.
 
-  hex            Converts a binary input sample to an hex string containing two
-                 hex digits per input byte. It is used to log or transfer hex
-                 dumps of some binary input data in a way that can be reliably
-                 transferred (eg: an SSL ID can be copied in a header).
+hex
+  Converts a binary input sample to an hex string containing two hex digits per
+  input byte. It is used to log or transfer hex dumps of some binary input data
+  in a way that can be reliably transferred (eg: an SSL ID can be copied in a
+  header).
 
-  ipmask(<mask>) Apply a mask to an IPv4 address, and use the result for
-                 lookups and storage. This can be used to make all hosts within
-                 a certain mask to share the same table entries and as such use
-                 the same server. The mask can be passed in dotted form (eg:
-                 255.255.255.0) or in CIDR form (eg: 24).
+ipmask(<mask>)
+  Apply a mask to an IPv4 address, and use the result for lookups and storage.
+  This can be used to make all hosts within a certain mask to share the same
+  table entries and as such use the same server. The mask can be passed in
+  dotted form (eg: 255.255.255.0) or in CIDR form (eg: 24).
 
-  http_date([<offset>])
-                 Converts an integer supposed to contain a date since epoch to
-                 a string representing this date in a format suitable for use
-                 in HTTP header fields. If an offset value is specified, then
-                 it is a number of seconds that is added to the date before the
-                 conversion is operated. This is particularly useful to emit
-                 Date header fields, Expires values in responses when combined
-                 with a positive offset, or Last-Modified values when the
-                 offset is negative.
+http_date([<offset>])
+  Converts an integer supposed to contain a date since epoch to a string
+  representing this date in a format suitable for use in HTTP header fields. If
+  an offset value is specified, then it is a number of seconds that is added to
+  the date before the conversion is operated. This is particularly useful to
+  emit Date header fields, Expires values in responses when combined with a
+  positive offset, or Last-Modified values when the offset is negative.
 
-  language(<value[;value[;value[;...]]]>[,<default>])
-                 Returns the value with the highest q-factor from a list as
-                 extracted from the "accept-language" header using "req.fhdr".
-                 Values with no q-factor have a q-factor of 1. Values with a
-                 q-factor of 0 are dropped. Only values which belong to the
-                 list of semi-colon delimited <values> will be considered. If
-                 no value matches the given list and a default value is
-                 provided, it is returned. Note that language names may have
-                 a variant after a dash ('-'). If this variant is present in
-                 the list, it will be matched, but if it is not, only the base
-                 language is checked. The match is case-sensitive, and the
-                 output string is always one of those provided in arguments.
-                 The ordering of arguments is meaningless, only the ordering
-                 of the values in the request counts, as the first value among
-                 multiple sharing the same q-factor is used.
+language(<value>[,<default>])
+  Returns the value with the highest q-factor from a list as extracted from the
+  "accept-language" header using "req.fhdr". Values with no q-factor have a
+  q-factor of 1. Values with a q-factor of 0 are dropped. Only values which
+  belong to the list of semi-colon delimited <values> will be considered. The
+  argument <value> syntax is "lang[;lang[;lang[;...]]]". If no value matches the
+  given list and a default value is provided, it is returned. Note that language
+  names may have a variant after a dash ('-'). If this variant is present in the
+  list, it will be matched, but if it is not, only the base language is checked.
+  The match is case-sensitive, and the output string is always one of those
+  provided in arguments.  The ordering of arguments is meaningless, only the
+  ordering of the values in the request counts, as the first value among
+  multiple sharing the same q-factor is used.
 
-                 Example :
+  Example :
 
-                   # this configuration switches to the backend matching a
-                   # given language based on the request :
+    # this configuration switches to the backend matching a
+    # given language based on the request :
 
-                   acl es req.fhdr(accept-language),language(es;fr;en) -m str es
-                   acl fr req.fhdr(accept-language),language(es;fr;en) -m str fr
-                   acl en req.fhdr(accept-language),language(es;fr;en) -m str en
-                   use_backend spanish if es
-                   use_backend french  if fr
-                   use_backend english if en
-                   default_backend choose_your_language
+    acl es req.fhdr(accept-language),language(es;fr;en) -m str es
+    acl fr req.fhdr(accept-language),language(es;fr;en) -m str fr
+    acl en req.fhdr(accept-language),language(es;fr;en) -m str en
+    use_backend spanish if es
+    use_backend french  if fr
+    use_backend english if en
+    default_backend choose_your_language
 
-  map(<map_file>[,<default_value>])
-  map_<match_type>(<map_file>[,<default_value>])
-  map_<match_type>_<output_type>(<map_file>[,<default_value>])
-                 Search the input value from <map_file> using the <match_type>
-                 matching method, and return the associated value converted to
-                 the type <output_type>. If the input value cannot be found in
-                 the <map_file>, the converter returns the <default_value>. If
-                 the <default_value> is not set, the converter fails and acts
-                 as if no input value could be fetched. If the <match_type> is
-                 not set, it defaults to "str". Likewise, if the <output_type>
-                 is not set, it defaults to "str". For convenience, the "map"
-                 keyword is an alias for "map_str" and maps a string to another
-                 string. The following array contains contains the list of all
-                 the map* converters.
+map(<map_file>[,<default_value>])
+map_<match_type>(<map_file>[,<default_value>])
+map_<match_type>_<output_type>(<map_file>[,<default_value>])
+  Search the input value from <map_file> using the <match_type> matching method,
+  and return the associated value converted to the type <output_type>. If the
+  input value cannot be found in the <map_file>, the converter returns the
+  <default_value>. If the <default_value> is not set, the converter fails and
+  acts as if no input value could be fetched. If the <match_type> is not set, it
+  defaults to "str". Likewise, if the <output_type> is not set, it defaults to
+  "str". For convenience, the "map" keyword is an alias for "map_str" and maps a
+  string to another string.
 
-                 It is important to avoid overlapping between the keys : IP
-                 addresses and strings are stored in trees, so the first of the
-                 finest match will be used. Other keys are stored in lists, so
-                 the first matching occurrence will be used.
+  It is important to avoid overlapping between the keys : IP addresses and
+  strings are stored in trees, so the first of the finest match will be used.
+  Other keys are stored in lists, so the first matching occurrence will be used.
 
-                 +----+----------+---------+-------------+------------+
-                 |     `-_   out |         |             |            |
-                 | input  `-_    |   str   |     int     |     ip     |
-                 | / match   `-_ |         |             |            |
-                 +---------------+---------+-------------+------------+
-                 | str   / str   | map_str | map_str_int | map_str_ip |
-                 | str   / sub   | map_sub | map_sub_int | map_sub_ip |
-                 | str   / dir   | map_dir | map_dir_int | map_dir_ip |
-                 | str   / dom   | map_dom | map_dom_int | map_dom_ip |
-                 | str   / end   | map_end | map_end_int | map_end_ip |
-                 | str   / reg   | map_reg | map_reg_int | map_reg_ip |
-                 | int   / int   | map_int | map_int_int | map_int_ip |
-                 | ip    / ip    | map_ip  | map_ip_int  | map_ip_ip  |
-                 +---------------+---------+-------------+------------+
+  The following array contains the list of all map functions avalaible sorted by
+  input type, match type and output type.
 
-                 The file contains one key + value per line. Lines which start
-                 with '#' are ignored, just like empty lines. Leading tabs and
-                 spaces are stripped. The key is then the first "word" (series
-                 of non-space/tabs characters), and the value is what follows
-                 this series of space/tab till the end of the line excluding
-                 trailing spaces/tabs.
+  input type | match method | output type str | output type int | output type ip
+  -----------+--------------+-----------------+-----------------+---------------
+    str      | str          | map_str         | map_str_int     | map_str_ip
+  -----------+--------------+-----------------+-----------------+---------------
+    str      | sub          | map_sub         | map_sub_int     | map_sub_ip
+  -----------+--------------+-----------------+-----------------+---------------
+    str      | dir          | map_dir         | map_dir_int     | map_dir_ip
+  -----------+--------------+-----------------+-----------------+---------------
+    str      | dom          | map_dom         | map_dom_int     | map_dom_ip
+  -----------+--------------+-----------------+-----------------+---------------
+    str      | end          | map_end         | map_end_int     | map_end_ip
+  -----------+--------------+-----------------+-----------------+---------------
+    str      | reg          | map_reg         | map_reg_int     | map_reg_ip
+  -----------+--------------+-----------------+-----------------+---------------
+    int      | int          | map_int         | map_int_int     | map_int_ip
+  -----------+--------------+-----------------+-----------------+---------------
+    ip       | ip           | map_ip          | map_ip_int      | map_ip_ip
+  -----------+--------------+-----------------+-----------------+---------------
 
-                 Example :
+  The file contains one key + value per line. Lines which start with '#' are
+  ignored, just like empty lines. Leading tabs and spaces are stripped. The key
+  is then the first "word" (series of non-space/tabs characters), and the value
+  is what follows this series of space/tab till the end of the line excluding
+  trailing spaces/tabs.
 
-                 # this is a comment and is ignored
-                    2.22.246.0/23    United Kingdom      \n
-                 <-><-----------><--><------------><---->
-                  |       |      |         |         `- trailing spaces ignored
-                  |       |      |         `----------- value
-                  |       |      `--------------------- middle spaces ignored
-                  |       `---------------------------- key
-                  `------------------------------------ leading spaces ignored
+  Example :
 
-7.3.1. Fetching samples from internal states
+     # this is a comment and is ignored
+        2.22.246.0/23    United Kingdom      \n
+     <-><-----------><--><------------><---->
+      |       |       |         |        `- trailing spaces ignored
+      |       |       |         `---------- value
+      |       |       `-------------------- middle spaces ignored
+      |       `---------------------------- key
+      `------------------------------------ leading spaces ignored
+
+
+7.3.2. Fetching samples from internal states
 --------------------------------------------
 
 A first set of sample fetch methods applies to internal information which does
@@ -9699,7 +9856,7 @@ table_cnt([<table>]) : integer
   table_avl for other entry counting methods.
 
 
-7.3.2. Fetching samples at Layer 4
+7.3.3. Fetching samples at Layer 4
 ----------------------------------
 
 The layer 4 usually describes just the transport layer which in haproxy is
@@ -9748,7 +9905,7 @@ fe_id : integer
   backends to check from which backend it was called, or to stick all users
   coming via a same frontend to the same server.
 
-sc_bytes_in_rate(<ctr>,[<table>]) : integer
+sc_bytes_in_rate(<ctr>[,<table>]) : integer
 sc0_bytes_in_rate([<table>]) : integer
 sc1_bytes_in_rate([<table>]) : integer
 sc2_bytes_in_rate([<table>]) : integer
@@ -9756,7 +9913,7 @@ sc2_bytes_in_rate([<table>]) : integer
   counters, measured in amount of bytes over the period configured in the
   table. See also src_bytes_in_rate.
 
-sc_bytes_out_rate(<ctr>,[<table>]) : integer
+sc_bytes_out_rate(<ctr>[,<table>]) : integer
 sc0_bytes_out_rate([<table>]) : integer
 sc1_bytes_out_rate([<table>]) : integer
 sc2_bytes_out_rate([<table>]) : integer
@@ -9764,7 +9921,7 @@ sc2_bytes_out_rate([<table>]) : integer
   counters, measured in amount of bytes over the period configured in the
   table. See also src_bytes_out_rate.
 
-sc_clr_gpc0(<ctr>,[<table>]) : integer
+sc_clr_gpc0(<ctr>[,<table>]) : integer
 sc0_clr_gpc0([<table>]) : integer
 sc1_clr_gpc0([<table>]) : integer
 sc2_clr_gpc0([<table>]) : integer
@@ -9782,14 +9939,14 @@ sc2_clr_gpc0([<table>]) : integer
         tcp-request connection accept if !abuse save
         tcp-request connection reject if abuse kill
 
-sc_conn_cnt(<ctr>,[<table>]) : integer
+sc_conn_cnt(<ctr>[,<table>]) : integer
 sc0_conn_cnt([<table>]) : integer
 sc1_conn_cnt([<table>]) : integer
 sc2_conn_cnt([<table>]) : integer
   Returns the cumulated number of incoming connections from currently tracked
   counters. See also src_conn_cnt.
 
-sc_conn_cur(<ctr>,[<table>]) : integer
+sc_conn_cur(<ctr>[,<table>]) : integer
 sc0_conn_cur([<table>]) : integer
 sc1_conn_cur([<table>]) : integer
 sc2_conn_cur([<table>]) : integer
@@ -9797,7 +9954,7 @@ sc2_conn_cur([<table>]) : integer
   tracked counters. This number is automatically incremented when tracking
   begins and decremented when tracking stops. See also src_conn_cur.
 
-sc_conn_rate(<ctr>,[<table>]) : integer
+sc_conn_rate(<ctr>[,<table>]) : integer
 sc0_conn_rate([<table>]) : integer
 sc1_conn_rate([<table>]) : integer
 sc2_conn_rate([<table>]) : integer
@@ -9805,14 +9962,14 @@ sc2_conn_rate([<table>]) : integer
   measured in amount of connections over the period configured in the table.
   See also src_conn_rate.
 
-sc_get_gpc0(<ctr>,[<table>]) : integer
+sc_get_gpc0(<ctr>[,<table>]) : integer
 sc0_get_gpc0([<table>]) : integer
 sc1_get_gpc0([<table>]) : integer
 sc2_get_gpc0([<table>]) : integer
   Returns the value of the first General Purpose Counter associated to the
   currently tracked counters. See also src_get_gpc0 and sc/sc0/sc1/sc2_inc_gpc0.
 
-sc_gpc0_rate(<ctr>,[<table>]) : integer
+sc_gpc0_rate(<ctr>[,<table>]) : integer
 sc0_gpc0_rate([<table>]) : integer
 sc1_gpc0_rate([<table>]) : integer
 sc2_gpc0_rate([<table>]) : integer
@@ -9823,7 +9980,7 @@ sc2_gpc0_rate([<table>]) : integer
   that the "gpc0_rate" counter must be stored in the stick-table for a value to
   be returned, as "gpc0" only holds the event count.
 
-sc_http_err_cnt(<ctr>,[<table>]) : integer
+sc_http_err_cnt(<ctr>[,<table>]) : integer
 sc0_http_err_cnt([<table>]) : integer
 sc1_http_err_cnt([<table>]) : integer
 sc2_http_err_cnt([<table>]) : integer
@@ -9831,7 +9988,7 @@ sc2_http_err_cnt([<table>]) : integer
   counters. This includes the both request errors and 4xx error responses.
   See also src_http_err_cnt.
 
-sc_http_err_rate(<ctr>,[<table>]) : integer
+sc_http_err_rate(<ctr>[,<table>]) : integer
 sc0_http_err_rate([<table>]) : integer
 sc1_http_err_rate([<table>]) : integer
 sc2_http_err_rate([<table>]) : integer
@@ -9840,7 +9997,7 @@ sc2_http_err_rate([<table>]) : integer
   includes the both request errors and 4xx error responses. See also
   src_http_err_rate.
 
-sc_http_req_cnt(<ctr>,[<table>]) : integer
+sc_http_req_cnt(<ctr>[,<table>]) : integer
 sc0_http_req_cnt([<table>]) : integer
 sc1_http_req_cnt([<table>]) : integer
 sc2_http_req_cnt([<table>]) : integer
@@ -9848,7 +10005,7 @@ sc2_http_req_cnt([<table>]) : integer
   counters. This includes every started request, valid or not. See also
   src_http_req_cnt.
 
-sc_http_req_rate(<ctr>,[<table>]) : integer
+sc_http_req_rate(<ctr>[,<table>]) : integer
 sc0_http_req_rate([<table>]) : integer
 sc1_http_req_rate([<table>]) : integer
 sc2_http_req_rate([<table>]) : integer
@@ -9857,7 +10014,7 @@ sc2_http_req_rate([<table>]) : integer
   the table. This includes every started request, valid or not. See also
   src_http_req_rate.
 
-sc_inc_gpc0(<ctr>,[<table>]) : integer
+sc_inc_gpc0(<ctr>[,<table>]) : integer
 sc0_inc_gpc0([<table>]) : integer
 sc1_inc_gpc0([<table>]) : integer
 sc2_inc_gpc0([<table>]) : integer
@@ -9871,7 +10028,7 @@ sc2_inc_gpc0([<table>]) : integer
         acl kill  sc0_inc_gpc0 gt 0
         tcp-request connection reject if abuse kill
 
-sc_kbytes_in(<ctr>,[<table>]) : integer
+sc_kbytes_in(<ctr>[,<table>]) : integer
 sc0_kbytes_in([<table>]) : integer
 sc1_kbytes_in([<table>]) : integer
 sc2_kbytes_in([<table>]) : integer
@@ -9880,7 +10037,7 @@ sc2_kbytes_in([<table>]) : integer
   test is currently performed on 32-bit integers, which limits values to 4
   terabytes. See also src_kbytes_in.
 
-sc_kbytes_out(<ctr>,[<table>]) : integer
+sc_kbytes_out(<ctr>[,<table>]) : integer
 sc0_kbytes_out([<table>]) : integer
 sc1_kbytes_out([<table>]) : integer
 sc2_kbytes_out([<table>]) : integer
@@ -9889,7 +10046,7 @@ sc2_kbytes_out([<table>]) : integer
   test is currently performed on 32-bit integers, which limits values to 4
   terabytes. See also src_kbytes_out.
 
-sc_sess_cnt(<ctr>,[<table>]) : integer
+sc_sess_cnt(<ctr>[,<table>]) : integer
 sc0_sess_cnt([<table>]) : integer
 sc1_sess_cnt([<table>]) : integer
 sc2_sess_cnt([<table>]) : integer
@@ -9900,7 +10057,7 @@ sc2_sess_cnt([<table>]) : integer
   backend sessions if some HTTP keep-alive is performed over the connection
   with the client. See also src_sess_cnt.
 
-sc_sess_rate(<ctr>,[<table>]) : integer
+sc_sess_rate(<ctr>[,<table>]) : integer
 sc0_sess_rate([<table>]) : integer
 sc1_sess_rate([<table>]) : integer
 sc2_sess_rate([<table>]) : integer
@@ -9911,7 +10068,7 @@ sc2_sess_rate([<table>]) : integer
   connection could result in many backend sessions if some HTTP keep-alive is
   performed over the connection with the client. See also src_sess_rate.
 
-sc_tracked(<ctr>,[<table>]) : boolean
+sc_tracked(<ctr>[,<table>]) : boolean
 sc0_tracked([<table>]) : boolean
 sc1_tracked([<table>]) : boolean
 sc2_tracked([<table>]) : boolean
@@ -9919,7 +10076,7 @@ sc2_tracked([<table>]) : boolean
   the current session. This can be useful when deciding whether or not we want
   to set some values in a header passed to the server.
 
-sc_trackers(<ctr>,[<table>]) : integer
+sc_trackers(<ctr>[,<table>]) : integer
 sc0_trackers([<table>]) : integer
 sc1_trackers([<table>]) : integer
 sc2_trackers([<table>]) : integer
@@ -10113,7 +10270,7 @@ srv_id : integer
   debugging.
 
 
-7.3.3. Fetching samples at Layer 5
+7.3.4. Fetching samples at Layer 5
 ----------------------------------
 
 The layer 5 usually describes just the session layer which in haproxy is
@@ -10403,7 +10560,7 @@ ssl_fc_use_keysize : integer
   connection was made over an SSL/TLS transport layer.
 
 
-7.3.4. Fetching samples from buffer contents (Layer 6)
+7.3.5. Fetching samples from buffer contents (Layer 6)
 ------------------------------------------------------
 
 Fetching samples from buffer contents is a bit different from the previous
@@ -10632,7 +10789,7 @@ wait_end : boolean
      tcp-request content reject
 
 
-7.3.5. Fetching HTTP samples (Layer 7)
+7.3.6. Fetching HTTP samples (Layer 7)
 --------------------------------------
 
 It is possible to fetch samples from HTTP contents, requests and responses.
@@ -10693,11 +10850,21 @@ capture.req.uri : string
   and "url", it can be used in both request and response because it's
   allocated.
 
+capture.req.ver : string
+  This extracts the request's HTTP version and returns either "HTTP/1.0" or
+  "HTTP/1.1". Unlike "req.ver", it can be used in both request, response, and
+  logs because it relies on a persistent flag.
+
 capture.res.hdr(<idx>) : string
   This extracts the content of the header captured by the "capture response
   header", idx is the position of the capture keyword in the configuration.
   The first entry is an index of 0.
   See also: "capture response header"
+
+capture.res.ver : string
+  This extracts the response's HTTP version and returns either "HTTP/1.0" or
+  "HTTP/1.1". Unlike "res.ver", it can be used in logs because it relies on a
+  persistent flag.
 
 req.cook([<name>]) : string
 cook([<name>]) : string (deprecated)

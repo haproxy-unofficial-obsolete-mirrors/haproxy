@@ -63,30 +63,30 @@ extern char *get_http_auth_buff;
 #define HTTP_IS_TOKEN(x) (http_is_token[(unsigned char)(x)])
 #define HTTP_IS_VER_TOKEN(x) (http_is_ver_token[(unsigned char)(x)])
 
-int process_cli(struct session *t);
-int process_srv_data(struct session *t);
-int process_srv_conn(struct session *t);
+int process_cli(struct session *s);
+int process_srv_data(struct session *s);
+int process_srv_conn(struct session *s);
 int http_wait_for_request(struct session *s, struct channel *req, int an_bit);
 int http_process_req_common(struct session *s, struct channel *req, int an_bit, struct proxy *px);
-int http_process_request(struct session *t, struct channel *req, int an_bit);
+int http_process_request(struct session *s, struct channel *req, int an_bit);
 int http_process_tarpit(struct session *s, struct channel *req, int an_bit);
-int http_process_request_body(struct session *s, struct channel *req, int an_bit);
+int http_wait_for_request_body(struct session *s, struct channel *req, int an_bit);
 int http_send_name_header(struct http_txn *txn, struct proxy* be, const char* svr_name);
 int http_wait_for_response(struct session *s, struct channel *rep, int an_bit);
-int http_process_res_common(struct session *t, struct channel *rep, int an_bit, struct proxy *px);
+int http_process_res_common(struct session *s, struct channel *rep, int an_bit, struct proxy *px);
 int http_request_forward_body(struct session *s, struct channel *req, int an_bit);
 int http_response_forward_body(struct session *s, struct channel *res, int an_bit);
 
-void debug_hdr(const char *dir, struct session *t, const char *start, const char *end);
-void get_srv_from_appsession(struct session *t, const char *begin, int len);
-int apply_filter_to_req_headers(struct session *t, struct channel *req, struct hdr_exp *exp);
-int apply_filter_to_req_line(struct session *t, struct channel *req, struct hdr_exp *exp);
+void debug_hdr(const char *dir, struct session *s, const char *start, const char *end);
+void get_srv_from_appsession(struct session *s, const char *begin, int len);
+int apply_filter_to_req_headers(struct session *s, struct channel *req, struct hdr_exp *exp);
+int apply_filter_to_req_line(struct session *s, struct channel *req, struct hdr_exp *exp);
 int apply_filters_to_request(struct session *s, struct channel *req, struct proxy *px);
-int apply_filters_to_response(struct session *t, struct channel *rtr, struct proxy *px);
-void manage_client_side_appsession(struct session *t, const char *buf, int len);
-void manage_client_side_cookies(struct session *t, struct channel *req);
-void manage_server_side_cookies(struct session *t, struct channel *rtr);
-void check_response_for_cacheability(struct session *t, struct channel *rtr);
+int apply_filters_to_response(struct session *s, struct channel *rtr, struct proxy *px);
+void manage_client_side_appsession(struct session *s, const char *buf, int len);
+void manage_client_side_cookies(struct session *s, struct channel *req);
+void manage_server_side_cookies(struct session *s, struct channel *rtr);
+void check_response_for_cacheability(struct session *s, struct channel *rtr);
 int stats_check_uri(struct stream_interface *si, struct http_txn *txn, struct proxy *backend);
 void init_proto_http();
 int http_find_full_header2(const char *name, int len,
@@ -122,6 +122,20 @@ struct redirect_rule *http_parse_redirect_rule(const char *file, int linenum, st
 
 enum http_meth_t find_http_meth(const char *str, const int len);
 
+struct http_req_action_kw *action_http_req_custom(const char *kw);
+struct http_res_action_kw *action_http_res_custom(const char *kw);
+
+static inline void http_req_keywords_register(struct http_req_action_kw_list *kw_list)
+{
+	LIST_ADDQ(&http_req_keywords.list, &kw_list->list);
+}
+
+static inline void http_res_keywords_register(struct http_res_action_kw_list *kw_list)
+{
+	LIST_ADDQ(&http_res_keywords.list, &kw_list->list);
+}
+
+
 /* to be used when contents change in an HTTP message */
 #define http_msg_move_end(msg, bytes) do { \
 		unsigned int _bytes = (bytes);	\
@@ -129,6 +143,64 @@ enum http_meth_t find_http_meth(const char *str, const int len);
 		(msg)->sov += (_bytes);		\
 		(msg)->eoh += (_bytes);		\
 	} while (0)
+
+
+/* Return the amount of bytes that need to be rewound before buf->p to access
+ * the current message's headers. The purpose is to be able to easily fetch
+ * the message's beginning before headers are forwarded, as well as after.
+ * The principle is that msg->eoh and msg->eol are immutable while msg->sov
+ * equals the sum of the two before forwarding and is zero after forwarding,
+ * so the difference cancels the rewinding.
+ */
+static inline int http_hdr_rewind(const struct http_msg *msg)
+{
+	return msg->eoh + msg->eol - msg->sov;
+}
+
+/* Return the amount of bytes that need to be rewound before buf->p to access
+ * the current message's URI. The purpose is to be able to easily fetch
+ * the message's beginning before headers are forwarded, as well as after.
+ */
+static inline int http_uri_rewind(const struct http_msg *msg)
+{
+	return http_hdr_rewind(msg) - msg->sl.rq.u;
+}
+
+/* Return the amount of bytes that need to be rewound before buf->p to access
+ * the current message's BODY. The purpose is to be able to easily fetch
+ * the message's beginning before headers are forwarded, as well as after.
+ */
+static inline int http_body_rewind(const struct http_msg *msg)
+{
+	return http_hdr_rewind(msg) - msg->eoh - msg->eol;
+}
+
+/* Return the amount of bytes that need to be rewound before buf->p to access
+ * the current message's DATA. The difference with the function above is that
+ * if a chunk is present and has already been parsed, its size is skipped so
+ * that the byte pointed to is the first byte of actual data. The function is
+ * safe for use in state HTTP_MSG_DATA regardless of whether the headers were
+ * already forwarded or not.
+ */
+static inline int http_data_rewind(const struct http_msg *msg)
+{
+	return http_body_rewind(msg) - msg->sol;
+}
+
+/* Return the maximum amount of bytes that may be read after the beginning of
+ * the message body, according to the advertised length. The function is safe
+ * for use between HTTP_MSG_BODY and HTTP_MSG_DATA regardless of whether the
+ * headers were already forwarded or not.
+ */
+static inline int http_body_bytes(const struct http_msg *msg)
+{
+	int len;
+
+	len = msg->chn->buf->i - msg->sov - msg->sol;
+	if (len > msg->body_len)
+		len = msg->body_len;
+	return len;
+}
 
 /* for debugging, reports the HTTP message state name */
 static inline const char *http_msg_state_str(int msg_state)

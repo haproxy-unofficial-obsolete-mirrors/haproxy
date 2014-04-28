@@ -298,13 +298,10 @@ struct server *get_server_ph_post(struct session *s)
 	struct http_msg *msg  = &txn->req;
 	struct proxy    *px   = s->be;
 	unsigned int     plen = px->url_param_len;
-	unsigned long    len  = msg->body_len;
-	const char      *params = b_ptr(req->buf, (int)(msg->sov - req->buf->o));
+	unsigned long    len  = http_body_bytes(msg);
+	const char      *params = b_ptr(req->buf, -http_data_rewind(msg));
 	const char      *p    = params;
 	const char      *start, *end;
-
-	if (len > buffer_len(req->buf) - msg->sov)
-		len = buffer_len(req->buf) - msg->sov;
 
 	if (len == 0)
 		return NULL;
@@ -389,7 +386,7 @@ struct server *get_server_hh(struct session *s)
 	ctx.idx = 0;
 
 	/* if the message is chunked, we skip the chunk size, but use the value as len */
-	http_find_header2(px->hh_name, plen, b_ptr(s->req->buf, (int)-s->req->buf->o), &txn->hdr_idx, &ctx);
+	http_find_header2(px->hh_name, plen, b_ptr(s->req->buf, -http_hdr_rewind(&txn->req)), &txn->hdr_idx, &ctx);
 
 	/* if the header is not found or empty, let's fallback to round robin */
 	if (!ctx.idx || !ctx.vlen)
@@ -544,8 +541,12 @@ int assign_server(struct session *s)
 
 	if (conn &&
 	    (conn->flags & CO_FL_CONNECTED) &&
-	    ((s->be->options & PR_O_PREF_LAST) || (s->txn.flags & TX_PREFER_LAST)) &&
 	    objt_server(conn->target) && __objt_server(conn->target)->proxy == s->be &&
+	    ((s->txn.flags & TX_PREFER_LAST) ||
+	     ((s->be->options & PR_O_PREF_LAST) &&
+	      (!s->be->max_ka_queue ||
+	       server_has_room(__objt_server(conn->target)) ||
+	       (__objt_server(conn->target)->nbpend + 1) < s->be->max_ka_queue))) &&
 	    srv_is_usable(__objt_server(conn->target)->state, __objt_server(conn->target)->eweight)) {
 		/* This session was relying on a server in a previous request
 		 * and the proxy has "option prefer-current-server" set, so
@@ -618,7 +619,7 @@ int assign_server(struct session *s)
 				if (s->txn.req.msg_state < HTTP_MSG_BODY)
 					break;
 				srv = get_server_uh(s->be,
-						    b_ptr(s->req->buf, (int)(s->txn.req.sl.rq.u - s->req->buf->o)),
+						    b_ptr(s->req->buf, -http_uri_rewind(&s->txn.req)),
 						    s->txn.req.sl.rq.u_l);
 				break;
 
@@ -628,7 +629,7 @@ int assign_server(struct session *s)
 					break;
 
 				srv = get_server_ph(s->be,
-						    b_ptr(s->req->buf, (int)(s->txn.req.sl.rq.u - s->req->buf->o)),
+						    b_ptr(s->req->buf, -http_uri_rewind(&s->txn.req)),
 						    s->txn.req.sl.rq.u_l);
 
 				if (!srv && s->txn.meth == HTTP_METH_POST)
@@ -677,7 +678,6 @@ int assign_server(struct session *s)
 			goto out;
 		}
 		else if (srv != prev_srv) {
-			be_set_sess_last(s->be);
 			s->be->be_counters.cum_lbconn++;
 			srv->counters.cum_lbconn++;
 		}
@@ -970,7 +970,7 @@ static void assign_tproxy_address(struct session *s)
 			((struct sockaddr_in *)&srv_conn->addr.from)->sin_port = 0;
 			((struct sockaddr_in *)&srv_conn->addr.from)->sin_addr.s_addr = 0;
 
-			b_rew(s->req->buf, rewind = s->req->buf->o);
+			b_rew(s->req->buf, rewind = http_hdr_rewind(&s->txn.req));
 			if (http_get_hdr(&s->txn.req, src->bind_hdr_name, src->bind_hdr_len,
 					 &s->txn.hdr_idx, src->bind_hdr_occ, NULL, &vptr, &vlen)) {
 				((struct sockaddr_in *)&srv_conn->addr.from)->sin_addr.s_addr =
@@ -1114,7 +1114,7 @@ int connect_server(struct session *s)
  * that the connection is ready to use.
  */
 
-int srv_redispatch_connect(struct session *t)
+int srv_redispatch_connect(struct session *s)
 {
 	struct server *srv;
 	int conn_err;
@@ -1123,8 +1123,8 @@ int srv_redispatch_connect(struct session *t)
 	 * try to get a new one, and wait in this state if it's queued
 	 */
  redispatch:
-	conn_err = assign_server_and_queue(t);
-	srv = objt_server(t->target);
+	conn_err = assign_server_and_queue(s);
+	srv = objt_server(s->target);
 
 	switch (conn_err) {
 	case SRV_STATUS_OK:
@@ -1135,42 +1135,42 @@ int srv_redispatch_connect(struct session *t)
 		 * and we can redispatch to another server, or it is not and we return
 		 * 503. This only makes sense in DIRECT mode however, because normal LB
 		 * algorithms would never select such a server, and hash algorithms
-		 * would bring us on the same server again. Note that t->target is set
+		 * would bring us on the same server again. Note that s->target is set
 		 * in this case.
 		 */
-		if (((t->flags & (SN_DIRECT|SN_FORCE_PRST)) == SN_DIRECT) &&
-		    (t->be->options & PR_O_REDISP)) {
-			t->flags &= ~(SN_DIRECT | SN_ASSIGNED | SN_ADDR_SET);
+		if (((s->flags & (SN_DIRECT|SN_FORCE_PRST)) == SN_DIRECT) &&
+		    (s->be->options & PR_O_REDISP)) {
+			s->flags &= ~(SN_DIRECT | SN_ASSIGNED | SN_ADDR_SET);
 			goto redispatch;
 		}
 
-		if (!t->req->cons->err_type) {
-			t->req->cons->err_type = SI_ET_QUEUE_ERR;
+		if (!s->req->cons->err_type) {
+			s->req->cons->err_type = SI_ET_QUEUE_ERR;
 		}
 
 		srv->counters.failed_conns++;
-		t->be->be_counters.failed_conns++;
+		s->be->be_counters.failed_conns++;
 		return 1;
 
 	case SRV_STATUS_NOSRV:
 		/* note: it is guaranteed that srv == NULL here */
-		if (!t->req->cons->err_type) {
-			t->req->cons->err_type = SI_ET_CONN_ERR;
+		if (!s->req->cons->err_type) {
+			s->req->cons->err_type = SI_ET_CONN_ERR;
 		}
 
-		t->be->be_counters.failed_conns++;
+		s->be->be_counters.failed_conns++;
 		return 1;
 
 	case SRV_STATUS_QUEUED:
-		t->req->cons->exp = tick_add_ifset(now_ms, t->be->timeout.queue);
-		t->req->cons->state = SI_ST_QUE;
+		s->req->cons->exp = tick_add_ifset(now_ms, s->be->timeout.queue);
+		s->req->cons->state = SI_ST_QUE;
 		/* do nothing else and do not wake any other session up */
 		return 1;
 
 	case SRV_STATUS_INTERNAL:
 	default:
-		if (!t->req->cons->err_type) {
-			t->req->cons->err_type = SI_ET_CONN_OTHER;
+		if (!s->req->cons->err_type) {
+			s->req->cons->err_type = SI_ET_CONN_OTHER;
 		}
 
 		if (srv)
@@ -1179,10 +1179,10 @@ int srv_redispatch_connect(struct session *t)
 			srv_set_sess_last(srv);
 		if (srv)
 			srv->counters.failed_conns++;
-		t->be->be_counters.failed_conns++;
+		s->be->be_counters.failed_conns++;
 
 		/* release other sessions waiting for this server */
-		if (may_dequeue_tasks(srv, t->be))
+		if (may_dequeue_tasks(srv, s->be))
 			process_srv_queue(srv);
 		return 1;
 	}
@@ -1382,15 +1382,6 @@ int backend_parse_balance(const char **args, char **err, struct proxy *curproxy)
 				memprintf(err, "%s only accepts 'check_post' modifier (got '%s').", args[0], args[2]);
 				return -1;
 			}
-			if (*args[3]) {
-				/* TODO: maybe issue a warning if there is no value, no digits or too long */
-				curproxy->url_param_post_limit = str2ui(args[3]);
-			}
-			/* if no limit, or faul value in args[3], then default to a moderate wordlen */
-			if (!curproxy->url_param_post_limit)
-				curproxy->url_param_post_limit = 48;
-			else if ( curproxy->url_param_post_limit < 3 )
-				curproxy->url_param_post_limit = 3; /* minimum example: S=3 or \r\nS=6& */
 		}
 	}
 	else if (!strncmp(args[0], "hdr(", 4)) {

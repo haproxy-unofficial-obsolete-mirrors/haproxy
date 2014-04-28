@@ -1180,6 +1180,7 @@ static void sess_prepare_conn_req(struct session *s, struct stream_interface *si
 		s->logs.t_queue   = tv_ms_elapsed(&s->logs.tv_accept, &now);
 		si->state         = SI_ST_EST;
 		si->err_type      = SI_ET_NONE;
+		be_set_sess_last(s->be);
 		/* let sess_establish() finish the job */
 		return;
 	}
@@ -1207,6 +1208,7 @@ static void sess_prepare_conn_req(struct session *s, struct stream_interface *si
 	/* The server is assigned */
 	s->logs.t_queue = tv_ms_elapsed(&s->logs.tv_accept, &now);
 	si->state = SI_ST_ASS;
+	be_set_sess_last(s->be);
 }
 
 /* This stream analyser checks the switching rules and changes the backend
@@ -1236,12 +1238,14 @@ static int process_switching_rules(struct session *s, struct channel *req, int a
 		struct switching_rule *rule;
 
 		list_for_each_entry(rule, &s->fe->switching_rules, list) {
-			int ret;
+			int ret = 1;
 
-			ret = acl_exec_cond(rule->cond, s->fe, s, &s->txn, SMP_OPT_DIR_REQ|SMP_OPT_FINAL);
-			ret = acl_pass(ret);
-			if (rule->cond->pol == ACL_COND_UNLESS)
-				ret = !ret;
+			if (rule->cond) {
+				ret = acl_exec_cond(rule->cond, s->fe, s, &s->txn, SMP_OPT_DIR_REQ|SMP_OPT_FINAL);
+				ret = acl_pass(ret);
+				if (rule->cond->pol == ACL_COND_UNLESS)
+					ret = !ret;
+			}
 
 			if (ret) {
 				/* If the backend name is dynamic, try to resolve the name.
@@ -1897,7 +1901,7 @@ struct task *process_session(struct task *t)
 				}
 
 				if (ana_list & AN_REQ_HTTP_BODY) {
-					if (!http_process_request_body(s, s->req, AN_REQ_HTTP_BODY))
+					if (!http_wait_for_request_body(s, s->req, AN_REQ_HTTP_BODY))
 						break;
 					UPDATE_ANALYSERS(s->req->analysers, ana_list, ana_back, AN_REQ_HTTP_BODY);
 				}
