@@ -312,7 +312,7 @@ int str2listener(char *str, struct proxy *curproxy, struct bind_conf *bind_conf,
  */
 int warnif_rule_after_block(struct proxy *proxy, const char *file, int line, const char *arg)
 {
-	if (!LIST_ISEMPTY(&proxy->block_cond)) {
+	if (!LIST_ISEMPTY(&proxy->block_rules)) {
 		Warning("parsing [%s:%d] : a '%s' rule placed after a 'block' rule will still be processed before.\n",
 			file, line, arg);
 		return 1;
@@ -1405,7 +1405,7 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 					high = swap;
 				}
 
-				if (low < 0 || high >= sizeof(long) * 8) {
+				if (high >= sizeof(long) * 8) {
 					Alert("parsing [%s:%d]: %s supports CPU numbers from 0 to %d.\n",
 					      file, linenum, args[0], (int)(sizeof(long) * 8 - 1));
 					err_code |= ERR_ALERT | ERR_FATAL;
@@ -2874,28 +2874,32 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		curproxy->server_id_hdr_len  = strlen(curproxy->server_id_hdr_name);
 	}
 	else if (!strcmp(args[0], "block")) {  /* early blocking based on ACLs */
+		struct http_req_rule *rule;
+
 		if (curproxy == &defproxy) {
 			Alert("parsing [%s:%d] : '%s' not allowed in 'defaults' section.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
 
-		if (strcmp(args[1], "if") != 0 && strcmp(args[1], "unless") != 0) {
-			Alert("parsing [%s:%d] : '%s' requires either 'if' or 'unless' followed by a condition.\n",
-			      file, linenum, args[0]);
-			err_code |= ERR_ALERT | ERR_FATAL;
+		/* emulate "block" using "http-request block". Since these rules are supposed to
+		 * be processed before all http-request rules, we put them into their own list
+		 * and will insert them at the end.
+		 */
+		rule = parse_http_req_cond((const char **)args, file, linenum, curproxy);
+		if (!rule) {
+			err_code |= ERR_ALERT | ERR_ABORT;
 			goto out;
 		}
+		err_code |= warnif_misplaced_block(curproxy, file, linenum, args[0]);
+		err_code |= warnif_cond_conflicts(rule->cond,
+	                                          (curproxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR,
+	                                          file, linenum);
+		LIST_ADDQ(&curproxy->block_rules, &rule->list);
 
-		if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args + 1, &errmsg)) == NULL) {
-			Alert("parsing [%s:%d] : error detected while parsing blocking condition : %s.\n",
-			      file, linenum, errmsg);
-			err_code |= ERR_ALERT | ERR_FATAL;
-			goto out;
-		}
+		if (!already_warned(WARN_BLOCK_DEPRECATED))
+			Warning("parsing [%s:%d] : The '%s' directive is now deprecated in favor of 'http-request deny' which uses the exact same syntax. The rules are translated but support might disappear in a future version.\n", file, linenum, args[0]);
 
-		LIST_ADDQ(&curproxy->block_cond, &cond->list);
-		warnif_misplaced_block(curproxy, file, linenum, args[0]);
 	}
 	else if (!strcmp(args[0], "redirect")) {
 		struct redirect_rule *rule;
@@ -4058,7 +4062,8 @@ stats_error_parsing:
 		if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], NULL))
 			err_code |= ERR_WARN;
 
-		Warning("parsing [%s:%d]: keyword '%s' is deprecated, please use 'option redispatch' instead.\n",
+		if (!already_warned(WARN_REDISPATCH_DEPRECATED))
+			Warning("parsing [%s:%d]: keyword '%s' is deprecated in favor of 'option redispatch', and will not be supported by future versions.\n",
 				file, linenum, args[0]);
 		err_code |= ERR_WARN;
 		/* enable reconnections to dispatch */
@@ -4993,6 +4998,9 @@ stats_error_parsing:
 						   args[0], args[1], args[2], (const char **)args+3);
 		if (err_code & ERR_FATAL)
 			goto out;
+
+		if (!already_warned(WARN_REQSETBE_DEPRECATED))
+			Warning("parsing [%s:%d] : The '%s' directive is now deprecated in favor of the more efficient 'use_backend' which uses a different but more powerful syntax. Future versions will not support '%s' anymore, you should convert it now!\n", file, linenum, args[0], args[0]);
 	}
 	else if (!strcmp(args[0], "reqisetbe")) { /* switch the backend from a regex, ignoring case */
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
@@ -5000,6 +5008,9 @@ stats_error_parsing:
 						   args[0], args[1], args[2], (const char **)args+3);
 		if (err_code & ERR_FATAL)
 			goto out;
+
+		if (!already_warned(WARN_REQSETBE_DEPRECATED))
+			Warning("parsing [%s:%d] : The '%s' directive is now deprecated in favor of the more efficient 'use_backend' which uses a different but more powerful syntax. Future versions will not support '%s' anymore, you should convert it now!\n", file, linenum, args[0], args[0]);
 	}
 	else if (!strcmp(args[0], "reqirep")) {  /* replace request header from a regex, ignoring case */
 		if (*(args[2]) == 0) {
@@ -6187,6 +6198,16 @@ int check_config_validity()
 				 * stktable_alloc_data_type().
 				 */
 			}
+		}
+
+		/* move any "block" rules at the beginning of the http-request rules */
+		if (!LIST_ISEMPTY(&curproxy->block_rules)) {
+			/* insert block_rules into http_req_rules at the beginning */
+			curproxy->block_rules.p->n    = curproxy->http_req_rules.n;
+			curproxy->http_req_rules.n->p = curproxy->block_rules.p;
+			curproxy->block_rules.n->p    = &curproxy->http_req_rules;
+			curproxy->http_req_rules.n    = curproxy->block_rules.n;
+			LIST_INIT(&curproxy->block_rules);
 		}
 
 		if (curproxy->table.peers.name) {

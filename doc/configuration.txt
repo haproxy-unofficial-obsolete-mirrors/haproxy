@@ -9535,6 +9535,11 @@ support some arguments (eg: a netmask) which must be passed in parenthesis.
 
 The currently available list of transformation keywords include :
 
+base64
+  Converts a binary input sample to a base64 string. It is used to log or
+  transfer binary content in a way that can be reliably transferred (eg:
+  an SSL ID can be copied in a header).
+
 lower
   Convert a string sample to lower case. This can only be placed after a string
   sample fetch function or after a transformation keyword returning a string
@@ -10279,6 +10284,37 @@ when no content is yet made available. The fetch methods described here are
 usable as low as the "tcp-request content" rule sets unless they require some
 future information. Those generally include the results of SSL negotiations.
 
+ssl_bc : boolean
+  Returns true when the back connection was made via an SSL/TLS transport
+  layer and is locally deciphered. This means the outgoing connection was made
+  other a server with the "ssl" option.
+
+ssl_bc_alg_keysize : integer
+  Returns the symmetric cipher key size supported in bits when the outgoing
+  connection was made over an SSL/TLS transport layer.
+
+ssl_bc_cipher : string
+  Returns the name of the used cipher when the outgoing connection was made
+  over an SSL/TLS transport layer.
+
+ssl_bc_protocol : string
+  Returns the name of the used protocol when the outgoing connection was made
+  over an SSL/TLS transport layer.
+
+ssl_bc_unique_id : binary
+  When the outgoing connection was made over an SSL/TLS transport layer,
+  returns the TLS unique ID as defined in RFC5929 section 3. The unique id
+  can be encoded to base64 using the converter: "ssl_bc_unique_id,base64".
+
+ssl_bc_session_id : binary
+  Returns the SSL ID of the back connection when the outgoing connection was
+  made over an SSL/TLS transport layer. It is useful to log if we want to know
+  if session was reused or not.
+
+ssl_bc_use_keysize : integer
+  Returns the symmetric cipher key size used in bits when the outgoing
+  connection was made over an SSL/TLS transport layer.
+
 ssl_c_ca_err : integer
   When the incoming connection was made over an SSL/TLS transport layer,
   returns the ID of the first error detected during verification of the client
@@ -10309,32 +10345,20 @@ ssl_c_i_dn([<entry>[,<occ>]]) : string
   For instance, "ssl_c_i_dn(OU,2)" the second organization unit, and
   "ssl_c_i_dn(CN)" retrieves the common name.
 
-  ACL derivatives :
-    ssl_c_i_dn([<entry>[,<occ>]]) : exact string match
-
 ssl_c_key_alg : string
   Returns the name of the algorithm used to generate the key of the certificate
   presented by the client when the incoming connection was made over an SSL/TLS
   transport layer.
-
-  ACL derivatives :
-    ssl_c_key_alg : exact string match
 
 ssl_c_notafter : string
   Returns the end date presented by the client as a formatted string
   YYMMDDhhmmss[Z] when the incoming connection was made over an SSL/TLS
   transport layer.
 
-  ACL derivatives :
-    ssl_c_notafter : exact string match
-
 ssl_c_notbefore : string
   Returns the start date presented by the client as a formatted string
   YYMMDDhhmmss[Z] when the incoming connection was made over an SSL/TLS
   transport layer.
-
-  ACL derivatives :
-    ssl_c_notbefore : exact string match
 
 ssl_c_s_dn([<entry>[,<occ>]]) : string
   When the incoming connection was made over an SSL/TLS transport layer,
@@ -10346,16 +10370,10 @@ ssl_c_s_dn([<entry>[,<occ>]]) : string
   For instance, "ssl_c_s_dn(OU,2)" the second organization unit, and
   "ssl_c_s_dn(CN)" retrieves the common name.
 
-  ACL derivatives :
-    ssl_c_s_dn([<entry>[,<occ>]]) : exact string match
-
 ssl_c_serial : binary
   Returns the serial of the certificate presented by the client when the
   incoming connection was made over an SSL/TLS transport layer. When used for
   an ACL, the value(s) to match against can be passed in hexadecimal form.
-
-  ACL derivatives :
-    ssl_c_serial : hex block match
 
 ssl_c_sha1 : binary
   Returns the SHA-1 fingerprint of the certificate presented by the client when
@@ -10366,9 +10384,6 @@ ssl_c_sig_alg : string
   Returns the name of the algorithm used to sign the certificate presented by
   the client when the incoming connection was made over an SSL/TLS transport
   layer.
-
-  ACL derivatives :
-    ssl_c_sig_alg : exact string match
 
 ssl_c_used : boolean
   Returns true if current SSL session uses a client certificate even if current
@@ -10394,32 +10409,20 @@ ssl_f_i_dn([<entry>[,<occ>]]) : string
   For instance, "ssl_f_i_dn(OU,2)" the second organization unit, and
   "ssl_f_i_dn(CN)" retrieves the common name.
 
-  ACL derivatives :
-    ssl_f_i_dn([<entry>[,<occ>]]) : exact string match
-
 ssl_f_key_alg : string
   Returns the name of the algorithm used to generate the key of the certificate
   presented by the frontend when the incoming connection was made over an
   SSL/TLS transport layer.
-
-  ACL derivatives :
-    ssl_f_key_alg : exact string match
 
 ssl_f_notafter : string
   Returns the end date presented by the frontend as a formatted string
   YYMMDDhhmmss[Z] when the incoming connection was made over an SSL/TLS
   transport layer.
 
-  ACL derivatives :
-    ssl_f_notafter : exact string match
-
 ssl_f_notbefore : string
   Returns the start date presented by the frontend as a formatted string
   YYMMDDhhmmss[Z] when the incoming connection was made over an SSL/TLS
   transport layer.
-
-  ACL derivatives :
-    ssl_f_notbefore : exact string match
 
 ssl_f_s_dn([<entry>[,<occ>]]) : string
   When the incoming connection was made over an SSL/TLS transport layer,
@@ -10431,24 +10434,20 @@ ssl_f_s_dn([<entry>[,<occ>]]) : string
   For instance, "ssl_f_s_dn(OU,2)" the second organization unit, and
   "ssl_f_s_dn(CN)" retrieves the common name.
 
-  ACL derivatives :
-    ssl_f_s_dn([<entry>[,<occ>]]) : exact string match
-
 ssl_f_serial : binary
   Returns the serial of the certificate presented by the frontend when the
   incoming connection was made over an SSL/TLS transport layer. When used for
   an ACL, the value(s) to match against can be passed in hexadecimal form.
 
-  ACL derivatives :
-    ssl_f_serial : hex block match
+ssl_f_sha1 : binary
+  Returns the SHA-1 fingerprint of the certificate presented by the frontend
+  when the incoming connection was made over an SSL/TLS transport layer. This
+  can be used to know which certificate was chosen using SNI.
 
 ssl_f_sig_alg : string
   Returns the name of the algorithm used to sign the certificate presented by
   the frontend when the incoming connection was made over an SSL/TLS transport
   layer.
-
-  ACL derivatives :
-    ssl_f_sig_alg : exact string match
 
 ssl_f_version : integer
   Returns the version of the certificate presented by the frontend when the
@@ -10481,15 +10480,9 @@ ssl_fc_alpn : string
   list, any other one may be requested. The TLS ALPN extension is meant to
   replace the TLS NPN extension. See also "ssl_fc_npn".
 
-  ACL derivatives :
-    ssl_fc_alpn : exact string match
-
 ssl_fc_cipher : string
   Returns the name of the used cipher when the incoming connection was made
   over an SSL/TLS transport layer.
-
-  ACL derivatives :
-    ssl_fc_cipher : exact string match
 
 ssl_fc_has_crt : boolean
   Returns true if a client certificate is present in an incoming connection over
@@ -10516,20 +10509,14 @@ ssl_fc_npn : string
   forces the client to pick a protocol from this list, any other one may be
   requested. Please note that the TLS NPN extension was replaced with ALPN.
 
-  ACL derivatives :
-    ssl_fc_npn : exact string match
-
 ssl_fc_protocol : string
   Returns the name of the used protocol when the incoming connection was made
   over an SSL/TLS transport layer.
 
-  ACL derivatives :
-    ssl_fc_protocol : exact string match
-
-ssl_fc_unique_id : string
+ssl_fc_unique_id : binary
   When the incoming connection was made over an SSL/TLS transport layer,
-  returns a base64 encoded string containing the TLS unique ID as defined
-  in RFC5929 section 3.
+  returns the TLS unique ID as defined in RFC5929 section 3. The unique id
+  can be encoded to base64 using the converter: "ssl_bc_unique_id,base64".
 
 ssl_fc_session_id : binary
   Returns the SSL ID of the front connection when the incoming connection was
@@ -10551,7 +10538,6 @@ ssl_fc_sni : string
   enabled (check haproxy -vv).
 
   ACL derivatives :
-    ssl_fc_sni     : exact string match
     ssl_fc_sni_end : suffix match
     ssl_fc_sni_reg : regex match
 

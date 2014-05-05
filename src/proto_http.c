@@ -252,6 +252,8 @@ fd_set http_encode_map[(sizeof(fd_set) > (256/8)) ? 1 : ((256/8) / sizeof(fd_set
 #error "Check if your OS uses bitfields for fd_sets"
 #endif
 
+static int http_apply_redirect_rule(struct redirect_rule *rule, struct session *s, struct http_txn *txn);
+
 void init_proto_http()
 {
 	int i;
@@ -2916,6 +2918,70 @@ int http_wait_for_request(struct session *s, struct channel *req, int an_bit)
 	if (!use_close_only)
 		msg->flags |= HTTP_MSGF_XFER_LEN;
 
+	/* Until set to anything else, the connection mode is set as Keep-Alive. It will
+	 * only change if both the request and the config reference something else.
+	 * Option httpclose by itself sets tunnel mode where headers are mangled.
+	 * However, if another mode is set, it will affect it (eg: server-close/
+	 * keep-alive + httpclose = close). Note that we avoid to redo the same work
+	 * if FE and BE have the same settings (common). The method consists in
+	 * checking if options changed between the two calls (implying that either
+	 * one is non-null, or one of them is non-null and we are there for the first
+	 * time.
+	 */
+	if (!(txn->flags & TX_HDR_CONN_PRS) ||
+	    ((s->fe->options & PR_O_HTTP_MODE) != (s->be->options & PR_O_HTTP_MODE))) {
+		int tmp = TX_CON_WANT_KAL;
+
+		if (!((s->fe->options2|s->be->options2) & PR_O2_FAKE_KA)) {
+			if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_TUN ||
+			    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_TUN)
+				tmp = TX_CON_WANT_TUN;
+
+			if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL ||
+			    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL)
+				tmp = TX_CON_WANT_TUN;
+		}
+
+		if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_SCL ||
+		    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_SCL) {
+			/* option httpclose + server_close => forceclose */
+			if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL ||
+			    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL)
+				tmp = TX_CON_WANT_CLO;
+			else
+				tmp = TX_CON_WANT_SCL;
+		}
+
+		if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_FCL ||
+		    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_FCL)
+			tmp = TX_CON_WANT_CLO;
+
+		if ((txn->flags & TX_CON_WANT_MSK) < tmp)
+			txn->flags = (txn->flags & ~TX_CON_WANT_MSK) | tmp;
+
+		if (!(txn->flags & TX_HDR_CONN_PRS) &&
+		    (txn->flags & TX_CON_WANT_MSK) != TX_CON_WANT_TUN) {
+			/* parse the Connection header and possibly clean it */
+			int to_del = 0;
+			if ((msg->flags & HTTP_MSGF_VER_11) ||
+			    ((txn->flags & TX_CON_WANT_MSK) >= TX_CON_WANT_SCL &&
+			     !((s->fe->options2|s->be->options2) & PR_O2_FAKE_KA)))
+				to_del |= 2; /* remove "keep-alive" */
+			if (!(msg->flags & HTTP_MSGF_VER_11))
+				to_del |= 1; /* remove "close" */
+			http_parse_connection_header(txn, msg, to_del);
+		}
+
+		/* check if client or config asks for explicit close in KAL/SCL */
+		if (((txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_KAL ||
+		     (txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_SCL) &&
+		    ((txn->flags & TX_HDR_CONN_CLO) ||                         /* "connection: close" */
+		     (!(msg->flags & HTTP_MSGF_VER_11) && !(txn->flags & TX_HDR_CONN_KAL)) || /* no "connection: k-a" in 1.0 */
+		     !(msg->flags & HTTP_MSGF_XFER_LEN) ||                     /* no length known => close */
+		     s->fe->state == PR_STSTOPPED))                            /* frontend is stopping */
+		    txn->flags = (txn->flags & ~TX_CON_WANT_MSK) | TX_CON_WANT_CLO;
+	}
+
 	/* end of job, return OK */
 	req->analysers &= ~an_bit;
 	req->analyse_exp = TICK_ETERNITY;
@@ -3072,22 +3138,8 @@ int http_handle_stats(struct session *s, struct channel *req)
 	/* Was the status page requested with a POST ? */
 	if (unlikely(txn->meth == HTTP_METH_POST && txn->req.body_len > 0)) {
 		if (appctx->ctx.stats.flags & STAT_ADMIN) {
-			if (msg->msg_state < HTTP_MSG_100_SENT) {
-				/* If we have HTTP/1.1 and Expect: 100-continue, then we must
-				 * send an HTTP/1.1 100 Continue intermediate response.
-				 */
-				if (msg->flags & HTTP_MSGF_VER_11) {
-					struct hdr_ctx ctx;
-					ctx.idx = 0;
-					/* Expect is allowed in 1.1, look for it */
-					if (http_find_header2("Expect", 6, req->buf->p, &txn->hdr_idx, &ctx) &&
-					    unlikely(ctx.vlen == 12 && strncasecmp(ctx.line+ctx.val, "100-continue", 12) == 0)) {
-						bo_inject(s->rep, http_100_chunk.str, http_100_chunk.len);
-					}
-				}
-				msg->msg_state = HTTP_MSG_100_SENT;
-				s->logs.tv_request = now;  /* update the request timer to reflect full request */
-			}
+			/* we'll need the request body, possibly after sending 100-continue */
+			req->analysers |= AN_REQ_HTTP_BODY;
 			appctx->st0 = STAT_HTTP_POST;
 		}
 		else {
@@ -3125,17 +3177,19 @@ static inline void inet_set_tos(int fd, struct sockaddr_storage from, int tos)
 }
 
 /* Executes the http-request rules <rules> for session <s>, proxy <px> and
- * transaction <txn>. Returns the first rule that prevents further processing
- * of the request (auth, deny, ...) or NULL if it executed all rules or stopped
- * on an allow. It may set the TX_CLDENY on txn->flags if it encounters a deny
- * rule.
+ * transaction <txn>. Returns the verdict of the first rule that prevents
+ * further processing of the request (auth, deny, ...), and defaults to
+ * HTTP_RULE_RES_STOP if it executed all rules or stopped on an allow, or
+ * HTTP_RULE_RES_CONT if the last rule was reached. It may set the TX_CLTARPIT
+ * on txn->flags if it encounters a tarpit rule.
  */
-static struct http_req_rule *
+enum rule_result
 http_req_get_intercept_rule(struct proxy *px, struct list *rules, struct session *s, struct http_txn *txn)
 {
 	struct connection *cli_conn;
 	struct http_req_rule *rule;
 	struct hdr_ctx ctx;
+	const char *auth_realm;
 
 	list_for_each_entry(rule, rules, list) {
 		if (rule->action >= HTTP_REQ_ACT_MAX)
@@ -3158,21 +3212,38 @@ http_req_get_intercept_rule(struct proxy *px, struct list *rules, struct session
 
 		switch (rule->action) {
 		case HTTP_REQ_ACT_ALLOW:
-			return NULL; /* "allow" rules are OK */
+			return HTTP_RULE_RES_STOP;
 
 		case HTTP_REQ_ACT_DENY:
-			txn->flags |= TX_CLDENY;
-			return rule;
+			return HTTP_RULE_RES_DENY;
 
 		case HTTP_REQ_ACT_TARPIT:
 			txn->flags |= TX_CLTARPIT;
-			return rule;
+			return HTTP_RULE_RES_DENY;
 
 		case HTTP_REQ_ACT_AUTH:
-			return rule;
+			/* Auth might be performed on regular http-req rules as well as on stats */
+			auth_realm = rule->arg.auth.realm;
+			if (!auth_realm) {
+				if (px->uri_auth && rules == &px->uri_auth->http_req_rules)
+					auth_realm = STATS_DEFAULT_REALM;
+				else
+					auth_realm = px->id;
+			}
+			/* send 401/407 depending on whether we use a proxy or not. We still
+			 * count one error, because normal browsing won't significantly
+			 * increase the counter but brute force attempts will.
+			 */
+			chunk_printf(&trash, (txn->flags & TX_USE_PX_CONN) ? HTTP_407_fmt : HTTP_401_fmt, auth_realm);
+			txn->status = (txn->flags & TX_USE_PX_CONN) ? 407 : 401;
+			stream_int_retnclose(&s->si[0], &trash);
+			session_inc_http_err_ctr(s);
+			return HTTP_RULE_RES_ABRT;
 
 		case HTTP_REQ_ACT_REDIR:
-			return rule;
+			if (!http_apply_redirect_rule(rule->arg.redir, s, txn))
+				return HTTP_RULE_RES_BADREQ;
+			return HTTP_RULE_RES_DONE;
 
 		case HTTP_REQ_ACT_SET_NICE:
 			s->task->nice = rule->arg.nice;
@@ -3306,12 +3377,12 @@ http_req_get_intercept_rule(struct proxy *px, struct list *rules, struct session
 
 		case HTTP_REQ_ACT_CUSTOM_STOP:
 			rule->action_ptr(rule, px, s, txn);
-			return rule;
+			return HTTP_RULE_RES_DONE;
 		}
 	}
 
 	/* we reached the end of the rules, nothing to report */
-	return NULL;
+	return HTTP_RULE_RES_CONT;
 }
 
 
@@ -3763,19 +3834,15 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit, 
 {
 	struct http_txn *txn = &s->txn;
 	struct http_msg *msg = &txn->req;
-	struct acl_cond *cond;
-	struct http_req_rule *http_req_last_rule = NULL;
 	struct redirect_rule *rule;
 	struct cond_wordlist *wl;
+	enum rule_result verdict;
 
 	if (unlikely(msg->msg_state < HTTP_MSG_BODY)) {
 		/* we need more data */
 		channel_dont_connect(req);
 		return 0;
 	}
-
-	req->analysers &= ~an_bit;
-	req->analyse_exp = TICK_ETERNITY;
 
 	DPRINTF(stderr,"[%u] %s: session=%p b=%p, exp(r,w)=%u,%u bf=%08x bh=%d analysers=%02x\n",
 		now_ms, __FUNCTION__,
@@ -3786,181 +3853,74 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit, 
 		req->buf->i,
 		req->analysers);
 
-	/* first check whether we have some ACLs set to block this request */
-	list_for_each_entry(cond, &px->block_cond, list) {
-		int ret = acl_exec_cond(cond, px, s, txn, SMP_OPT_DIR_REQ|SMP_OPT_FINAL);
-
-		ret = acl_pass(ret);
-		if (cond->pol == ACL_COND_UNLESS)
-			ret = !ret;
-
-		if (ret) {
-			txn->status = 403;
-			/* let's log the request time */
-			s->logs.tv_request = now;
-			stream_int_retnclose(req->prod, http_error_message(s, HTTP_ERR_403));
-			session_inc_http_err_ctr(s);
-			goto return_prx_cond;
-		}
-	}
-
 	/* just in case we have some per-backend tracking */
 	session_inc_be_http_req_ctr(s);
 
 	/* evaluate http-request rules */
-	http_req_last_rule = http_req_get_intercept_rule(px, &px->http_req_rules, s, txn);
+	if (!LIST_ISEMPTY(&px->http_req_rules)) {
+		verdict = http_req_get_intercept_rule(px, &px->http_req_rules, s, txn);
 
-	/* evaluate stats http-request rules only if http-request is OK */
-	if (!http_req_last_rule) {
-		if (stats_check_uri(s->rep->prod, txn, px)) {
-			s->target = &http_stats_applet.obj_type;
-			if (unlikely(!stream_int_register_handler(s->rep->prod, objt_applet(s->target)))) {
-				txn->status = 500;
-				s->logs.tv_request = now;
-				stream_int_retnclose(req->prod, http_error_message(s, HTTP_ERR_500));
+		switch (verdict) {
+		case HTTP_RULE_RES_CONT:
+		case HTTP_RULE_RES_STOP: /* nothing to do */
+			break;
 
-				if (!(s->flags & SN_ERR_MASK))
-					s->flags |= SN_ERR_RESOURCE;
-				goto return_prx_cond;
-			}
-			/* parse the whole stats request and extract the relevant information */
-			http_handle_stats(s, req);
-			http_req_last_rule = http_req_get_intercept_rule(px, &px->uri_auth->http_req_rules, s, txn);
+		case HTTP_RULE_RES_DENY: /* deny or tarpit */
+			if (txn->flags & TX_CLTARPIT)
+				goto tarpit;
+			goto deny;
+
+		case HTTP_RULE_RES_ABRT: /* abort request, response already sent. Eg: auth */
+			goto return_prx_cond;
+
+		case HTTP_RULE_RES_DONE: /* OK, but terminate request processing (eg: redirect) */
+			goto done;
+
+		case HTTP_RULE_RES_BADREQ: /* failed with a bad request */
+			goto return_bad_req;
 		}
 	}
 
-	/* only apply req{,i}{rep/deny/tarpit} if the request was not yet
-	 * blocked by an http-request rule.
+	/* OK at this stage, we know that the request was accepted according to
+	 * the http-request rules, we can check for the stats. Note that the
+	 * URI is detected *before* the req* rules in order not to be affected
+	 * by a possible reqrep, while they are processed *after* so that a
+	 * reqdeny can still block them. This clearly needs to change in 1.6!
 	 */
-	if (!(txn->flags & (TX_CLDENY|TX_CLTARPIT)) && (px->req_exp != NULL)) {
-		if (apply_filters_to_request(s, req, px) < 0)
-			goto return_bad_req;
-	}
-
-	/* return a 403 if either rule has blocked */
-	if (txn->flags & (TX_CLDENY|TX_CLTARPIT)) {
-		if (txn->flags & TX_CLDENY) {
-			txn->status = 403;
+	if (stats_check_uri(s->rep->prod, txn, px)) {
+		s->target = &http_stats_applet.obj_type;
+		if (unlikely(!stream_int_register_handler(s->rep->prod, objt_applet(s->target)))) {
+			txn->status = 500;
 			s->logs.tv_request = now;
-			stream_int_retnclose(req->prod, http_error_message(s, HTTP_ERR_403));
-			session_inc_http_err_ctr(s);
-			s->fe->fe_counters.denied_req++;
-			if (s->fe != s->be)
-				s->be->be_counters.denied_req++;
-			if (s->listener->counters)
-				s->listener->counters->denied_req++;
+			stream_int_retnclose(req->prod, http_error_message(s, HTTP_ERR_500));
+
+			if (!(s->flags & SN_ERR_MASK))
+				s->flags |= SN_ERR_RESOURCE;
 			goto return_prx_cond;
 		}
 
-		/* When a connection is tarpitted, we use the tarpit timeout,
-		 * which may be the same as the connect timeout if unspecified.
-		 * If unset, then set it to zero because we really want it to
-		 * eventually expire. We build the tarpit as an analyser.
-		 */
-		if (txn->flags & TX_CLTARPIT) {
-			channel_erase(s->req);
-			/* wipe the request out so that we can drop the connection early
-			 * if the client closes first.
-			 */
-			channel_dont_connect(req);
-			req->analysers = 0; /* remove switching rules etc... */
-			req->analysers |= AN_REQ_HTTP_TARPIT;
-			req->analyse_exp = tick_add_ifset(now_ms,  s->be->timeout.tarpit);
-			if (!req->analyse_exp)
-				req->analyse_exp = tick_add(now_ms, 0);
-			session_inc_http_err_ctr(s);
-			s->fe->fe_counters.denied_req++;
-			if (s->fe != s->be)
-				s->be->be_counters.denied_req++;
-			if (s->listener->counters)
-				s->listener->counters->denied_req++;
-			return 1;
-		}
+		/* parse the whole stats request and extract the relevant information */
+		http_handle_stats(s, req);
+		verdict = http_req_get_intercept_rule(px, &px->uri_auth->http_req_rules, s, txn);
+		/* not all actions implemented: deny, allow, auth */
+
+		if (verdict == HTTP_RULE_RES_DENY) /* stats http-request deny */
+			goto deny;
+
+		if (verdict == HTTP_RULE_RES_ABRT) /* stats auth / stats http-request auth */
+			goto return_prx_cond;
 	}
 
-	/* Until set to anything else, the connection mode is set as Keep-Alive. It will
-	 * only change if both the request and the config reference something else.
-	 * Option httpclose by itself sets tunnel mode where headers are mangled.
-	 * However, if another mode is set, it will affect it (eg: server-close/
-	 * keep-alive + httpclose = close). Note that we avoid to redo the same work
-	 * if FE and BE have the same settings (common). The method consists in
-	 * checking if options changed between the two calls (implying that either
-	 * one is non-null, or one of them is non-null and we are there for the first
-	 * time.
-	 */
+	/* evaluate the req* rules except reqadd */
+	if (px->req_exp != NULL) {
+		if (apply_filters_to_request(s, req, px) < 0)
+			goto return_bad_req;
 
-	if (!(txn->flags & TX_HDR_CONN_PRS) ||
-	    ((s->fe->options & PR_O_HTTP_MODE) != (s->be->options & PR_O_HTTP_MODE))) {
-		int tmp = TX_CON_WANT_KAL;
+		if (txn->flags & TX_CLDENY)
+			goto deny;
 
-		if (!((s->fe->options2|s->be->options2) & PR_O2_FAKE_KA)) {
-			if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_TUN ||
-			    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_TUN)
-				tmp = TX_CON_WANT_TUN;
-
-			if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL ||
-			    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL)
-				tmp = TX_CON_WANT_TUN;
-		}
-
-		if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_SCL ||
-		    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_SCL) {
-			/* option httpclose + server_close => forceclose */
-			if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL ||
-			    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_PCL)
-				tmp = TX_CON_WANT_CLO;
-			else
-				tmp = TX_CON_WANT_SCL;
-		}
-
-		if ((s->fe->options & PR_O_HTTP_MODE) == PR_O_HTTP_FCL ||
-		    (s->be->options & PR_O_HTTP_MODE) == PR_O_HTTP_FCL)
-			tmp = TX_CON_WANT_CLO;
-
-		if ((txn->flags & TX_CON_WANT_MSK) < tmp)
-			txn->flags = (txn->flags & ~TX_CON_WANT_MSK) | tmp;
-
-		if (!(txn->flags & TX_HDR_CONN_PRS) &&
-		    (txn->flags & TX_CON_WANT_MSK) != TX_CON_WANT_TUN) {
-			/* parse the Connection header and possibly clean it */
-			int to_del = 0;
-			if ((msg->flags & HTTP_MSGF_VER_11) ||
-			    ((txn->flags & TX_CON_WANT_MSK) >= TX_CON_WANT_SCL &&
-			     !((s->fe->options2|s->be->options2) & PR_O2_FAKE_KA)))
-				to_del |= 2; /* remove "keep-alive" */
-			if (!(msg->flags & HTTP_MSGF_VER_11))
-				to_del |= 1; /* remove "close" */
-			http_parse_connection_header(txn, msg, to_del);
-		}
-
-		/* check if client or config asks for explicit close in KAL/SCL */
-		if (((txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_KAL ||
-		     (txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_SCL) &&
-		    ((txn->flags & TX_HDR_CONN_CLO) ||                         /* "connection: close" */
-		     (!(msg->flags & HTTP_MSGF_VER_11) && !(txn->flags & TX_HDR_CONN_KAL)) || /* no "connection: k-a" in 1.0 */
-		     !(msg->flags & HTTP_MSGF_XFER_LEN) ||                     /* no length known => close */
-		     s->fe->state == PR_STSTOPPED))                            /* frontend is stopping */
-		    txn->flags = (txn->flags & ~TX_CON_WANT_MSK) | TX_CON_WANT_CLO;
-	}
-
-	/* we can be blocked here because the request needs to be authenticated,
-	 * either to pass or to access stats.
-	 */
-	if (http_req_last_rule && http_req_last_rule->action == HTTP_REQ_ACT_AUTH) {
-		char *realm = http_req_last_rule->arg.auth.realm;
-
-		if (!realm)
-			realm = (objt_applet(s->target) == &http_stats_applet) ? STATS_DEFAULT_REALM : px->id;
-
-		chunk_printf(&trash, (txn->flags & TX_USE_PX_CONN) ? HTTP_407_fmt : HTTP_401_fmt, realm);
-		txn->status = (txn->flags & TX_USE_PX_CONN) ? 407 : 401;
-		stream_int_retnclose(req->prod, &trash);
-		/* on 401 we still count one error, because normal browsing
-		 * won't significantly increase the counter but brute force
-		 * attempts will.
-		 */
-		session_inc_http_err_ctr(s);
-		goto return_prx_cond;
+		if (txn->flags & TX_CLTARPIT)
+			goto tarpit;
 	}
 
 	/* add request headers from the rule sets in the same order */
@@ -3978,18 +3938,8 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit, 
 			goto return_bad_req;
 	}
 
-	if (http_req_last_rule && http_req_last_rule->action == HTTP_REQ_ACT_REDIR) {
-		if (!http_apply_redirect_rule(http_req_last_rule->arg.redir, s, txn))
-			goto return_bad_req;
-		req->analyse_exp = TICK_ETERNITY;
-		return 1;
-	}
 
-	if (http_req_last_rule && http_req_last_rule->action == HTTP_REQ_ACT_CUSTOM_STOP) {
-		req->analyse_exp = TICK_ETERNITY;
-		return 1;
-	}
-
+	/* Proceed with the stats now. */
 	if (unlikely(objt_applet(s->target) == &http_stats_applet)) {
 		/* process the stats request now */
 		if (s->fe == s->be) /* report it if the request was intercepted by the frontend */
@@ -4000,15 +3950,14 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit, 
 		if (!(s->flags & SN_FINST_MASK))
 			s->flags |= SN_FINST_R;
 
-		req->analyse_exp = TICK_ETERNITY;
-
 		/* we may want to compress the stats page */
 		if (s->fe->comp || s->be->comp)
 			select_compression_request_header(s, req->buf);
 
 		/* enable the minimally required analyzers to handle keep-alive and compression on the HTTP response */
-		req->analysers = AN_REQ_HTTP_XFER_BODY | AN_RES_WAIT_HTTP | AN_RES_HTTP_PROCESS_BE | AN_RES_HTTP_XFER_BODY;
-		return 1;
+		req->analysers = (req->analysers & AN_REQ_HTTP_BODY) |
+		                 AN_REQ_HTTP_XFER_BODY | AN_RES_WAIT_HTTP | AN_RES_HTTP_PROCESS_BE | AN_RES_HTTP_XFER_BODY;
+		goto done;
 	}
 
 	/* check whether we have some ACLs set to redirect this request */
@@ -4025,9 +3974,7 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit, 
 		}
 		if (!http_apply_redirect_rule(rule, s, txn))
 			goto return_bad_req;
-
-		req->analyse_exp = TICK_ETERNITY;
-		return 1;
+		goto done;
 	}
 
 	/* POST requests may be accompanied with an "Expect: 100-Continue" header.
@@ -4039,8 +3986,50 @@ int http_process_req_common(struct session *s, struct channel *req, int an_bit, 
 	 */
 	req->flags |= CF_SEND_DONTWAIT;
 
-	/* that's OK for us now, let's move on to next analysers */
+ done:	/* done with this analyser, continue with next ones that the calling
+	 * points will have set, if any.
+	 */
+	req->analysers &= ~an_bit;
+	req->analyse_exp = TICK_ETERNITY;
 	return 1;
+
+ tarpit:
+	/* When a connection is tarpitted, we use the tarpit timeout,
+	 * which may be the same as the connect timeout if unspecified.
+	 * If unset, then set it to zero because we really want it to
+	 * eventually expire. We build the tarpit as an analyser.
+	 */
+	channel_erase(s->req);
+
+	/* wipe the request out so that we can drop the connection early
+	 * if the client closes first.
+	 */
+	channel_dont_connect(req);
+	req->analysers = 0; /* remove switching rules etc... */
+	req->analysers |= AN_REQ_HTTP_TARPIT;
+	req->analyse_exp = tick_add_ifset(now_ms,  s->be->timeout.tarpit);
+	if (!req->analyse_exp)
+		req->analyse_exp = tick_add(now_ms, 0);
+	session_inc_http_err_ctr(s);
+	s->fe->fe_counters.denied_req++;
+	if (s->fe != s->be)
+		s->be->be_counters.denied_req++;
+	if (s->listener->counters)
+		s->listener->counters->denied_req++;
+	goto done;
+
+ deny:	/* this request was blocked (denied) */
+	txn->flags |= TX_CLDENY;
+	txn->status = 403;
+	s->logs.tv_request = now;
+	stream_int_retnclose(req->prod, http_error_message(s, HTTP_ERR_403));
+	session_inc_http_err_ctr(s);
+	s->fe->fe_counters.denied_req++;
+	if (s->fe != s->be)
+		s->be->be_counters.denied_req++;
+	if (s->listener->counters)
+		s->listener->counters->denied_req++;
+	goto return_prx_cond;
 
  return_bad_req:
 	/* We centralize bad requests processing here */
@@ -4765,7 +4754,7 @@ void http_end_txn_clean_session(struct session *s)
 	s->req->cons->conn_retries = 0;  /* used for logging too */
 	s->req->cons->exp       = TICK_ETERNITY;
 	s->req->cons->flags    &= SI_FL_DONT_WAKE; /* we're in the context of process_session */
-	s->req->flags &= ~(CF_SHUTW|CF_SHUTW_NOW|CF_AUTO_CONNECT|CF_WRITE_ERROR|CF_STREAMER|CF_STREAMER_FAST|CF_NEVER_WAIT);
+	s->req->flags &= ~(CF_SHUTW|CF_SHUTW_NOW|CF_AUTO_CONNECT|CF_WRITE_ERROR|CF_STREAMER|CF_STREAMER_FAST|CF_NEVER_WAIT|CF_WAKE_CONNECT);
 	s->rep->flags &= ~(CF_SHUTR|CF_SHUTR_NOW|CF_READ_ATTACHED|CF_READ_ERROR|CF_READ_NOEXP|CF_STREAMER|CF_STREAMER_FAST|CF_WRITE_PARTIAL|CF_NEVER_WAIT);
 	s->flags &= ~(SN_DIRECT|SN_ASSIGNED|SN_ADDR_SET|SN_BE_ASSIGNED|SN_FORCE_PRST|SN_IGNORE_PRST);
 	s->flags &= ~(SN_CURR_SESS|SN_REDIRECTABLE|SN_SRV_REUSED);
@@ -5224,6 +5213,7 @@ int http_request_forward_body(struct session *s, struct channel *req, int an_bit
 	if (unlikely(msg->flags & HTTP_MSGF_WAIT_CONN)) {
 		if (!(s->rep->flags & CF_READ_ATTACHED)) {
 			channel_auto_connect(req);
+			req->flags |= CF_WAKE_CONNECT;
 			goto missing_data;
 		}
 		msg->flags &= ~HTTP_MSGF_WAIT_CONN;
@@ -8693,7 +8683,7 @@ struct http_req_rule *parse_http_req_cond(const char **args, const char *file, i
 	if (!strcmp(args[0], "allow")) {
 		rule->action = HTTP_REQ_ACT_ALLOW;
 		cur_arg = 1;
-	} else if (!strcmp(args[0], "deny")) {
+	} else if (!strcmp(args[0], "deny") || !strcmp(args[0], "block")) {
 		rule->action = HTTP_REQ_ACT_DENY;
 		cur_arg = 1;
 	} else if (!strcmp(args[0], "tarpit")) {
@@ -10549,10 +10539,10 @@ smp_fetch_capture_res_ver(struct proxy *px, struct session *l4, void *l7, unsign
  * The cookie name is in args and the name length in args->data.str.len.
  * Accepts exactly 1 argument of type string. If the input options indicate
  * that no iterating is desired, then only last value is fetched if any.
- * The returned sample is of type CSTR.
+ * The returned sample is of type CSTR. Can be used to parse cookies in other
+ * files.
  */
-static int
-smp_fetch_cookie(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+int smp_fetch_cookie(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
                  const struct arg *args, struct sample *smp, const char *kw)
 {
 	struct http_txn *txn = l7;

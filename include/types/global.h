@@ -170,6 +170,24 @@ extern char hostname[MAX_HOSTNAME_LEN];
 extern char localpeer[MAX_HOSTNAME_LEN];
 extern struct list global_listener_queue; /* list of the temporarily limited listeners */
 extern struct task *global_listener_queue_task;
+extern unsigned int warned;     /* bitfield of a few warnings to emit just once */
+
+/* bit values to go with "warned" above */
+#define WARN_BLOCK_DEPRECATED       0x00000001
+#define WARN_REQSETBE_DEPRECATED    0x00000002
+#define WARN_REDISPATCH_DEPRECATED  0x00000004
+#define WARN_CLITO_DEPRECATED       0x00000008
+#define WARN_SRVTO_DEPRECATED       0x00000010
+#define WARN_CONTO_DEPRECATED       0x00000020
+
+/* to be used with warned and WARN_* */
+static inline int already_warned(unsigned int warning)
+{
+	if (warned & warning)
+		return 1;
+	warned |= warning;
+	return 0;
+}
 
 #endif /* _TYPES_GLOBAL_H */
 
