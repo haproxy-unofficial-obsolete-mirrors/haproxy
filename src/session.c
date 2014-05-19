@@ -246,7 +246,8 @@ int session_accept(struct listener *l, int cfd, struct sockaddr_storage *addr)
 
 
 /* prepare the trash with a log prefix for session <s>. It only works with
- * embryonic sessions based on a real connection.
+ * embryonic sessions based on a real connection. This function requires that
+ * at s->target still points to the incoming connection.
  */
 static void prepare_mini_sess_log_prefix(struct session *s)
 {
@@ -275,7 +276,8 @@ static void prepare_mini_sess_log_prefix(struct session *s)
 
 /* This function kills an existing embryonic session. It stops the connection's
  * transport layer, releases assigned resources, resumes the listener if it was
- * disabled and finally kills the file descriptor.
+ * disabled and finally kills the file descriptor. This function requires that
+ * at s->target still points to the incoming connection.
  */
 static void kill_mini_session(struct session *s)
 {
@@ -387,7 +389,9 @@ static struct task *expire_mini_session(struct task *t)
  * be called with an embryonic session. It returns a positive value upon
  * success, 0 if the connection can be ignored, or a negative value upon
  * critical failure. The accepted file descriptor is closed if we return <= 0.
- * The client-side end point is assumed to be a connection.
+ * The client-side end point is assumed to be a connection, whose pointer is
+ * taken from s->target which is assumed to be valid. If the function fails,
+ * it restores s->target.
  */
 int session_complete(struct session *s)
 {
@@ -443,7 +447,11 @@ int session_complete(struct session *s)
 	si_reset(&s->si[0], t);
 	si_set_state(&s->si[0], SI_ST_EST);
 
-	/* attach the incoming connection to the stream interface now */
+	/* attach the incoming connection to the stream interface now.
+	 * We must do that *before* clearing ->target because we need
+	 * to keep a pointer to the connection in case we have to call
+	 * kill_mini_session().
+	 */
 	si_attach_conn(&s->si[0], conn);
 
 	if (likely(s->fe->options2 & PR_O2_INDEPSTR))
@@ -568,6 +576,10 @@ int session_complete(struct session *s)
  out_free_req:
 	pool_free2(pool2_channel, s->req);
  out_free_task:
+	/* and restore the connection pointer in case we destroyed it,
+	 * because kill_mini_session() will need it.
+	 */
+	s->target = &conn->obj_type;
 	return ret;
 }
 
@@ -2177,11 +2189,17 @@ struct task *process_session(struct task *t)
 
 	/* first, let's check if the request buffer needs to shutdown(write), which may
 	 * happen either because the input is closed or because we want to force a close
-	 * once the server has begun to respond.
+	 * once the server has begun to respond. If a half-closed timeout is set, we adjust
+	 * the other side's timeout as well.
 	 */
 	if (unlikely((s->req->flags & (CF_SHUTW|CF_SHUTW_NOW|CF_AUTO_CLOSE|CF_SHUTR)) ==
-		     (CF_AUTO_CLOSE|CF_SHUTR)))
-			channel_shutw_now(s->req);
+		     (CF_AUTO_CLOSE|CF_SHUTR))) {
+		channel_shutw_now(s->req);
+		if (tick_isset(s->fe->timeout.clientfin)) {
+			s->rep->wto = s->fe->timeout.clientfin;
+			s->rep->wex = tick_add(now_ms, s->rep->wto);
+		}
+	}
 
 	/* shutdown(write) pending */
 	if (unlikely((s->req->flags & (CF_SHUTW|CF_SHUTW_NOW)) == CF_SHUTW_NOW &&
@@ -2189,6 +2207,10 @@ struct task *process_session(struct task *t)
 		if (s->req->flags & CF_READ_ERROR)
 			s->req->cons->flags |= SI_FL_NOLINGER;
 		si_shutw(s->req->cons);
+		if (tick_isset(s->be->timeout.serverfin)) {
+			s->rep->rto = s->be->timeout.serverfin;
+			s->rep->rex = tick_add(now_ms, s->rep->rto);
+		}
 	}
 
 	/* shutdown(write) done on server side, we must stop the client too */
@@ -2201,6 +2223,10 @@ struct task *process_session(struct task *t)
 		if (s->req->prod->flags & SI_FL_NOHALF)
 			s->req->prod->flags |= SI_FL_NOLINGER;
 		si_shutr(s->req->prod);
+		if (tick_isset(s->fe->timeout.clientfin)) {
+			s->rep->wto = s->fe->timeout.clientfin;
+			s->rep->wex = tick_add(now_ms, s->rep->wto);
+		}
 	}
 
 	/* it's possible that an upper layer has requested a connection setup or abort.
@@ -2296,13 +2322,26 @@ struct task *process_session(struct task *t)
 			channel_forward(s->rep, CHN_INFINITE_FORWARD);
 
 		/* if we have no analyser anymore in any direction and have a
-		 * tunnel timeout set, use it now.
+		 * tunnel timeout set, use it now. Note that we must respect
+		 * the half-closed timeouts as well.
 		 */
 		if (!s->req->analysers && s->be->timeout.tunnel) {
 			s->req->rto = s->req->wto = s->rep->rto = s->rep->wto =
 				s->be->timeout.tunnel;
-			s->req->rex = s->req->wex = s->rep->rex = s->rep->wex =
-				tick_add(now_ms, s->be->timeout.tunnel);
+
+			if ((s->req->flags & CF_SHUTR) && tick_isset(s->fe->timeout.clientfin))
+				s->rep->wto = s->fe->timeout.clientfin;
+			if ((s->req->flags & CF_SHUTW) && tick_isset(s->be->timeout.serverfin))
+				s->rep->rto = s->be->timeout.serverfin;
+			if ((s->rep->flags & CF_SHUTR) && tick_isset(s->be->timeout.serverfin))
+				s->req->wto = s->be->timeout.serverfin;
+			if ((s->rep->flags & CF_SHUTW) && tick_isset(s->fe->timeout.clientfin))
+				s->req->rto = s->fe->timeout.clientfin;
+
+			s->req->rex = tick_add(now_ms, s->req->rto);
+			s->req->wex = tick_add(now_ms, s->req->wto);
+			s->rep->rex = tick_add(now_ms, s->rep->rto);
+			s->rep->wex = tick_add(now_ms, s->rep->wto);
 		}
 	}
 
@@ -2332,13 +2371,23 @@ struct task *process_session(struct task *t)
 
 	/* first, let's check if the response buffer needs to shutdown(write) */
 	if (unlikely((s->rep->flags & (CF_SHUTW|CF_SHUTW_NOW|CF_AUTO_CLOSE|CF_SHUTR)) ==
-		     (CF_AUTO_CLOSE|CF_SHUTR)))
+		     (CF_AUTO_CLOSE|CF_SHUTR))) {
 		channel_shutw_now(s->rep);
+		if (tick_isset(s->be->timeout.serverfin)) {
+			s->req->wto = s->be->timeout.serverfin;
+			s->req->wex = tick_add(now_ms, s->req->wto);
+		}
+	}
 
 	/* shutdown(write) pending */
 	if (unlikely((s->rep->flags & (CF_SHUTW|CF_SHUTW_NOW)) == CF_SHUTW_NOW &&
-		     channel_is_empty(s->rep)))
+		     channel_is_empty(s->rep))) {
 		si_shutw(s->rep->cons);
+		if (tick_isset(s->fe->timeout.clientfin)) {
+			s->req->rto = s->fe->timeout.clientfin;
+			s->req->rex = tick_add(now_ms, s->req->rto);
+		}
+	}
 
 	/* shutdown(write) done on the client side, we must stop the server too */
 	if (unlikely((s->rep->flags & (CF_SHUTW|CF_SHUTR|CF_SHUTR_NOW)) == CF_SHUTW) &&
@@ -2350,6 +2399,10 @@ struct task *process_session(struct task *t)
 		if (s->rep->prod->flags & SI_FL_NOHALF)
 			s->rep->prod->flags |= SI_FL_NOLINGER;
 		si_shutr(s->rep->prod);
+		if (tick_isset(s->be->timeout.serverfin)) {
+			s->req->wto = s->be->timeout.serverfin;
+			s->req->wex = tick_add(now_ms, s->req->wto);
+		}
 	}
 
 	if (s->req->prod->state == SI_ST_DIS || s->req->cons->state == SI_ST_DIS)
@@ -2410,20 +2463,6 @@ struct task *process_session(struct task *t)
 		s->si[1].prev_state = s->si[1].state;
 		s->si[0].flags &= ~(SI_FL_ERR|SI_FL_EXP);
 		s->si[1].flags &= ~(SI_FL_ERR|SI_FL_EXP);
-
-		/* Trick: if a request is being waiting for the server to respond,
-		 * and if we know the server can timeout, we don't want the timeout
-		 * to expire on the client side first, but we're still interested
-		 * in passing data from the client to the server (eg: POST). Thus,
-		 * we can cancel the client's request timeout if the server's
-		 * request timeout is set and the server has not yet sent a response.
-		 */
-
-		if ((s->rep->flags & (CF_AUTO_CLOSE|CF_SHUTR)) == 0 &&
-		    (tick_isset(s->req->wex) || tick_isset(s->rep->rex))) {
-			s->req->flags |= CF_READ_NOEXP;
-			s->req->rex = TICK_ETERNITY;
-		}
 
 		/* When any of the stream interfaces is attached to an applet,
 		 * we have to call it here. Note that this one may wake the

@@ -4,7 +4,7 @@
                          ----------------------
                               version 1.5
                              willy tarreau
-                              2014/04/26
+                              2014/05/10
 
 
 This document covers the configuration language as implemented in the version
@@ -495,6 +495,7 @@ The following keywords are supported in the "global" section :
    - tune.sndbuf.server
    - tune.ssl.cachesize
    - tune.ssl.lifetime
+   - tune.ssl.force-private-cache
    - tune.ssl.maxrecord
    - tune.zlib.memlevel
    - tune.zlib.windowsize
@@ -524,16 +525,16 @@ cpu-map <"all"|"odd"|"even"|process_num> <cpu-set>...
   On Linux 2.6 and above, it is possible to bind a process to a specific CPU
   set. This means that the process will never run on other CPUs. The "cpu-map"
   directive specifies CPU sets for process sets. The first argument is the
-  process number to bind. This process must have a number between 1 and 32,
-  and any process IDs above nbproc are ignored. It is possible to specify all
-  processes at once using "all", only odd numbers using "odd" or even numbers
-  using "even", just like with the "bind-process" directive. The second and
-  forthcoming arguments are CPU sets. Each CPU set is either a unique number
-  between 0 and 31 or a range with two such numbers delimited by a dash ('-').
-  Multiple CPU numbers or ranges may be specified, and the processes will be
-  allowed to bind to all of them. Obviously, multiple "cpu-map" directives may
-  be specified. Each "cpu-map" directive will replace the previous ones when
-  they overlap.
+  process number to bind. This process must have a number between 1 and 32 or
+  64, depending on the machine's word size, and any process IDs above nbproc
+  are ignored. It is possible to specify all processes at once using "all",
+  only odd numbers using "odd" or even numbers using "even", just like with the
+  "bind-process" directive. The second and forthcoming arguments are CPU sets.
+  Each CPU set is either a unique number between 0 and 31 or 63 or a range with
+  two such numbers delimited by a dash ('-'). Multiple CPU numbers or ranges
+  may be specified, and the processes will be allowed to bind to all of them.
+  Obviously, multiple "cpu-map" directives may be specified. Each "cpu-map"
+  directive will replace the previous ones when they overlap.
 
 crt-base <dir>
   Assigns a default directory to fetch SSL certificates from when a relative
@@ -623,14 +624,16 @@ pidfile <pidfile>
   the "-p" command line argument. The file must be accessible to the user
   starting the process. See also "daemon".
 
-stats bind-process [ all | odd | even | <number 1-32>[-<number 1-32>] ] ...
+stats bind-process [ all | odd | even | <number 1-64>[-<number 1-64>] ] ...
   Limits the stats socket to a certain set of processes numbers. By default the
   stats socket is bound to all processes, causing a warning to be emitted when
   nbproc is greater than 1 because there is no way to select the target process
   when connecting. However, by using this setting, it becomes possible to pin
   the stats socket to a specific set of processes, typically the first one. The
   warning will automatically be disabled when this setting is used, whatever
-  the number of processes used.
+  the number of processes used. The maximum process ID depends on the machine's
+  word size (32 or 64). A better option consists in using the "process" setting
+  of the "stats socket" line to force the process on each line.
 
 ssl-default-bind-ciphers <ciphers>
   This setting is only available when support for OpenSSL was built in. It sets
@@ -983,6 +986,14 @@ tune.ssl.cachesize <number>
   their session as long as possible. All entries are pre-allocated upon startup
   and are shared between all processes if "nbproc" is greater than 1. Setting
   this value to 0 disables the SSL session cache.
+
+tune.ssl.force-private-cache
+  This boolean disables SSL session cache sharing between all processes. It
+  should normally not be used since it will force many renegotiations due to
+  clients hitting a random process. But it may be required on some operating
+  systems where none of the SSL cache synchronization method may be used. In
+  this case, adding a first layer of hash-based load balancing before the SSL
+  layer might limit the impact of the lack of session sharing.
 
 tune.ssl.lifetime <timeout>
   Sets how long a cached SSL session may remain valid. This time is expressed
@@ -1386,6 +1397,7 @@ tcp-response content                      -          -         X         X
 tcp-response inspect-delay                -          -         X         X
 timeout check                             X          -         X         X
 timeout client                            X          X         X         -
+timeout client-fin                        X          X         X         -
 timeout clitimeout          (deprecated)  X          X         X         -
 timeout connect                           X          -         X         X
 timeout contimeout          (deprecated)  X          -         X         X
@@ -1393,6 +1405,7 @@ timeout http-keep-alive                   X          X         X         X
 timeout http-request                      X          X         X         X
 timeout queue                             X          -         X         X
 timeout server                            X          -         X         X
+timeout server-fin                        X          -         X         X
 timeout srvtimeout          (deprecated)  X          -         X         X
 timeout tarpit                            X          X         X         X
 timeout tunnel                            X          -         X         X
@@ -1751,6 +1764,7 @@ bind /<path> [, ...] [param*]
                     - 'ipv4@'  -> address is always IPv4
                     - 'ipv6@'  -> address is always IPv6
                     - 'unix@'  -> address is a path to a local unix socket
+                    - 'abns@'  -> address is in abstract namespace (Linux only)
                     - 'fd@<n>' -> use file descriptor <n> inherited from the
                       parent. The fd must be bound and may or may not already
                       be listening.
@@ -1821,7 +1835,7 @@ bind /<path> [, ...] [param*]
              documentation, and section 5 about bind options.
 
 
-bind-process [ all | odd | even | <number 1-32>[-<number 1-32>] ] ...
+bind-process [ all | odd | even | <number 1-64>[-<number 1-64>] ] ...
   Limit visibility of an instance to a certain set of processes numbers.
   May be used in sections :   defaults | frontend | listen | backend
                                  yes   |    yes   |   yes  |   yes
@@ -1829,19 +1843,20 @@ bind-process [ all | odd | even | <number 1-32>[-<number 1-32>] ] ...
     all           All process will see this instance. This is the default. It
                   may be used to override a default value.
 
-    odd           This instance will be enabled on processes 1,3,5,...31. This
+    odd           This instance will be enabled on processes 1,3,5,...63. This
                   option may be combined with other numbers.
 
-    even          This instance will be enabled on processes 2,4,6,...32. This
+    even          This instance will be enabled on processes 2,4,6,...64. This
                   option may be combined with other numbers. Do not use it
                   with less than 2 processes otherwise some instances might be
                   missing from all processes.
 
     number        The instance will be enabled on this process number or range,
-                  whose values must all be between 1 and 32. You must be
-                  careful not to reference a process number greater than the
-                  configured global.nbproc, otherwise some instances might be
-                  missing from all processes.
+                  whose values must all be between 1 and 32 or 64 depending on
+                  the machine's word size. If a proxy is bound to process
+                  numbers greater than the configured global.nbproc, it will
+                  either be forced to process #1 if a single process was
+                  specified, or to all processes otherwise.
 
   This keyword limits binding of certain instances to certain processes. This
   is useful in order not to have too many processes listening to the same
@@ -1849,10 +1864,13 @@ bind-process [ all | odd | even | <number 1-32>[-<number 1-32>] ] ...
   'nbproc 2' in the global section, then distributes the listeners among 'odd'
   and 'even' instances.
 
-  At the moment, it is not possible to reference more than 32 processes using
-  this keyword, but this should be more than enough for most setups. Please
-  note that 'all' really means all processes and is not limited to the first
-  32.
+  At the moment, it is not possible to reference more than 32 or 64 processes
+  using this keyword, but this should be more than enough for most setups.
+  Please note that 'all' really means all processes regardless of the machine's
+  word size, and is not limited to the first 32 or 64.
+
+  Each "bind" line may further be limited to a subset of the proxy's processes,
+  please consult the "process" bind keyword in section 5.1.
 
   If some backends are referenced by frontends bound to other processes, the
   backend automatically inherits the frontend's processes.
@@ -1874,7 +1892,7 @@ bind-process [ all | odd | even | <number 1-32>[-<number 1-32>] ] ...
             bind 10.0.0.4:80
             bind-process 1-4
 
-  See also : "nbproc" in global section.
+  See also : "nbproc" in global section, and "process" in section 5.1.
 
 
 block { if | unless } <condition>
@@ -4359,20 +4377,27 @@ option ldap-check
 
 option log-health-checks
 no option log-health-checks
-  Enable or disable logging of health checks
+  Enable or disable logging of health checks status updates
   May be used in sections :   defaults | frontend | listen | backend
                                  yes   |    no    |   yes  |  yes
   Arguments : none
 
-  Enable health checks logging so it possible to check for example what
-  was happening before a server crash. Failed health check are logged if
-  server is UP and succeeded health checks if server is DOWN, so the amount
-  of additional information is limited.
+  By default, failed health check are logged if server is UP and successful
+  health checks are logged if server is DOWN, so the amount of additional
+  information is limited.
 
-  If health check logging is enabled no health check status is printed
-  when servers is set up UP/DOWN/ENABLED/DISABLED.
+  When this option is enabled, any change of the health check status or to
+  the server's health will be logged, so that it becomes possible to know
+  that a server was failing occasional checks before crashing, or exactly when
+  it failed to respond a valid HTTP status, then when the port started to
+  reject connections, then when the server stopped responding at all.
 
-  See also: "log" and section 8 about logging.
+  Note that status changes not caused by health checks (eg: enable/disable on
+  the CLI) are intentionally not logged by this option.
+
+  See also: "option httpchk", "option ldap-check", "option mysql-check",
+            "option pgsql-check", "option redis-check", "option smtpchk",
+            "option tcp-check", "log" and section 8 about logging.
 
 
 option log-separate-errors
@@ -5735,6 +5760,7 @@ server <name> <address>[:[port]] [param*]
                     - 'ipv4@'  -> address is always IPv4
                     - 'ipv6@'  -> address is always IPv6
                     - 'unix@'  -> address is a path to a local unix socket
+                    - 'abns@'  -> address is in abstract namespace (Linux only)
               Any part of the address string may reference any number of
               environment variables by preceding their name with a dollar
               sign ('$') and optionally enclosing them with braces ('{}'),
@@ -5781,6 +5807,7 @@ source <addr>[:<port>] [interface <name>]
                 - 'ipv4@' -> address is always IPv4
                 - 'ipv6@' -> address is always IPv6
                 - 'unix@' -> address is a path to a local unix socket
+                - 'abns@' -> address is in abstract namespace (Linux only)
               Any part of the address string may reference any number of
               environment variables by preceding their name with a dollar
               sign ('$') and optionally enclosing them with braces ('{}'),
@@ -7530,7 +7557,8 @@ timeout clitimeout <timeout> (deprecated)
   losses by specifying timeouts that are slightly above multiples of 3 seconds
   (eg: 4 or 5 seconds). If some long-lived sessions are mixed with short-lived
   sessions (eg: WebSocket and HTTP), it's worth considering "timeout tunnel",
-  which overrides "timeout client" and "timeout server" for tunnels.
+  which overrides "timeout client" and "timeout server" for tunnels, as well as
+  "timeout client-fin" for half-closed connections.
 
   This parameter is specific to frontends, but can be specified once for all in
   "defaults" sections. This is in fact one of the easiest solutions not to
@@ -7544,6 +7572,31 @@ timeout clitimeout <timeout> (deprecated)
   provided only by backwards compatibility but its use is strongly discouraged.
 
   See also : "clitimeout", "timeout server", "timeout tunnel".
+
+
+timeout client-fin <timeout>
+  Set the inactivity timeout on the client side for half-closed connections.
+  May be used in sections :   defaults | frontend | listen | backend
+                                 yes   |    yes   |   yes  |   no
+  Arguments :
+    <timeout> is the timeout value specified in milliseconds by default, but
+              can be in any other unit if the number is suffixed by the unit,
+              as explained at the top of this document.
+
+  The inactivity timeout applies when the client is expected to acknowledge or
+  send data while one direction is already shut down. This timeout is different
+  from "timeout client" in that it only applies to connections which are closed
+  in one direction. This is particularly useful to avoid keeping connections in
+  FIN_WAIT state for too long when clients do not disconnect cleanly. This
+  problem is particularly common long connections such as RDP or WebSocket.
+  Note that this timeout can override "timeout tunnel" when a connection shuts
+  down in one direction.
+
+  This parameter is specific to frontends, but can be specified once for all in
+  "defaults" sections. By default it is not set, so half-closed connections
+  will use the other timeouts (timeout.client or timeout.tunnel).
+
+  See also : "timeout client", "timeout server-fin", and "timeout tunnel".
 
 
 timeout connect <timeout>
@@ -7723,6 +7776,32 @@ timeout srvtimeout <timeout> (deprecated)
   See also : "srvtimeout", "timeout client" and "timeout tunnel".
 
 
+timeout server-fin <timeout>
+  Set the inactivity timeout on the server side for half-closed connections.
+  May be used in sections :   defaults | frontend | listen | backend
+                                 yes   |    no    |   yes  |   yes
+  Arguments :
+    <timeout> is the timeout value specified in milliseconds by default, but
+              can be in any other unit if the number is suffixed by the unit,
+              as explained at the top of this document.
+
+  The inactivity timeout applies when the server is expected to acknowledge or
+  send data while one direction is already shut down. This timeout is different
+  from "timeout server" in that it only applies to connections which are closed
+  in one direction. This is particularly useful to avoid keeping connections in
+  FIN_WAIT state for too long when a remote server does not disconnect cleanly.
+  This problem is particularly common long connections such as RDP or WebSocket.
+  Note that this timeout can override "timeout tunnel" when a connection shuts
+  down in one direction. This setting was provided for completeness, but in most
+  situations, it should not be needed.
+
+  This parameter is specific to backends, but can be specified once for all in
+  "defaults" sections. By default it is not set, so half-closed connections
+  will use the other timeouts (timeout.server or timeout.tunnel).
+
+  See also : "timeout client-fin", "timeout server", and "timeout tunnel".
+
+
 timeout tarpit <timeout>
   Set the duration for which tarpitted connections will be maintained
   May be used in sections :   defaults | frontend | listen | backend
@@ -7764,6 +7843,14 @@ timeout tunnel <timeout>
   to a proxy), or after the first response when no keepalive/close option is
   specified.
 
+  Since this timeout is usually used in conjunction with long-lived connections,
+  it usually is a good idea to also set "timeout client-fin" to handle the
+  situation where a client suddenly disappears from the net and does not
+  acknowledge a close, or sends a shutdown and does not acknowledge pending
+  data anymore. This can happen in lossy networks where firewalls are present,
+  and is detected by the presence of large amounts of sessions in a FIN_WAIT
+  state.
+
   The value is specified in milliseconds by default, but can be in any other
   unit if the number is suffixed by the unit, as specified at the top of this
   document. Whatever the expected normal idle time, it is a good practice to
@@ -7779,11 +7866,11 @@ timeout tunnel <timeout>
             option http-server-close
             timeout connect 5s
             timeout client 30s
-            timeout client 30s
+            timeout client-fin 30s
             timeout server 30s
             timeout tunnel  1h    # timeout to use with WebSocket and CONNECT
 
-  See also : "timeout client", "timeout server".
+  See also : "timeout client", "timeout client-fin", "timeout server".
 
 
 transparent (deprecated)
@@ -8261,6 +8348,22 @@ npn <protocols>
   This requires that the SSL library is build with support for TLS extensions
   enabled (check with haproxy -vv). Note that the NPN extension has been
   replaced with the ALPN extension (see the "alpn" keyword).
+
+process [ all | odd | even | <number 1-64>[-<number 1-64>] ]
+  This restricts the list of processes on which this listener is allowed to
+  run. It does not enforce any process but eliminates those which do not match.
+  If the frontend uses a "bind-process" setting, the intersection between the
+  two is applied. If in the end the listener is not allowed to run on any
+  remaining process, a warning is emitted, and the listener will either run on
+  the first process of the listener if a single process was specified, or on
+  all of its processes if multiple processes were specified. For the unlikely
+  case where several ranges are needed, this directive may be repeated. The
+  main purpose of this directive is to be used with the stats sockets and have
+  one different socket per process. The second purpose is to have multiple bind
+  lines sharing the same IP:port but not the same process in a listener, so
+  that the system can distribute the incoming connections into multiple queues
+  and allow a smoother inter-process load balancing. Currently Linux 3.9 and
+  above is known for supporting this. See also "bind-process" and "nbproc".
 
 ssl
   This setting is only available when support for OpenSSL was built in. It
@@ -8808,6 +8911,42 @@ send-proxy
 
   Supported in default-server: No
 
+send-proxy-v2
+  The "send-proxy-v2" parameter enforces use of the PROXY protocol version 2
+  over any connection established to this server. The PROXY protocol informs
+  the other end about the layer 3/4 addresses of the incoming connection, so
+  that it can know the client's address or the public address it accessed to,
+  whatever the upper layer protocol. This setting must not be used if the
+  server isn't aware of this version of the protocol. See also the "send-proxy"
+  option of the "bind" keyword.
+
+  Supported in default-server: No
+
+send-proxy-v2-ssl
+  The "send-proxy-v2-ssl" parameter enforces use of the PROXY protocol version
+  2 over any connection established to this server. The PROXY protocol informs
+  the other end about the layer 3/4 addresses of the incoming connection, so
+  that it can know the client's address or the public address it accessed to,
+  whatever the upper layer protocol. In addition, the SSL information extension
+  of the PROXY protocol is added to the PROXY protocol header. This setting
+  must not be used if the server isn't aware of this version of the protocol.
+  See also the "send-proxy-v2" option of the "bind" keyword.
+
+  Supported in default-server: No
+
+send-proxy-v2-ssl-cn
+  The "send-proxy-v2-ssl" parameter enforces use of the PROXY protocol version
+  2 over any connection established to this server. The PROXY protocol informs
+  the other end about the layer 3/4 addresses of the incoming connection, so
+  that it can know the client's address or the public address it accessed to,
+  whatever the upper layer protocol. In addition, the SSL information extension
+  of the PROXY protocol, along along with the Common Name from the subject of
+  the client certificate (if any), is added to the PROXY protocol header. This
+  setting must not be used if the server isn't aware of this version of the
+  protocol. See also the "send-proxy-v2" option of the "bind" keyword.
+
+  Supported in default-server: No
+
 slowstart <start_time_in_ms>
   The "slowstart" parameter for a server accepts a value in milliseconds which
   indicates after how long a server which has just come back up will run at
@@ -9070,6 +9209,29 @@ would turn a string to an IPv4 address, or apply a netmask to an IP address.
 The resulting sample is of the type of the last converter applied to the list,
 which defaults to the type of the sample fetch method.
 
+Each sample or converter returns data of a specific type, specified with its
+keyword in this documentation. When an ACL is declared using a standard sample
+fetch method, certain types automatically involved a default matching method
+which are summarized in the table below :
+
+   +---------------------+-----------------+
+   | Sample or converter | Default         |
+   |    output type      | matching method |
+   +---------------------+-----------------+
+   | boolean             | bool            |
+   +---------------------+-----------------+
+   | integer             | int             |
+   +---------------------+-----------------+
+   | ip                  | ip              |
+   +---------------------+-----------------+
+   | string              | str             |
+   +---------------------+-----------------+
+   | binary              | none, use "-m"  |
+   +---------------------+-----------------+
+
+Note that in order to match a binary samples, it is mandatory to specify a
+matching method, see below.
+
 The ACL engine can match these types against patterns of the following types :
   - boolean
   - integer or integer range
@@ -9221,27 +9383,28 @@ For example, all ACLs below are exact equivalent :
     acl alternate3  hdr(host)     -m beg www.
 
 
-The table below summarizes the compatibility matrix between sample types
-and the pattern types to fetch against. It indicates for each compatible
-combination the name of the matching method to be used, prefixed with "*" when
-the method is implicit and will work by default without "-m".
+The table below summarizes the compatibility matrix between sample or converter
+types and the pattern types to fetch against. It indicates for each compatible
+combination the name of the matching method to be used, surrounded with angle
+brackets ">" and "<" when the method is the default one and will work by
+default without "-m".
 
                            +-------------------------------------------------+
                            |                Input sample type                |
     +----------------------+---------+---------+---------+---------+---------+
-    |     pattern type     | boolean | integer |   IP    | string  | binary  |
+    |     pattern type     | boolean | integer |   ip    | string  | binary  |
     +----------------------+---------+---------+---------+---------+---------+
     | none (presence only) |  found  |  found  |  found  |  found  |  found  |
     +----------------------+---------+---------+---------+---------+---------+
-    | none (boolean value) |  *bool  |   bool  |         |   bool  |         |
+    | none (boolean value) |>  bool <|   bool  |         |   bool  |         |
     +----------------------+---------+---------+---------+---------+---------+
-    | integer (value)      |   int   |   *int  |   int   |   int   |         |
+    | integer (value)      |   int   |>  int  <|   int   |   int   |         |
     +----------------------+---------+---------+---------+---------+---------+
     | integer (length)     |   len   |   len   |   len   |   len   |   len   |
     +----------------------+---------+---------+---------+---------+---------+
-    | IP address           |         |         |   *ip   |    ip   |    ip   |
+    | IP address           |         |         |>   ip  <|    ip   |    ip   |
     +----------------------+---------+---------+---------+---------+---------+
-    | exact string         |   str   |   str   |   str   |   str   |   str   |
+    | exact string         |   str   |   str   |   str   |>  str  <|   str   |
     +----------------------+---------+---------+---------+---------+---------+
     | prefix               |   beg   |   beg   |   beg   |   beg   |   beg   |
     +----------------------+---------+---------+---------+---------+---------+
@@ -9619,6 +9782,8 @@ map_<match_type>_<output_type>(<map_file>[,<default_value>])
   input type | match method | output type str | output type int | output type ip
   -----------+--------------+-----------------+-----------------+---------------
     str      | str          | map_str         | map_str_int     | map_str_ip
+  -----------+--------------+-----------------+-----------------+---------------
+    str      | beg          | map_beg         | map_beg_int     | map_end_ip
   -----------+--------------+-----------------+-----------------+---------------
     str      | sub          | map_sub         | map_sub_int     | map_sub_ip
   -----------+--------------+-----------------+-----------------+---------------

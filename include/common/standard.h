@@ -42,6 +42,10 @@
 # define ULLONG_MAX	(LLONG_MAX * 2ULL + 1)
 #endif
 
+#ifndef LONGBITS
+#define LONGBITS  ((unsigned int)sizeof(long) * 8)
+#endif
+
 /* size used for max length of decimal representation of long long int. */
 #define NB_LLMAX_STR (sizeof("-9223372036854775807")-1)
 
@@ -527,7 +531,7 @@ static inline unsigned int div64_32(unsigned long long o1, unsigned int o2)
 }
 
 /* Simple popcount implementation. It returns the number of ones in a word */
-static inline unsigned int popcount(unsigned int a)
+static inline unsigned int popcount(unsigned long a)
 {
 	unsigned int cnt;
 	for (cnt = 0; a; a >>= 1) {
@@ -535,6 +539,15 @@ static inline unsigned int popcount(unsigned int a)
 			cnt++;
 	}
 	return cnt;
+}
+
+/* Build a word with the <bits> lower bits set (reverse of popcount) */
+static inline unsigned long nbits(int bits)
+{
+	if (--bits < 0)
+		return 0;
+	else
+		return (2UL << bits) - 1;
 }
 
 /*
@@ -614,7 +627,7 @@ static inline void clear_addr(struct sockaddr_storage *addr)
 /* returns non-zero if addr has a valid and non-null IPv4 or IPv6 address,
  * otherwise zero.
  */
-static inline int is_addr(struct sockaddr_storage *addr)
+static inline int is_inet_addr(const struct sockaddr_storage *addr)
 {
 	int i;
 
@@ -627,6 +640,17 @@ static inline int is_addr(struct sockaddr_storage *addr)
 				return ((int *)&((struct sockaddr_in6 *)addr)->sin6_addr)[i];
 	}
 	return 0;
+}
+
+/* returns non-zero if addr has a valid and non-null IPv4 or IPv6 address,
+ * or is a unix address, otherwise returns zero.
+ */
+static inline int is_addr(const struct sockaddr_storage *addr)
+{
+	if (addr->ss_family == AF_UNIX)
+		return 1;
+	else
+		return is_inet_addr(addr);
 }
 
 /* returns port in network byte order */

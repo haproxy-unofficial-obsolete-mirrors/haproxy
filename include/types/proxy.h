@@ -284,6 +284,8 @@ struct proxy {
 		int httpka;                     /* maximum time for a new HTTP request when using keep-alive */
 		int check;                      /* maximum time for complete check */
 		int tunnel;                     /* I/O timeout to use in tunnel mode (in ticks) */
+		int clientfin;                  /* timeout to apply to client half-closed connections */
+		int serverfin;                  /* timeout to apply to server half-closed connections */
 	} timeout;
 	char *id, *desc;			/* proxy id (name) and description */
 	struct list pendconns;			/* pending connections with no server assigned yet */
@@ -345,7 +347,7 @@ struct proxy {
 	struct chunk errmsg[HTTP_ERR_SIZE];	/* default or customized error messages for known errors */
 	int uuid;				/* universally unique proxy ID, used for SNMP */
 	unsigned int backlog;			/* force the frontend's listen backlog */
-	unsigned int bind_proc;			/* bitmask of processes using this proxy. 0 = all. */
+	unsigned long bind_proc;		/* bitmask of processes using this proxy */
 
 	/* warning: these structs are huge, keep them at the bottom */
 	struct sockaddr_storage dispatch_addr;	/* the default address to connect to */

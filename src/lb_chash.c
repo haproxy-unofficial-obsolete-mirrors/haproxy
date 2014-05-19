@@ -98,14 +98,13 @@ static void chash_set_server_status_down(struct server *srv)
 {
 	struct proxy *p = srv->proxy;
 
-	if (srv->state == srv->prev_state &&
-	    srv->eweight == srv->prev_eweight)
+	if (!srv_lb_status_changed(srv))
 		return;
 
-	if (srv_is_usable(srv->state, srv->eweight))
+	if (srv_is_usable(srv))
 		goto out_update_state;
 
-	if (!srv_is_usable(srv->prev_state, srv->prev_eweight))
+	if (!srv_was_usable(srv))
 		/* server was already down */
 		goto out_update_backend;
 
@@ -122,7 +121,7 @@ static void chash_set_server_status_down(struct server *srv)
 				srv2 = srv2->next;
 			} while (srv2 &&
 				 !((srv2->state & SRV_BACKUP) &&
-				   srv_is_usable(srv2->state, srv2->eweight)));
+				   srv_is_usable(srv2)));
 			p->lbprm.fbck = srv2;
 		}
 	} else {
@@ -136,8 +135,7 @@ out_update_backend:
 	/* check/update tot_used, tot_weight */
 	update_backend_weight(p);
  out_update_state:
-	srv->prev_state = srv->state;
-	srv->prev_eweight = srv->eweight;
+	srv_lb_commit_status(srv);
 }
 
 /* This function updates the server trees according to server <srv>'s new
@@ -151,14 +149,13 @@ static void chash_set_server_status_up(struct server *srv)
 {
 	struct proxy *p = srv->proxy;
 
-	if (srv->state == srv->prev_state &&
-	    srv->eweight == srv->prev_eweight)
+	if (!srv_lb_status_changed(srv))
 		return;
 
-	if (!srv_is_usable(srv->state, srv->eweight))
+	if (!srv_is_usable(srv))
 		goto out_update_state;
 
-	if (srv_is_usable(srv->prev_state, srv->prev_eweight))
+	if (srv_was_usable(srv))
 		/* server was already up */
 		goto out_update_backend;
 
@@ -194,8 +191,7 @@ static void chash_set_server_status_up(struct server *srv)
 	/* check/update tot_used, tot_weight */
 	update_backend_weight(p);
  out_update_state:
-	srv->prev_state = srv->state;
-	srv->prev_eweight = srv->eweight;
+	srv_lb_commit_status(srv);
 }
 
 /* This function must be called after an update to server <srv>'s effective
@@ -206,8 +202,7 @@ static void chash_update_server_weight(struct server *srv)
 	int old_state, new_state;
 	struct proxy *p = srv->proxy;
 
-	if (srv->state == srv->prev_state &&
-	    srv->eweight == srv->prev_eweight)
+	if (!srv_lb_status_changed(srv))
 		return;
 
 	/* If changing the server's weight changes its state, we simply apply
@@ -218,12 +213,11 @@ static void chash_update_server_weight(struct server *srv)
 	 * possibly a new tree for this server.
 	 */
 
-	old_state = srv_is_usable(srv->prev_state, srv->prev_eweight);
-	new_state = srv_is_usable(srv->state, srv->eweight);
+	old_state = srv_was_usable(srv);
+	new_state = srv_is_usable(srv);
 
 	if (!old_state && !new_state) {
-		srv->prev_state = srv->state;
-		srv->prev_eweight = srv->eweight;
+		srv_lb_commit_status(srv);
 		return;
 	}
 	else if (!old_state && new_state) {
@@ -244,8 +238,7 @@ static void chash_update_server_weight(struct server *srv)
 		p->lbprm.tot_wact += srv->eweight - srv->prev_eweight;
 
 	update_backend_weight(p);
-	srv->prev_state = srv->state;
-	srv->prev_eweight = srv->eweight;
+	srv_lb_commit_status(srv);
 }
 
 /*
@@ -383,8 +376,7 @@ void chash_init_server_tree(struct proxy *p)
 	p->lbprm.wdiv = BE_WEIGHT_SCALE;
 	for (srv = p->srv; srv; srv = srv->next) {
 		srv->eweight = (srv->uweight * p->lbprm.wdiv + p->lbprm.wmult - 1) / p->lbprm.wmult;
-		srv->prev_eweight = srv->eweight;
-		srv->prev_state = srv->state;
+		srv_lb_commit_status(srv);
 	}
 
 	recount_servers(p);
@@ -406,7 +398,7 @@ void chash_init_server_tree(struct proxy *p)
 			srv->lb_nodes[node].node.key = full_hash(srv->puid * SRV_EWGHT_RANGE + node);
 		}
 
-		if (srv_is_usable(srv->state, srv->eweight))
+		if (srv_is_usable(srv))
 			chash_queue_dequeue_srv(srv);
 	}
 }

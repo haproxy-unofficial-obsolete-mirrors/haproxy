@@ -1,9 +1,9 @@
                          ----------------------
                              HAProxy how-to
                          ----------------------
-                            version 1.5-dev24
+                            version 1.5-dev25
                              willy tarreau
-                               2014/04/26
+                               2014/05/10
 
 
 1) How to build it
@@ -11,7 +11,8 @@
 
 To build haproxy, you will need :
   - GNU make. Neither Solaris nor OpenBSD's make work with the GNU Makefile.
-    However, specific Makefiles for BSD and OSX are provided.
+    If you get many syntax errors when running "make", you may want to retry
+    with "gmake" which is the name commonly used for GNU make on BSD systems.
   - GCC between 2.91 and 4.7. Others may work, but not tested.
   - GNU ld
 
@@ -85,11 +86,11 @@ it. This is the recommended option for most Linux distro packagers since it's
 working fine on all recent mainstream distros. It is automatically enabled on
 Solaris 8 and above, as it's known to work.
 
-It is possible to add native support for SSL using the GNU makefile only, and
-by passing "USE_OPENSSL=1" on the make commande line. The libssl and libcrypto
-will automatically be linked with haproxy. Some systems also require libz, so
-if the build fails due to missing symbols such as deflateInit(), then try again
-with "ADDLIB=-lz".
+It is possible to add native support for SSL using the GNU makefile, by passing
+"USE_OPENSSL=1" on the make command line. The libssl and libcrypto will
+automatically be linked with haproxy. Some systems also require libz, so if the
+build fails due to missing symbols such as deflateInit(), then try again with
+"ADDLIB=-lz".
 
 To link OpenSSL statically against haproxy, build OpenSSL with the no-shared
 keyword and install it to a local directory, so your system is not affected :
@@ -100,6 +101,7 @@ keyword and install it to a local directory, so your system is not affected :
 
 When building haproxy, pass that path via SSL_INC and SSL_LIB to make and
 include additional libs with ADDLIB if needed (in this case for example libdl):
+
     $ make TARGET=linux26 USE_OPENSSL=1 SSL_INC=$STATICLIBSSL/include SSL_LIB=$STATICLIBSSL/lib ADDLIB=-ldl
 
 It is also possible to include native support for ZLIB to benefit from HTTP
@@ -117,7 +119,7 @@ For example, I use this to build for Solaris 8 :
 
 And I build it this way on OpenBSD or FreeBSD :
 
-    $ make -f Makefile.bsd REGEX=pcre DEBUG= COPTS.generic="-Os -fomit-frame-pointer -mgnu"
+    $ gmake TARGET=freebsd USE_PCRE=1 USE_OPENSSL=1 USE_ZLIB=1
 
 And on a classic Linux with SSL and ZLIB support (eg: Red Hat 5.x) :
 
@@ -132,18 +134,46 @@ without support for compression but when OpenSSL requires ZLIB anyway :
 
     $ make TARGET=linux26 ARCH=i386 USE_OPENSSL=1 ADDLIB=-lz
 
-The BSD and OSX makefiles do not support build options for OpenSSL nor zlib.
-Also, at least on OpenBSD, pthread_mutexattr_setpshared() does not exist so
-the SSL session cache cannot be shared between multiple processes. If you want
-to enable these options, you need to use GNU make with the default makefile as
-follows :
+The SSL stack supports session cache synchronization between all running
+processes. This involves some atomic operations and synchronization operations
+which come in multiple flavors depending on the system and architecture :
 
-    $ gmake TARGET=openbsd USE_OPENSSL=1 USE_ZLIB=1 USE_PRIVATE_CACHE=1
+  Atomic operations :
+    - internal assembler versions for x86/x86_64 architectures
+
+    - gcc builtins for other architectures. Some architectures might not
+      be fully supported or might require a more recent version of gcc.
+      If your architecture is not supported, you willy have to either use
+      pthread if supported, or to disable the shared cache.
+
+    - pthread (posix threads). Pthreads are very common but inter-process
+      support is not that common, and some older operating systems did not
+      report an error when enabling multi-process mode, so they used to
+      silently fail, possibly causing crashes. Linux's implementation is
+      fine. OpenBSD doesn't support them and doesn't build. FreeBSD 9 builds
+      and reports an error at runtime, while certain older versions might
+      silently fail. Pthreads are enabled using USE_PTHREAD_PSHARED=1.
+
+  Synchronization operations :
+    - internal spinlock : this mode is OS-independant, light but will not
+      scale well to many processes. However, accesses to the session cache
+      are rare enough that this mode could certainly always be used. This
+      is the default mode.
+
+    - Futexes, which are Linux-specific highly scalable light weight mutexes
+      implemented in user-space with some limited assistance from the kernel.
+      This is the default on Linux 2.6 and above and is enabled by passing
+      USE_FUTEX=1
+
+    - pthread (posix threads). See above.
+
+If none of these mechanisms is supported by your platform, you may need to
+build with USE_PRIVATE_CACHE=1 to totally disable SSL cache sharing. Then
+it is better not to run SSL on multiple processes.
 
 If you need to pass other defines, includes, libraries, etc... then please
 check the Makefile to see which ones will be available in your case, and
-use the USE_* variables in the GNU Makefile, or ADDINC, ADDLIB, and DEFINE
-variables in the BSD makefiles.
+use the USE_* variables in the Makefile.
 
 AIX 5.3 is known to work with the generic target. However, for the binary to
 also run on 5.2 or earlier, you need to build with DEFINE="-D_MSGQSUPPORT",
@@ -308,7 +338,7 @@ The list of past and regular contributors is available below. It lists not only
 significant code contributions (features, fixes), but also time or money
 donations :
 
-                        http://haproxy.1wt.eu/contrib.html
+                        http://www.haproxy.org/contrib.html
 
 Note to contributors: it's very handy when patches comes with a properly
 formated subject. There are 3 criteria of particular importance in any patch :
@@ -496,12 +526,8 @@ want, without making your mistakes visible to the rest of the world. It will
 definitely help you contribute quality code and take other people's feedback
 in consideration. In order to clone the HAProxy Git repository :
 
-    $ git clone http://git.1wt.eu/git/haproxy-1.4.git    (stable 1.4)
-    $ git clone http://git.1wt.eu/git/haproxy.git/       (development)
-
-The site above is slow, a faster mirror is maintained up to date here :
-
-    $ git clone http://master.formilux.org/git/people/willy/haproxy.git/
+    $ git clone http://git.haproxy.org/git/haproxy-1.4.git    (stable 1.4)
+    $ git clone http://git.haproxy.org/git/haproxy.git/       (development)
 
 If you decide to use Git for your developments, then your commit messages will
 have the subject line in the format described above, then the whole description

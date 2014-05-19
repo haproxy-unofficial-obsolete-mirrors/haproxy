@@ -97,7 +97,7 @@ void recount_servers(struct proxy *px)
 	px->lbprm.tot_wact = px->lbprm.tot_wbck = 0;
 	px->lbprm.fbck = NULL;
 	for (srv = px->srv; srv != NULL; srv = srv->next) {
-		if (!srv_is_usable(srv->state, srv->eweight))
+		if (!srv_is_usable(srv))
 			continue;
 
 		if (srv->state & SRV_BACKUP) {
@@ -547,7 +547,7 @@ int assign_server(struct session *s)
 	      (!s->be->max_ka_queue ||
 	       server_has_room(__objt_server(conn->target)) ||
 	       (__objt_server(conn->target)->nbpend + 1) < s->be->max_ka_queue))) &&
-	    srv_is_usable(__objt_server(conn->target)->state, __objt_server(conn->target)->eweight)) {
+	    srv_is_usable(__objt_server(conn->target))) {
 		/* This session was relying on a server in a previous request
 		 * and the proxy has "option prefer-current-server" set, so
 		 * let's try to reuse the same server.
@@ -753,7 +753,8 @@ int assign_server_address(struct session *s)
 		if (!is_addr(&srv_conn->addr.to) && cli_conn) {
 			/* if the server has no address, we use the same address
 			 * the client asked, which is handy for remapping ports
-			 * locally on multiple addresses at once.
+			 * locally on multiple addresses at once. Nothing is done
+			 * for AF_UNIX addresses.
 			 */
 			conn_get_to_addr(cli_conn);
 
@@ -1059,7 +1060,7 @@ int connect_server(struct session *s)
 
 		/* process the case where the server requires the PROXY protocol to be sent */
 		srv_conn->send_proxy_ofs = 0;
-		if (objt_server(s->target) && (objt_server(s->target)->state & SRV_SEND_PROXY)) {
+		if (objt_server(s->target) && objt_server(s->target)->pp_opts) {
 			srv_conn->send_proxy_ofs = 1; /* must compute size */
 			cli_conn = objt_conn(s->req->prod->end);
 			if (cli_conn)
@@ -1239,7 +1240,8 @@ int tcp_persist_rdp_cookie(struct session *s, struct channel *req, int an_bit)
 
 	s->target = NULL;
 	while (srv) {
-		if (memcmp(&addr, &(srv->addr), sizeof(addr)) == 0) {
+		if (srv->addr.ss_family == AF_INET &&
+		    memcmp(&addr, &(srv->addr), sizeof(addr)) == 0) {
 			if ((srv->state & SRV_RUNNING) || (px->options & PR_O_PERSIST)) {
 				/* we found the server and it is usable */
 				s->flags |= SN_DIRECT | SN_ASSIGNED;

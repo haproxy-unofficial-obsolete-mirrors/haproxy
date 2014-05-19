@@ -207,6 +207,7 @@ static void server_status_printf(struct chunk *msg, struct server *s, struct che
 static void set_server_check_status(struct check *check, short status, const char *desc)
 {
 	struct server *s = check->server;
+	short prev_status = check->status;
 
 	if (status == HCHK_STATUS_START) {
 		check->result = CHK_RES_UNKNOWN;	/* no result yet */
@@ -243,13 +244,9 @@ static void set_server_check_status(struct check *check, short status, const cha
 		return;
 
 	if (s->proxy->options2 & PR_O2_LOGHCHKS &&
-	(((check->health != 0) && (check->result == CHK_RES_FAILED)) ||
-	    (((check->health != check->rise + check->fall - 1) ||
-	      (!s->uweight && !(s->state & SRV_DRAIN)) ||
-	      (s->uweight && (s->state & SRV_DRAIN))) &&
-	     (check->result >= CHK_RES_PASSED)) ||
-	    ((s->state & SRV_GOINGDOWN) && (check->result != CHK_RES_CONDPASS)) ||
-	    (!(s->state & SRV_GOINGDOWN) && (check->result == CHK_RES_CONDPASS)))) {
+	    ((status != prev_status) ||
+	    ((check->health != 0) && (check->result == CHK_RES_FAILED)) ||
+	    (((check->health != check->rise + check->fall - 1)) && (check->result >= CHK_RES_PASSED)))) {
 
 		int health, rise, fall, state;
 
@@ -305,7 +302,7 @@ static void set_server_check_status(struct check *check, short status, const cha
 		chunk_appendf(&trash, ", status: %d/%d %s",
 		             (state & SRV_RUNNING) ? (health - rise + 1) : (health),
 		             (state & SRV_RUNNING) ? (fall) : (rise),
-			     (state & SRV_RUNNING)?(s->eweight?"UP":"DRAIN"):"DOWN");
+			     (state & SRV_RUNNING) ? (s->uweight?"UP":"DRAIN"):"DOWN");
 
 		Warning("%s.\n", trash.str);
 		send_log(s->proxy, LOG_NOTICE, "%s.\n", trash.str);
@@ -1217,7 +1214,6 @@ static void event_srv_chk_r(struct connection *conn)
 		}
 
 		set_server_check_status(check, status, desc);
-		set_server_drain_state(check->server);
 		break;
 	}
 
@@ -1509,6 +1505,7 @@ static struct task *process_chk(struct task *t)
 	struct check *check = t->context;
 	struct server *s = check->server;
 	struct connection *conn = check->conn;
+	struct protocol *proto;
 	int rv;
 	int ret;
 	int expired = tick_is_expired(t->expire, now_ms);
@@ -1573,12 +1570,16 @@ static struct task *process_chk(struct task *t)
 		/* no client address */
 		clear_addr(&conn->addr.from);
 
-		if (is_addr(&s->check_common.addr))
+		if (is_addr(&s->check_common.addr)) {
 			/* we'll connect to the check addr specified on the server */
 			conn->addr.to = s->check_common.addr;
-		else
+			proto = s->check_common.proto;
+		}
+		else {
 			/* we'll connect to the addr on the server */
 			conn->addr.to = s->addr;
+			proto = s->proto;
+		}
 
 		if (check->port) {
 			set_host_port(&conn->addr.to, check->port);
@@ -1606,8 +1607,8 @@ static struct task *process_chk(struct task *t)
 		 * connect() when a pure TCP check is used (without PROXY protocol).
 		 */
 		ret = SN_ERR_INTERNAL;
-		if (s->check_common.proto->connect)
-			ret = s->check_common.proto->connect(conn, check->type, (check->type) ? 0 : 2);
+		if (proto->connect)
+			ret = proto->connect(conn, check->type, (check->type) ? 0 : 2);
 		conn->flags |= CO_FL_WAKE_DATA;
 		if (s->check.send_proxy) {
 			conn->send_proxy_ofs = 1;
@@ -1970,7 +1971,6 @@ static int tcpcheck_get_step_id(struct server *s)
 static void tcpcheck_main(struct connection *conn)
 {
 	char *contentptr;
-	unsigned int contentlen;
 	struct list *head = NULL;
 	struct tcpcheck_rule *cur = NULL;
 	int done = 0, ret = 0;
@@ -2075,15 +2075,16 @@ static void tcpcheck_main(struct connection *conn)
 			/* no client address */
 			clear_addr(&conn->addr.from);
 
-			if (is_addr(&s->check_common.addr))
+			if (is_addr(&s->check_common.addr)) {
 				/* we'll connect to the check addr specified on the server */
 				conn->addr.to = s->check_common.addr;
-			else
+				proto = s->check_common.proto;
+			}
+			else {
 				/* we'll connect to the addr on the server */
 				conn->addr.to = s->addr;
-
-			/* protocol */
-			proto = protocol_by_family(conn->addr.to.ss_family);
+				proto = s->proto;
+			}
 
 			/* port */
 			if (check->current_step->port)
@@ -2247,10 +2248,9 @@ static void tcpcheck_main(struct connection *conn)
 			}
 
 			contentptr = check->bi->data;
-			contentlen = check->bi->i;
 
 			/* Check that response body is not empty... */
-			if (*contentptr == '\0') {
+			if (!check->bi->i) {
 				if (!done)
 					continue;
 
@@ -2267,7 +2267,7 @@ static void tcpcheck_main(struct connection *conn)
 
 		tcpcheck_expect:
 			if (cur->string != NULL)
-				ret = my_memmem(contentptr, contentlen, cur->string, cur->string_len) != NULL;
+				ret = my_memmem(contentptr, check->bi->i, cur->string, cur->string_len) != NULL;
 			else if (cur->expect_regex != NULL)
 				ret = regexec(cur->expect_regex, contentptr, MAX_MATCH, pmatch, 0) == 0;
 

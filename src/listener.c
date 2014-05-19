@@ -11,6 +11,7 @@
  */
 
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -41,15 +42,27 @@ static struct bind_kw_list bind_keywords = {
 
 /* This function adds the specified listener's file descriptor to the polling
  * lists if it is in the LI_LISTEN state. The listener enters LI_READY or
- * LI_FULL state depending on its number of connections.
+ * LI_FULL state depending on its number of connections. In deamon mode, we
+ * also support binding only the relevant processes to their respective
+ * listeners. We don't do that in debug mode however.
  */
 void enable_listener(struct listener *listener)
 {
 	if (listener->state == LI_LISTEN) {
-		if (listener->nbconn < listener->maxconn) {
+		if ((global.mode & (MODE_DAEMON | MODE_SYSTEMD)) &&
+		    listener->bind_conf->bind_proc &&
+		    !(listener->bind_conf->bind_proc & (1UL << (relative_pid - 1)))) {
+			/* we don't want to enable this listener and don't
+			 * want any fd event to reach it.
+			 */
+			fd_stop_recv(listener->fd);
+			listener->state = LI_PAUSED;
+		}
+		else if (listener->nbconn < listener->maxconn) {
 			fd_want_recv(listener->fd);
 			listener->state = LI_READY;
-		} else {
+		}
+		else {
 			listener->state = LI_FULL;
 		}
 	}
@@ -105,10 +118,17 @@ int pause_listener(struct listener *l)
  * limited and disabled listeners are handled, which means that this function
  * may replace enable_listener(). The resulting state will either be LI_READY
  * or LI_FULL. 0 is returned in case of failure to resume (eg: dead socket).
+ * Listeners bound to a different process are not woken up unless we're in
+ * foreground mode.
  */
 int resume_listener(struct listener *l)
 {
 	if (l->state < LI_PAUSED)
+		return 0;
+
+	if ((global.mode & (MODE_DAEMON | MODE_SYSTEMD)) &&
+	    l->bind_conf->bind_proc &&
+	    !(l->bind_conf->bind_proc & (1UL << (relative_pid - 1))))
 		return 0;
 
 	if (l->proto->sock_prot == IPPROTO_TCP &&
@@ -257,6 +277,7 @@ void listener_accept(int fd)
 	struct listener *l = fdtab[fd].owner;
 	struct proxy *p = l->frontend;
 	int max_accept = l->maxaccept ? l->maxaccept : 1;
+	int expire;
 	int cfd;
 	int ret;
 #ifdef USE_ACCEPT4
@@ -270,14 +291,11 @@ void listener_accept(int fd)
 
 	if (!(l->options & LI_O_UNLIMITED) && global.sps_lim) {
 		int max = freq_ctr_remain(&global.sess_per_sec, global.sps_lim, 0);
-		int expire;
 
 		if (unlikely(!max)) {
 			/* frontend accept rate limit was reached */
-			limit_listener(l, &global_listener_queue);
 			expire = tick_add(now_ms, next_event_delay(&global.sess_per_sec, global.sps_lim, 0));
-			task_schedule(global_listener_queue_task, tick_first(expire, global_listener_queue_task->expire));
-			return;
+			goto wait_expire;
 		}
 
 		if (max_accept > max)
@@ -286,14 +304,11 @@ void listener_accept(int fd)
 
 	if (!(l->options & LI_O_UNLIMITED) && global.cps_lim) {
 		int max = freq_ctr_remain(&global.conn_per_sec, global.cps_lim, 0);
-		int expire;
 
 		if (unlikely(!max)) {
 			/* frontend accept rate limit was reached */
-			limit_listener(l, &global_listener_queue);
 			expire = tick_add(now_ms, next_event_delay(&global.conn_per_sec, global.cps_lim, 0));
-			task_schedule(global_listener_queue_task, tick_first(expire, global_listener_queue_task->expire));
-			return;
+			goto wait_expire;
 		}
 
 		if (max_accept > max)
@@ -302,14 +317,11 @@ void listener_accept(int fd)
 #ifdef USE_OPENSSL
 	if (!(l->options & LI_O_UNLIMITED) && global.ssl_lim && l->bind_conf && l->bind_conf->is_ssl) {
 		int max = freq_ctr_remain(&global.ssl_per_sec, global.ssl_lim, 0);
-		int expire;
 
 		if (unlikely(!max)) {
 			/* frontend accept rate limit was reached */
-			limit_listener(l, &global_listener_queue);
 			expire = tick_add(now_ms, next_event_delay(&global.ssl_per_sec, global.ssl_lim, 0));
-			task_schedule(global_listener_queue_task, tick_first(expire, global_listener_queue_task->expire));
-			return;
+			goto wait_expire;
 		}
 
 		if (max_accept > max)
@@ -365,8 +377,20 @@ void listener_accept(int fd)
 		if (unlikely(cfd == -1)) {
 			switch (errno) {
 			case EAGAIN:
+				if (fdtab[fd].ev & FD_POLL_HUP) {
+					/* the listening socket might have been disabled in a shared
+					 * process and we're a collateral victim. We'll just pause for
+					 * a while in case it comes back. In the mean time, we need to
+					 * clear this sticky flag.
+					 */
+					fdtab[fd].ev &= ~FD_POLL_HUP;
+					goto transient_error;
+				}
 				fd_cant_recv(fd);
 				return;   /* nothing more to accept */
+			case EINVAL:
+				/* might be trying to accept on a shut fd (eg: soft stop) */
+				goto transient_error;
 			case EINTR:
 			case ECONNABORTED:
 				continue;
@@ -375,26 +399,20 @@ void listener_accept(int fd)
 					send_log(p, LOG_EMERG,
 						 "Proxy %s reached system FD limit at %d. Please check system tunables.\n",
 						 p->id, maxfd);
-				limit_listener(l, &global_listener_queue);
-				task_schedule(global_listener_queue_task, tick_add(now_ms, 100)); /* try again in 100 ms */
-				return;
+				goto transient_error;
 			case EMFILE:
 				if (p)
 					send_log(p, LOG_EMERG,
 						 "Proxy %s reached process FD limit at %d. Please check 'ulimit-n' and restart.\n",
 						 p->id, maxfd);
-				limit_listener(l, &global_listener_queue);
-				task_schedule(global_listener_queue_task, tick_add(now_ms, 100)); /* try again in 100 ms */
-				return;
+				goto transient_error;
 			case ENOBUFS:
 			case ENOMEM:
 				if (p)
 					send_log(p, LOG_EMERG,
 						 "Proxy %s reached system memory limit at %d sockets. Please check system tunables.\n",
 						 p->id, maxfd);
-				limit_listener(l, &global_listener_queue);
-				task_schedule(global_listener_queue_task, tick_add(now_ms, 100)); /* try again in 100 ms */
-				return;
+				goto transient_error;
 			default:
 				/* unexpected result, let's give up and let other tasks run */
 				goto stop;
@@ -442,9 +460,7 @@ void listener_accept(int fd)
 			if (ret == 0) /* successful termination */
 				continue;
 
-			limit_listener(l, &global_listener_queue);
-			task_schedule(global_listener_queue_task, tick_add(now_ms, 100)); /* try again in 100 ms */
-			return;
+			goto transient_error;
 		}
 
 		if (l->nbconn >= l->maxconn) {
@@ -472,6 +488,15 @@ void listener_accept(int fd)
 	/* we've exhausted max_accept, so there is no need to poll again */
  stop:
 	fd_done_recv(fd);
+	return;
+
+ transient_error:
+	/* pause the listener and try again in 100 ms */
+	expire = tick_add(now_ms, 100);
+
+ wait_expire:
+	limit_listener(l, &global_listener_queue);
+	task_schedule(global_listener_queue_task, tick_first(expire, global_listener_queue_task->expire));
 	return;
 }
 
@@ -698,6 +723,49 @@ static int bind_parse_nice(char **args, int cur_arg, struct proxy *px, struct bi
 	return 0;
 }
 
+/* parse the "process" bind keyword */
+static int bind_parse_process(char **args, int cur_arg, struct proxy *px, struct bind_conf *conf, char **err)
+{
+	unsigned long set = 0;
+	unsigned int low, high;
+
+	if (strcmp(args[cur_arg + 1], "all") == 0) {
+		set = 0;
+	}
+	else if (strcmp(args[cur_arg + 1], "odd") == 0) {
+		set |= ~0UL/3UL; /* 0x555....555 */
+	}
+	else if (strcmp(args[cur_arg + 1], "even") == 0) {
+		set |= (~0UL/3UL) << 1; /* 0xAAA...AAA */
+	}
+	else if (isdigit((int)*args[cur_arg + 1])) {
+		char *dash = strchr(args[cur_arg + 1], '-');
+
+		low = high = str2uic(args[cur_arg + 1]);
+		if (dash)
+			high = str2uic(dash + 1);
+
+		if (high < low) {
+			unsigned int swap = low;
+			low = high;
+			high = swap;
+		}
+
+		if (low < 1 || high > LONGBITS) {
+			memprintf(err, "'%s' : invalid range %d-%d, allowed range is 1..%d", args[cur_arg], low, high, LONGBITS);
+			return ERR_ALERT | ERR_FATAL;
+		}
+		while (low <= high)
+			set |= 1UL << (low++ - 1);
+	}
+	else {
+		memprintf(err, "'%s' expects 'all', 'odd', 'even', or a process range with numbers from 1 to %d.", args[cur_arg], LONGBITS);
+		return ERR_ALERT | ERR_FATAL;
+	}
+
+	conf->bind_proc = set;
+	return 0;
+}
 
 /* Note: must not be declared <const> as its list will be overwritten.
  * Please take care of keeping this list alphabetically sorted.
@@ -729,6 +797,7 @@ static struct bind_kw_list bind_kws = { "ALL", { }, {
 	{ "maxconn",      bind_parse_maxconn,      1 }, /* set maxconn of listening socket */
 	{ "name",         bind_parse_name,         1 }, /* set name of listening socket */
 	{ "nice",         bind_parse_nice,         1 }, /* set nice of listening socket */
+	{ "process",      bind_parse_process,      1 }, /* set list of allowed process for this socket */
 	{ /* END */ },
 }};
 

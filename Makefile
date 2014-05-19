@@ -17,6 +17,7 @@
 #   USE_PCRE_JIT         : enable JIT for faster regex on libpcre >= 8.32
 #   USE_POLL             : enable poll(). Automatic.
 #   USE_PRIVATE_CACHE    : disable shared memory cache of ssl sessions.
+#   USE_PTHREAD_PSHARED  : enable pthread process shared mutex on sslcache.
 #   USE_REGPARM          : enable regparm optimization. Recommended on x86.
 #   USE_STATIC_PCRE      : enable static libpcre. Recommended.
 #   USE_TPROXY           : enable transparent proxy. Automatic.
@@ -51,6 +52,8 @@
 #          by "haproxy -vv" in CFLAGS.
 #   SILENT_DEFINE may be used to specify other defines which will not be
 #     reported by "haproxy -vv".
+#   EXTRA   is used to force building or not building some extra tools. By
+#           default on Linux 2.6+, it contains "haproxy-systemd-wrapper".
 #   DESTDIR is not set by default and is used for installation only.
 #           It might be useful to set DESTDIR if you want to install haproxy
 #           in a sandbox.
@@ -156,6 +159,10 @@ ADDLIB =
 DEFINE =
 SILENT_DEFINE =
 
+#### extra programs to build (eg: haproxy-systemd-wrapper)
+# Force this to enable building extra programs or to disable them.
+# It's automatically appended depending on the targets.
+EXTRA =
 
 #### CPU dependant optimizations
 # Some CFLAGS are set by default depending on the target CPU. Those flags only
@@ -238,6 +245,7 @@ ifeq ($(TARGET),linux26)
   USE_TPROXY      = implicit
   USE_LIBCRYPT    = implicit
   USE_FUTEX       = implicit
+  EXTRA          += haproxy-systemd-wrapper
 else
 ifeq ($(TARGET),linux2628)
   # This is for standard Linux >= 2.6.28 with netfilter, epoll, tproxy and splice
@@ -253,6 +261,7 @@ ifeq ($(TARGET),linux2628)
   USE_FUTEX       = implicit
   USE_CPU_AFFINITY= implicit
   ASSUME_SPLICE_WORKS= implicit
+  EXTRA          += haproxy-systemd-wrapper
 else
 ifeq ($(TARGET),solaris)
   # This is for Solaris 8
@@ -536,10 +545,13 @@ OPTIONS_OBJS  += src/ssl_sock.o src/shctx.o
 ifneq ($(USE_PRIVATE_CACHE),)
 OPTIONS_CFLAGS  += -DUSE_PRIVATE_CACHE
 else
+ifneq ($(USE_PTHREAD_PSHARED),)
+OPTIONS_CFLAGS  += -DUSE_PTHREAD_PSHARED
+OPTIONS_LDFLAGS += -lpthread
+else
 ifneq ($(USE_FUTEX),)
 OPTIONS_CFLAGS  += -DUSE_SYSCALL_FUTEX
-else
-OPTIONS_LDFLAGS += -lpthread
+endif
 endif
 endif
 endif
@@ -631,7 +643,7 @@ all:
 	@echo
 	@exit 1
 else
-all: haproxy haproxy-systemd-wrapper
+all: haproxy $(EXTRA)
 endif
 
 OBJS = src/haproxy.o src/sessionhash.o src/base64.o src/protocol.o \

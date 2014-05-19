@@ -597,6 +597,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 				}
 
 				newsrv->check_common.addr = *sk;
+				newsrv->check_common.proto = protocol_by_family(sk->ss_family);
 				cur_arg += 2;
 			}
 			else if (!strcmp(args[cur_arg], "port")) {
@@ -612,7 +613,11 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 				cur_arg ++;
 			}
 			else if (!defsrv && !strcmp(args[cur_arg], "send-proxy")) {
-				newsrv->state |= SRV_SEND_PROXY;
+				newsrv->pp_opts |= SRV_PP_V1;
+				cur_arg ++;
+			}
+			else if (!defsrv && !strcmp(args[cur_arg], "send-proxy-v2")) {
+				newsrv->pp_opts |= SRV_PP_V2;
 				cur_arg ++;
 			}
 			else if (!defsrv && !strcmp(args[cur_arg], "check-send-proxy")) {
@@ -824,7 +829,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 					if (!strcmp(args[cur_arg], "usesrc")) {  /* address to use outside */
 #if defined(CONFIG_HAP_CTTPROXY) || defined(CONFIG_HAP_TRANSPARENT)
 #if !defined(CONFIG_HAP_TRANSPARENT)
-						if (!is_addr(&newsrv->conn_src.source_addr)) {
+						if (!is_inet_addr(&newsrv->conn_src.source_addr)) {
 							Alert("parsing [%s:%d] : '%s' requires an explicit '%s' address.\n",
 							      file, linenum, "usesrc", "source");
 							err_code |= ERR_ALERT | ERR_FATAL;
@@ -1021,9 +1026,6 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			}
 		}
 
-		/* Set initial drain state using now-configured weight */
-		set_server_drain_state(newsrv);
-
 		if (do_check) {
 			int ret;
 
@@ -1043,7 +1045,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 #ifdef USE_OPENSSL
 				newsrv->check.use_ssl |= (newsrv->use_ssl || (newsrv->proxy->options & PR_O_TCPCHK_SSL));
 #endif
-				newsrv->check.send_proxy |= (newsrv->state & SRV_SEND_PROXY);
+				newsrv->check.send_proxy |= (newsrv->pp_opts);
 			}
 			/* try to get the port from check_core.addr if check.port not set */
 			if (!newsrv->check.port)
@@ -1067,9 +1069,11 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			}
 			/*
 			 * We need at least a service port, a check port or the first tcp-check rule must
-			 * be a 'connect' one
+			 * be a 'connect' one when checking an IPv4/IPv6 server.
 			 */
-			if (!newsrv->check.port) {
+			if (!newsrv->check.port &&
+			    (is_inet_addr(&newsrv->check_common.addr) ||
+			     (!is_addr(&newsrv->check_common.addr) && is_inet_addr(&newsrv->addr)))) {
 				struct tcpcheck_rule *n = NULL, *r = NULL;
 				struct list *l;
 
@@ -1139,7 +1143,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			else
 				curproxy->srv_act++;
 
-			newsrv->prev_state = newsrv->state;
+			srv_lb_commit_status(newsrv);
 		}
 	}
 	return 0;

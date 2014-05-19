@@ -372,7 +372,7 @@ static int stats_parse_global(char **args, int section_type, struct proxy *curpx
 	}
 	else if (!strcmp(args[1], "bind-process")) {  /* enable the socket only on some processes */
 		int cur_arg = 2;
-		unsigned int set = 0;
+		unsigned long set = 0;
 
 		if (!global.stats_fe) {
 			if ((global.stats_fe = alloc_stats_fe("GLOBAL", file, line)) == NULL) {
@@ -389,10 +389,10 @@ static int stats_parse_global(char **args, int section_type, struct proxy *curpx
 				break;
 			}
 			else if (strcmp(args[cur_arg], "odd") == 0) {
-				set |= 0x55555555;
+				set |= ~0UL/3UL; /* 0x555....555 */
 			}
 			else if (strcmp(args[cur_arg], "even") == 0) {
-				set |= 0xAAAAAAAA;
+				set |= (~0UL/3UL) << 1; /* 0xAAA...AAA */
 			}
 			else if (isdigit((int)*args[cur_arg])) {
 				char *dash = strchr(args[cur_arg], '-');
@@ -407,19 +407,18 @@ static int stats_parse_global(char **args, int section_type, struct proxy *curpx
 					high = swap;
 				}
 
-				if (low < 1 || high > 32) {
-					memprintf(err, "'%s %s' supports process numbers from 1 to 32.\n",
-					          args[0], args[1]);
+				if (low < 1 || high > LONGBITS) {
+					memprintf(err, "'%s %s' supports process numbers from 1 to %d.\n",
+					          args[0], args[1], LONGBITS);
 					return -1;
 				}
-
 				while (low <= high)
-					set |= 1 << (low++ - 1);
+					set |= 1UL << (low++ - 1);
 			}
 			else {
 				memprintf(err,
-				          "'%s %s' expects 'all', 'odd', 'even', or a list of process ranges with numbers from 1 to 32.\n",
-				          args[0], args[1]);
+				          "'%s %s' expects 'all', 'odd', 'even', or a list of process ranges with numbers from 1 to %d.\n",
+				          args[0], args[1], LONGBITS);
 				return -1;
 			}
 			cur_arg++;
@@ -1356,12 +1355,6 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 				return 1;
 
 			warning = server_parse_weight_change_request(sv, args[3]);
-			/*
-			 * The user-weight may now be zero and thus
-			 * the server considered to be draining.
-			 * Update the server's drain state as necessary.
-			 */
-			set_server_drain_state(sv);
 			if (warning) {
 				appctx->ctx.cli.msg = warning;
 				appctx->st0 = STAT_CLI_PRINT;
@@ -2984,19 +2977,17 @@ static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, in
 		}
 		else if (sv != ref) {
 			if (sv->state & SRV_MAINTAIN)
-				chunk_appendf(&trash,
-					      "<td class=ac colspan=3><a class=lfsb href=\"#%s/%s\"><a></td>",
-					      ref->proxy->id, ref->id);
+				chunk_appendf(&trash, "<td class=ac colspan=3></td>");
 			else
 				chunk_appendf(&trash,
-					      "<td class=ac colspan=3><a class=lfsb href=\"#%s/%s\">via %s/%s<a></td>",
+					      "<td class=ac colspan=3><a class=lfsb href=\"#%s/%s\">via %s/%s</a></td>",
 					      ref->proxy->id, ref->id, ref->proxy->id, ref->id);
 		}
 		else
 			chunk_appendf(&trash, "<td colspan=3></td>");
 
 		/* throttle */
-		if (sv->state & SRV_WARMINGUP)
+		if ((sv->state & SRV_WARMINGUP) && !server_is_draining(sv))
 			chunk_appendf(&trash, "<td class=ac>%d %%</td></tr>\n", server_throttle_rate(sv));
 		else
 			chunk_appendf(&trash, "<td class=ac>-</td></tr>\n");
@@ -3074,7 +3065,7 @@ static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, in
 		              relative_pid, px->uuid, sv->puid);
 
 		/* throttle */
-		if (sv->state & SRV_WARMINGUP)
+		if ((sv->state & SRV_WARMINGUP) && !server_is_draining(sv))
 			chunk_appendf(&trash, "%d", server_throttle_rate(sv));
 
 		/* sessions: lbtot */
@@ -3636,7 +3627,7 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 				else
 					sv_state = 2; /* going down */
 
-				if (svs->state & SRV_DRAIN)
+				if (server_is_draining(svs))
 					sv_state += 4;
 				else if (svs->state & SRV_GOINGDOWN)
 					sv_state += 2;
@@ -3849,7 +3840,6 @@ static void stats_dump_html_info(struct stream_interface *si, struct uri_auth *u
 	              "<td class=\"backup1\"></td><td class=\"noborder\">backup DOWN, going up </td>"
 	              "</tr><tr>\n"
 	              "<td class=\"active0\"></td><td class=\"noborder\">active or backup DOWN &nbsp;</td>"
-	              "</tr><tr>\n"
 	              "<td class=\"active8\"></td><td class=\"noborder\">not checked </td>"
 	              "</tr><tr>\n"
 	              "<td class=\"maintain\"></td><td class=\"noborder\" colspan=\"3\">active or backup DOWN for maintenance (MAINT) &nbsp;</td>"
@@ -4295,7 +4285,6 @@ static int stats_process_http_post(struct stream_interface *si)
 							sv->uweight = 0;
 
 						server_recalc_eweight(sv);
-						set_server_drain_state(sv);
 
 						altered_servers++;
 						total_servers++;

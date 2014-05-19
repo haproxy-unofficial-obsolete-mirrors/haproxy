@@ -594,6 +594,9 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.tune.chksize = atol(args[1]);
 	}
 #ifdef USE_OPENSSL
+	else if (!strcmp(args[0], "tune.ssl.force-private-cache")) {
+		global.tune.sslprivatecache = 1;
+	}
 	else if (!strcmp(args[0], "tune.ssl.cachesize")) {
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
@@ -883,6 +886,12 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 		global.nbproc = atol(args[1]);
+		if (global.nbproc < 1 || global.nbproc > LONGBITS) {
+			Alert("parsing [%s:%d] : '%s' must be between 1 and %d (was %d).\n",
+			      file, linenum, args[0], LONGBITS, global.nbproc);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
 	}
 	else if (!strcmp(args[0], "maxconn")) {
 		if (global.maxconn != 0) {
@@ -1366,24 +1375,24 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 	else if (strcmp(args[0], "cpu-map") == 0) {  /* map a process list to a CPU set */
 #ifdef USE_CPU_AFFINITY
 		int cur_arg, i;
-		unsigned int proc = 0;
+		unsigned long proc = 0;
 		unsigned long cpus = 0;
 
 		if (strcmp(args[1], "all") == 0)
-			proc = 0xFFFFFFFF;
+			proc = ~0UL;
 		else if (strcmp(args[1], "odd") == 0)
-			proc = 0x55555555;
+			proc = ~0UL/3UL; /* 0x555....555 */
 		else if (strcmp(args[1], "even") == 0)
-			proc = 0xAAAAAAAA;
+			proc = (~0UL/3UL) << 1; /* 0xAAA...AAA */
 		else {
-			proc = atoi(args[1]);
-			if (proc >= 1 && proc <= 32)
-				proc = 1 << (proc - 1);
+			proc = atol(args[1]);
+			if (proc >= 1 && proc <= LONGBITS)
+				proc = 1UL << (proc - 1);
 		}
 
 		if (!proc || !*args[2]) {
-			Alert("parsing [%s:%d]: %s expects a process number including 'all', 'odd', 'even', or a number from 1 to 32, followed by a list of CPU ranges with numbers from 0 to 31.\n",
-			      file, linenum, args[0]);
+			Alert("parsing [%s:%d]: %s expects a process number including 'all', 'odd', 'even', or a number from 1 to %d, followed by a list of CPU ranges with numbers from 0 to %d.\n",
+			      file, linenum, args[0], LONGBITS, LONGBITS - 1);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
@@ -1405,9 +1414,9 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 					high = swap;
 				}
 
-				if (high >= sizeof(long) * 8) {
+				if (high >= LONGBITS) {
 					Alert("parsing [%s:%d]: %s supports CPU numbers from 0 to %d.\n",
-					      file, linenum, args[0], (int)(sizeof(long) * 8 - 1));
+					      file, linenum, args[0], LONGBITS - 1);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
@@ -1423,8 +1432,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			}
 			cur_arg++;
 		}
-		for (i = 0; i < 32; i++)
-			if (proc & (1 << i))
+		for (i = 0; i < LONGBITS; i++)
+			if (proc & (1UL << i))
 				global.cpu_map[i] = cpus;
 #else
 		Alert("parsing [%s:%d] : '%s' is not enabled, please check build options for USE_CPU_AFFINITY.\n", file, linenum, args[0]);
@@ -1496,6 +1505,10 @@ void init_default_instance()
 }
 
 
+/* This function createss a new req* or rsp* rule to the proxy. It compiles the
+ * regex and may return the ERR_WARN bit, and error bits such as ERR_ALERT and
+ * ERR_FATAL in case of error.
+ */
 static int create_cond_regex_rule(const char *file, int line,
 				  struct proxy *px, int dir, int action, int flags,
 				  const char *cmd, const char *reg, const char *repl,
@@ -1504,41 +1517,41 @@ static int create_cond_regex_rule(const char *file, int line,
 	regex_t *preg = NULL;
 	char *errmsg = NULL;
 	const char *err;
-	int err_code = 0;
+	int ret_code = 0;
 	struct acl_cond *cond = NULL;
 
 	if (px == &defproxy) {
 		Alert("parsing [%s:%d] : '%s' not allowed in 'defaults' section.\n", file, line, cmd);
-		err_code |= ERR_ALERT | ERR_FATAL;
+		ret_code |= ERR_ALERT | ERR_FATAL;
 		goto err;
 	}
 
 	if (*reg == 0) {
 		Alert("parsing [%s:%d] : '%s' expects <regex> as an argument.\n", file, line, cmd);
-		err_code |= ERR_ALERT | ERR_FATAL;
+		ret_code |= ERR_ALERT | ERR_FATAL;
 		goto err;
 	}
 
 	if (warnifnotcap(px, PR_CAP_RS, file, line, cmd, NULL))
-		err_code |= ERR_WARN;
+		ret_code |= ERR_WARN;
 
 	if (cond_start &&
 	    (strcmp(*cond_start, "if") == 0 || strcmp(*cond_start, "unless") == 0)) {
 		if ((cond = build_acl_cond(file, line, px, cond_start, &errmsg)) == NULL) {
 			Alert("parsing [%s:%d] : error detected while parsing a '%s' condition : %s.\n",
 			      file, line, cmd, errmsg);
-			err_code |= ERR_ALERT | ERR_FATAL;
+			ret_code |= ERR_ALERT | ERR_FATAL;
 			goto err;
 		}
 	}
 	else if (cond_start && **cond_start) {
 		Alert("parsing [%s:%d] : '%s' : Expecting nothing, 'if', or 'unless', got '%s'.\n",
 		      file, line, cmd, *cond_start);
-		err_code |= ERR_ALERT | ERR_FATAL;
+		ret_code |= ERR_ALERT | ERR_FATAL;
 		goto err;
 	}
 
-	err_code |= warnif_cond_conflicts(cond,
+	ret_code |= warnif_cond_conflicts(cond,
 	                                  (dir == SMP_OPT_DIR_REQ) ?
 	                                  ((px->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR) :
 	                                  ((px->cap & PR_CAP_BE) ? SMP_VAL_BE_HRS_HDR : SMP_VAL_FE_HRS_HDR),
@@ -1547,13 +1560,13 @@ static int create_cond_regex_rule(const char *file, int line,
 	preg = calloc(1, sizeof(regex_t));
 	if (!preg) {
 		Alert("parsing [%s:%d] : '%s' : not enough memory to build regex.\n", file, line, cmd);
-		err_code = ERR_ALERT | ERR_FATAL;
+		ret_code = ERR_ALERT | ERR_FATAL;
 		goto err;
 	}
 
 	if (regcomp(preg, reg, REG_EXTENDED | flags) != 0) {
 		Alert("parsing [%s:%d] : '%s' : bad regular expression '%s'.\n", file, line, cmd, reg);
-		err_code = ERR_ALERT | ERR_FATAL;
+		ret_code = ERR_ALERT | ERR_FATAL;
 		goto err;
 	}
 
@@ -1562,19 +1575,21 @@ static int create_cond_regex_rule(const char *file, int line,
 	if (repl && err) {
 		Alert("parsing [%s:%d] : '%s' : invalid character or unterminated sequence in replacement string near '%c'.\n",
 		      file, line, cmd, *err);
-		err_code |= ERR_ALERT | ERR_FATAL;
-		goto err;
+		ret_code |= ERR_ALERT | ERR_FATAL;
+		goto err_free;
 	}
 
 	if (dir == SMP_OPT_DIR_REQ && warnif_misplaced_reqxxx(px, file, line, cmd))
-		err_code |= ERR_WARN;
+		ret_code |= ERR_WARN;
 
-	free(errmsg);
-	return err_code;
+	return ret_code;
+
+ err_free:
+	regfree(preg);
  err:
-	free(errmsg);
 	free(preg);
-	return err_code;
+	free(errmsg);
+	return ret_code;
 }
 
 /*
@@ -1748,6 +1763,7 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 				}
 
 				list_for_each_entry(l, &bind_conf->listeners, by_bind) {
+					l->maxaccept = 1;
 					l->maxconn = ((struct proxy *)curpeers->peers_fe)->maxconn;
 					l->backlog = ((struct proxy *)curpeers->peers_fe)->backlog;
 					l->timeout = &((struct proxy *)curpeers->peers_fe)->timeout.client;
@@ -2347,7 +2363,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 	}
 	else if (!strcmp(args[0], "bind-process")) {  /* enable this proxy only on some processes */
 		int cur_arg = 1;
-		unsigned int set = 0;
+		unsigned long set = 0;
 
 		while (*args[cur_arg]) {
 			unsigned int low, high;
@@ -2357,10 +2373,10 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 				break;
 			}
 			else if (strcmp(args[cur_arg], "odd") == 0) {
-				set |= 0x55555555;
+				set |= ~0UL/3UL; /* 0x555....555 */
 			}
 			else if (strcmp(args[cur_arg], "even") == 0) {
-				set |= 0xAAAAAAAA;
+				set |= (~0UL/3UL) << 1; /* 0xAAA...AAA */
 			}
 			else if (isdigit((int)*args[cur_arg])) {
 				char *dash = strchr(args[cur_arg], '-');
@@ -2375,24 +2391,18 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 					high = swap;
 				}
 
-				if (low < 1 || high > 32) {
-					Alert("parsing [%s:%d]: %s supports process numbers from 1 to 32.\n",
-					      file, linenum, args[0]);
+				if (low < 1 || high > LONGBITS) {
+					Alert("parsing [%s:%d]: %s supports process numbers from 1 to %d.\n",
+					      file, linenum, args[0], LONGBITS);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
-
-				if (high > global.nbproc) {
-					Warning("parsing [%s:%d]: %s references process number %d which is higher than global.nbproc (%d).\n",
-						file, linenum, args[0], high, global.nbproc);
-					err_code |= ERR_WARN;
-				}
 				while (low <= high)
-					set |= 1 << (low++ - 1);
+					set |= 1UL << (low++ - 1);
 			}
 			else {
-				Alert("parsing [%s:%d]: %s expects 'all', 'odd', 'even', or a list of process ranges with numbers from 1 to 32.\n",
-				      file, linenum, args[0]);
+				Alert("parsing [%s:%d]: %s expects 'all', 'odd', 'even', or a list of process ranges with numbers from 1 to %d.\n",
+				      file, linenum, args[0], LONGBITS);
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;
 			}
@@ -4809,7 +4819,7 @@ stats_error_parsing:
 			if (!strcmp(args[cur_arg], "usesrc")) {  /* address to use outside */
 #if defined(CONFIG_HAP_CTTPROXY) || defined(CONFIG_HAP_TRANSPARENT)
 #if !defined(CONFIG_HAP_TRANSPARENT)
-				if (!is_addr(&curproxy->conn_src.source_addr)) {
+				if (!is_inet_addr(&curproxy->conn_src.source_addr)) {
 					Alert("parsing [%s:%d] : '%s' requires an explicit 'source' address.\n",
 					      file, linenum, "usesrc");
 					err_code |= ERR_ALERT | ERR_FATAL;
@@ -5848,8 +5858,65 @@ int check_config_validity()
 			continue;
 		}
 
-		/* number of processes this proxy is bound to */
-		nbproc = curproxy->bind_proc ? popcount(curproxy->bind_proc) : global.nbproc;
+		/* Check multi-process mode compatibility for the current proxy */
+
+		if (curproxy->bind_proc) {
+			/* an explicit bind-process was specified, let's check how many
+			 * processes remain.
+			 */
+			nbproc = popcount(curproxy->bind_proc);
+
+			curproxy->bind_proc &= nbits(global.nbproc);
+			if (!curproxy->bind_proc && nbproc == 1) {
+				Warning("Proxy '%s': the process specified on the 'bind-process' directive refers to a process number that is higher than global.nbproc. The proxy has been forced to run on process 1 only.\n", curproxy->id);
+				curproxy->bind_proc = 1;
+			}
+			else if (!curproxy->bind_proc && nbproc > 1) {
+				Warning("Proxy '%s': all processes specified on the 'bind-process' directive refer to numbers that are all higher than global.nbproc. The directive was ignored and the proxy will run on all processes.\n", curproxy->id);
+				curproxy->bind_proc = 0;
+			}
+		}
+
+		/* check and reduce the bind-proc of each listener */
+		list_for_each_entry(bind_conf, &curproxy->conf.bind, by_fe) {
+			unsigned long mask;
+
+			if (!bind_conf->bind_proc)
+				continue;
+
+			mask = nbits(global.nbproc);
+			if (curproxy->bind_proc)
+				mask &= curproxy->bind_proc;
+			/* mask cannot be null here thanks to the previous checks */
+
+			nbproc = popcount(bind_conf->bind_proc);
+			bind_conf->bind_proc &= mask;
+
+			if (!bind_conf->bind_proc && nbproc == 1) {
+				Warning("Proxy '%s': the process number specified on the 'process' directive of 'bind %s' at [%s:%d] refers to a process not covered by the proxy. This has been fixed by forcing it to run on the proxy's first process only.\n",
+					curproxy->id, bind_conf->arg, bind_conf->file, bind_conf->line);
+				bind_conf->bind_proc = mask & ~(mask - 1);
+			}
+			else if (!bind_conf->bind_proc && nbproc > 1) {
+				Warning("Proxy '%s': the process range specified on the 'process' directive of 'bind %s' at [%s:%d] only refers to processes not covered by the proxy. The directive was ignored so that all of the proxy's processes are used.\n",
+					curproxy->id, bind_conf->arg, bind_conf->file, bind_conf->line);
+				bind_conf->bind_proc = 0;
+			}
+		}
+
+		/* here, if bind_proc is null, it means no limit, otherwise it's explicit.
+		 * We now check how many processes the proxy will effectively run on.
+		 */
+
+		nbproc = global.nbproc;
+		if (curproxy->bind_proc)
+			nbproc = popcount(curproxy->bind_proc & nbits(global.nbproc));
+
+		if (global.nbproc > 1 && curproxy->table.peers.name) {
+			Alert("Proxy '%s': peers can't be used in multi-process mode (nbproc > 1).\n",
+			      curproxy->id);
+			cfgerr++;
+		}
 
 		switch (curproxy->mode) {
 		case PR_MODE_HEALTH:
@@ -5945,8 +6012,9 @@ int check_config_validity()
 				/* we force the backend to be present on at least all of
 				 * the frontend's processes.
 				 */
-				target->bind_proc = curproxy->bind_proc ?
-					(target->bind_proc | curproxy->bind_proc) : 0;
+				if (target->bind_proc)
+					target->bind_proc = curproxy->bind_proc ?
+						(target->bind_proc | curproxy->bind_proc) : 0;
 
 				/* Emit a warning if this proxy also has some servers */
 				if (curproxy->srv) {
@@ -5982,8 +6050,9 @@ int check_config_validity()
 					/* we force the backend to be present on at least all of
 					 * the frontend's processes.
 					 */
-					target->bind_proc = curproxy->bind_proc ?
-						(target->bind_proc | curproxy->bind_proc) : 0;
+					if (target->bind_proc)
+						target->bind_proc = curproxy->bind_proc ?
+							(target->bind_proc | curproxy->bind_proc) : 0;
 				}
 			}
 		}
@@ -6035,8 +6104,9 @@ int check_config_validity()
 				/* we force the backend to be present on at least all of
 				 * the frontend's processes.
 				 */
-				target->bind_proc = curproxy->bind_proc ?
-					(target->bind_proc | curproxy->bind_proc) : 0;
+				if (target->bind_proc)
+					target->bind_proc = curproxy->bind_proc ?
+						(target->bind_proc | curproxy->bind_proc) : 0;
 			}
 		}
 
@@ -6744,6 +6814,8 @@ out_uri_auth_compat:
 		 * remains NULL so that listeners can later detach.
 		 */
 		list_for_each_entry(bind_conf, &curproxy->conf.bind, by_fe) {
+			int alloc_ctx;
+
 			if (!bind_conf->is_ssl) {
 				if (bind_conf->default_ctx) {
 					Warning("Proxy '%s': A certificate was specified but SSL was not enabled on bind '%s' at [%s:%d] (use 'ssl').\n",
@@ -6758,8 +6830,12 @@ out_uri_auth_compat:
 				continue;
 			}
 
-			if (shared_context_init(global.tune.sslcachesize, (global.nbproc > 1) ? 1 : 0) < 0) {
-				Alert("Unable to allocate SSL session cache.\n");
+			alloc_ctx = shared_context_init(global.tune.sslcachesize, (!global.tune.sslprivatecache && (global.nbproc > 1)) ? 1 : 0);
+			if (alloc_ctx < 0) {
+				if (alloc_ctx == SHCTX_E_INIT_LOCK)
+					Alert("Unable to initialize the lock for the shared SSL session cache. You can retry using the global statement 'tune.ssl.force-private-cache' but it could increase CPU usage due to renegotiations if nbproc > 1.\n");
+				else
+					Alert("Unable to allocate SSL session cache.\n");
 				cfgerr++;
 				continue;
 			}
@@ -6842,41 +6918,22 @@ out_uri_auth_compat:
 #endif /* USE_OPENSSL */
 		}
 
-		/* Check multi-process mode compatibility for the current proxy */
-		if (global.nbproc > 1) {
-			int nbproc = 0;
-			if (curproxy->bind_proc) {
-				int proc;
-				for (proc = 0; proc < global.nbproc; proc++) {
-					if (curproxy->bind_proc & (1 << proc)) {
-						nbproc++;
-					}
+		if (nbproc > 1) {
+			if (curproxy->uri_auth) {
+				Warning("Proxy '%s': in multi-process mode, stats will be limited to process assigned to the current request.\n",
+				        curproxy->id);
+				if (!LIST_ISEMPTY(&curproxy->uri_auth->admin_rules)) {
+					Warning("Proxy '%s': stats admin will not work correctly in multi-process mode.\n",
+					        curproxy->id);
 				}
-			} else {
-				nbproc = global.nbproc;
 			}
-			if (curproxy->table.peers.name) {
-				Alert("Proxy '%s': peers can't be used in multi-process mode (nbproc > 1).\n",
-					curproxy->id);
-				cfgerr++;
+			if (curproxy->appsession_name) {
+				Warning("Proxy '%s': appsession will not work correctly in multi-process mode.\n",
+				        curproxy->id);
 			}
-			if (nbproc > 1) {
-				if (curproxy->uri_auth) {
-					Warning("Proxy '%s': in multi-process mode, stats will be limited to process assigned to the current request.\n",
-						curproxy->id);
-					if (!LIST_ISEMPTY(&curproxy->uri_auth->admin_rules)) {
-						Warning("Proxy '%s': stats admin will not work correctly in multi-process mode.\n",
-							curproxy->id);
-					}
-				}
-				if (curproxy->appsession_name) {
-					Warning("Proxy '%s': appsession will not work correctly in multi-process mode.\n",
-						curproxy->id);
-				}
-				if (!LIST_ISEMPTY(&curproxy->sticking_rules)) {
-					Warning("Proxy '%s': sticking rules will not work correctly in multi-process mode.\n",
-						curproxy->id);
-				}
+			if (!LIST_ISEMPTY(&curproxy->sticking_rules)) {
+				Warning("Proxy '%s': sticking rules will not work correctly in multi-process mode.\n",
+				        curproxy->id);
 			}
 		}
 
@@ -6899,9 +6956,23 @@ out_uri_auth_compat:
 	}
 
 	/* Check multi-process mode compatibility */
-	if (global.nbproc > 1) {
-		if (global.stats_fe && !global.stats_fe->bind_proc) {
-			Warning("stats socket will not work as expected in multi-process mode (nbproc > 1), you should force process binding using 'stats bind-process'.\n");
+	if (global.nbproc > 1 && global.stats_fe) {
+		list_for_each_entry(bind_conf, &global.stats_fe->conf.bind, by_fe) {
+			unsigned long mask;
+
+			mask = nbits(global.nbproc);
+			if (global.stats_fe->bind_proc)
+				mask &= global.stats_fe->bind_proc;
+
+			if (bind_conf->bind_proc)
+				mask &= bind_conf->bind_proc;
+
+			/* stop here if more than one process is used */
+			if (popcount(mask) > 1)
+				break;
+		}
+		if (&bind_conf->by_fe != &global.stats_fe->conf.bind) {
+			Warning("stats socket will not work as expected in multi-process mode (nbproc > 1), you should force process binding globally using 'stats bind-process' or per socket using the 'process' attribute.\n");
 		}
 	}
 
@@ -7012,7 +7083,6 @@ out_uri_auth_compat:
 		while (*last) {
 			curpeers = *last;
 			if (curpeers->peers_fe) {
-				LIST_NEXT(&curpeers->peers_fe->conf.listeners, struct listener *, by_fe)->maxaccept = 1;
 				last = &curpeers->next;
 				continue;
 			}
