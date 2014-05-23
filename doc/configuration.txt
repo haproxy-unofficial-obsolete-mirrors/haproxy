@@ -2487,6 +2487,7 @@ errorfile <code> <file>
 
   Example :
         errorfile 400 /etc/haproxy/errorfiles/400badreq.http
+        errorfile 408 /dev/null  # workaround Chrome pre-connect bug
         errorfile 403 /etc/haproxy/errorfiles/403forbid.http
         errorfile 503 /etc/haproxy/errorfiles/503sorry.http
 
@@ -7688,7 +7689,13 @@ timeout http-request <timeout>
   this abuse because it is an inactivity timeout, which means that if the
   attacker sends one character every now and then, the timeout will not
   trigger. With the HTTP request timeout, no matter what speed the client
-  types, the request will be aborted if it does not complete in time.
+  types, the request will be aborted if it does not complete in time. When the
+  timeout expires, an HTTP 408 response is sent to the client to inform it
+  about the problem, and the connection is closed. The logs will report
+  termination codes "cR". Some recent browsers are having problems with this
+  standard, well-documented behaviour, so it might be needed to hide the 408
+  code using "errorfile 408 /dev/null". See more details in the explanations of
+  the "cR" termination code in section 8.5.
 
   Note that this timeout only applies to the header part of the request, and
   not to any data. As soon as the empty line is received, this timeout is not
@@ -7706,7 +7713,7 @@ timeout http-request <timeout>
   effect, unless the frontend is in TCP mode, in which case the HTTP backend's
   timeout will be used.
 
-  See also : "timeout http-keep-alive", "timeout client".
+  See also : "errorfile", "timeout http-keep-alive", "timeout client".
 
 
 timeout queue <timeout>
@@ -8469,40 +8476,56 @@ addr <ipv4|ipv6>
 
 agent-check
   Enable an auxiliary agent check which is run independently of a regular
-  health check. An agent health check is performed by making a TCP
-  connection to the port set by the "agent-port" parameter" and reading
-  an ASCII string. The string should have one of the following forms:
+  health check. An agent health check is performed by making a TCP connection
+  to the port set by the "agent-port" parameter and reading an ASCII string.
+  The string is made of a series of words delimited by spaces, tabs or commas
+  in any order, optionally terminated by '\r' and/or '\n', each consisting of :
 
-  * An ASCII representation of an positive integer percentage.
-    e.g. "75%"
-
+  - An ASCII representation of a positive integer percentage, e.g. "75%".
     Values in this format will set the weight proportional to the initial
     weight of a server as configured when haproxy starts.
 
-  * The string "drain".
+  - The word "ready". This will turn the server's administrative state to the
+    READY mode, thus cancelling any DRAIN or MAINT state
 
-    This will cause the weight of a server to be set to 0, and thus it will
-    not accept any new connections other than those that are accepted via
-    persistence.
+  - The word "drain". This will turn the server's administrative state to the
+    DRAIN mode, thus it will not accept any new connections other than those
+    that are accepted via persistence.
 
-  * The string "down", optionally followed by a description string.
+  - The word "maint". This will turn the server's administrative state to the
+    MAINT mode, thus it will not accept any new connections at all, and health
+    checks will be stopped.
 
-    Mark the server as down and log the description string as the reason.
+  - The words "down", "failed", or "stopped", optionally followed by a
+    description string after a sharp ('#'). All of these mark the server's
+    operating state as DOWN, but since the word itself is reported on the stats
+    page, the difference allows an administrator to know if the situation was
+    expected or not : the service may intentionally be stopped, may appear up
+    but fail some validity tests, or may be seen as down (eg: missing process,
+    or port not responding).
 
-  * The string "stopped", optionally followed by a description string.
+  - The word "up" sets back the server's operating state as UP if health checks
+    also report that the service is accessible.
 
-    This currently has the same behaviour as "down".
-
-  * The string "fail", optionally followed by a description string.
-
-    This currently has the same behaviour as "down".
+  Parameters which are not advertised by the agent are not changed. For
+  example, an agent might be designed to monitor CPU usage and only report a
+  relative weight and never interact with the operating status. Similarly, an
+  agent could be designed as an end-user interface with 3 radio buttons
+  allowing an administrator to change only the administrative state. However,
+  it is important to consider that only the agent may revert its own actions,
+  so if a server is set to DRAIN mode or to DOWN state using the agent, the
+  agent must implement the other equivalent actions to bring the service into
+  operations again.
 
   Failure to connect to the agent is not considered an error as connectivity
   is tested by the regular health check which is enabled by the "check"
-  parameter.
+  parameter. Warning though, it is not a good idea to stop an agent after it
+  reports "down", since only an agent reporting "up" will be able to turn the
+  server up again. Note that the CLI on the Unix stats socket is also able to
+  force an agent's result in order to workaround a bogus agent if needed.
 
-  Requires the ""agent-port" parameter to be set.
-  See also the "agent-check" parameter.
+  Requires the "agent-port" parameter to be set. See also the "agent-inter"
+  parameter.
 
   Supported in default-server: No
 
@@ -8999,10 +9022,10 @@ ssl
   Supported in default-server: No
 
 track [<proxy>/]<server>
-  This option enables ability to set the current state of the server by
-  tracking another one. Only a server with checks enabled can be tracked
-  so it is not possible for example to track a server that tracks another
-  one. If <proxy> is omitted the current one is used. If disable-on-404 is
+  This option enables ability to set the current state of the server by tracking
+  another one. It is possible to track a server which itself tracks another
+  server, provided that at the end of the chain, a server has health checks
+  enabled. If <proxy> is omitted the current one is used. If disable-on-404 is
   used, it has to be enabled on both proxies.
 
   Supported in default-server: No
@@ -12513,7 +12536,20 @@ easier finding and understanding.
           client side for PPPoE networks which cannot transport full-sized
           packets, or by clients sending requests by hand and not typing fast
           enough, or forgetting to enter the empty line at the end of the
-          request. The HTTP status code is likely a 408 here.
+          request. The HTTP status code is likely a 408 here. Note: recently,
+          some browsers such as Google Chrome started to break the deployed Web
+          infrastructure by aggressively implementing a new "pre-connect"
+          feature, consisting in sending connections to sites recently visited
+          without sending any request on them until the user starts to browse
+          the site. This mechanism causes massive disruption among resource-
+          limited servers, and causes a lot of 408 errors in HAProxy logs.
+          Worse, some people report that sometimes the browser displays the 408
+          error when the user expects to see the actual content (Mozilla fixed
+          this bug in 2004, while Chrome users continue to report it in 2014),
+          so in this case, using "errorfile 408 /dev/null" can be used as a
+          workaround. More information on the subject is available here :
+              https://bugzilla.mozilla.org/show_bug.cgi?id=248827
+              https://code.google.com/p/chromium/issues/detail?id=85229
 
      CT   The client aborted while its session was tarpitted. It is important to
           check if this happens on valid requests, in order to be sure that no
@@ -13154,6 +13190,15 @@ disable frontend <frontend>
   This command is restricted and can only be issued on sockets configured for
   level "admin".
 
+disable health <backend>/<server>
+  Mark the primary health check as temporarily stopped. This will disable
+  sending of health checks, and the last health check result will be ignored.
+  The server will be in unchecked state and considered UP unless an auxiliary
+  agent check forces it down.
+
+  This command is restricted and can only be issued on sockets configured for
+  level "admin".
+
 disable server <backend>/<server>
   Mark the server DOWN for maintenance. In this mode, no more checks will be
   performed on the server until it leaves maintenance.
@@ -13187,6 +13232,13 @@ enable frontend <frontend>
 
   The frontend may be specified either by its name or by its numeric ID,
   prefixed with a sharp ('#').
+
+  This command is restricted and can only be issued on sockets configured for
+  level "admin".
+
+enable health <backend>/<server>
+  Resume a primary health check that was temporarily stopped. This will enable
+  sending of health checks again. Please see "disable health" for details.
 
   This command is restricted and can only be issued on sockets configured for
   level "admin".
@@ -13307,6 +13359,30 @@ set rate-limit ssl-sessions global <value>
   applies to all frontends and the change has an immediate effect. The value
   is passed in number of sessions per second sent to the SSL stack. It applies
   before the handshake in order to protect the stack against handshake abuses.
+
+set server <backend>/<server> agent [ up | down ]
+  Force a server's agent to a new state. This can be useful to immediately
+  switch a server's state regardless of some slow agent checks for example.
+  Note that the change is propagated to tracking servers if any.
+
+set server <backend>/<server> health [ up | stopping | down ]
+  Force a server's health to a new state. This can be useful to immediately
+  switch a server's state regardless of some slow health checks for example.
+  Note that the change is propagated to tracking servers if any.
+
+set server <backend>/<server> state [ ready | drain | maint ]
+  Force a server's administrative state to a new state. This can be useful to
+  disable load balancing and/or any traffic to a server. Setting the state to
+  "ready" puts the server in normal mode, and the command is the equivalent of
+  the "enable server" command. Setting the state to "maint" disables any traffic
+  to the server as well as any health checks. This is the equivalent of the
+  "disable server" command. Setting the mode to "drain" only removes the server
+  from load balancing but still allows it to be checked and to accept new
+  persistent connections. Changes are propagated to tracking servers if any.
+
+set server <backend>/<server> weight <weight>[%]
+  Change a server's weight to the value passed in argument. This is the exact
+  equivalent of the "set weight" command below.
 
 set table <table> key <key> [data.<data_type> <value>]*
   Create or update a stick-table entry in the table. If the key is not present,

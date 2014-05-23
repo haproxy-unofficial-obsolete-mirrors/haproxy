@@ -43,17 +43,48 @@
 #include <types/checks.h>
 
 
+/* server states. Only SRV_ST_DOWN indicates a down server. */
+enum srv_state {
+	SRV_ST_STOPPED = 0,              /* the server is down. Please keep set to zero. */
+	SRV_ST_STARTING,                 /* the server is warming up (up but throttled) */
+	SRV_ST_RUNNING,                  /* the server is fully up */
+	SRV_ST_STOPPING,                 /* the server is up but soft-stopping (eg: 404) */
+};
+
+/* Administrative status : a server runs in one of these 3 stats :
+ *   - READY : normal mode
+ *   - DRAIN : takes no new visitor, equivalent to weight == 0
+ *   - MAINT : maintenance mode, no more traffic nor health checks.
+ *
+ * Each server may be in maintenance by itself or may inherit this status from
+ * another server it tracks. It can also be in drain mode by itself or inherit
+ * it from another server. Let's store these origins here as flags. These flags
+ * are combined this way :
+ *
+ *      FMAINT  IMAINT  FDRAIN  IDRAIN  Resulting state
+ *         0       0       0       0    READY
+ *         0       0       0       1    DRAIN
+ *         0       0       1       x    DRAIN
+ *         0       1       x       x    MAINT
+ *         1       x       x       x    MAINT
+ *
+ * This can be simplified this way :
+ *
+ *   state_str = (state & MAINT) ? "MAINT" : (state & DRAIN) : "DRAIN" : "READY"
+ */
+enum srv_admin {
+	SRV_ADMF_FMAINT    = 0x1,        /* the server was explicitly forced into maintenance */
+	SRV_ADMF_IMAINT    = 0x2,        /* the server has inherited the maintenance status from a tracked server */
+	SRV_ADMF_MAINT     = 0x3,        /* mask to check if any maintenance flag is present */
+	SRV_ADMF_FDRAIN    = 0x4,        /* the server was explicitly forced into drain state */
+	SRV_ADMF_IDRAIN    = 0x8,        /* the server has inherited the drain status from a tracked server */
+	SRV_ADMF_DRAIN     = 0xC,        /* mask to check if any drain flag is present */
+};
+
 /* server flags */
-#define SRV_RUNNING	0x0001	/* the server is UP */
-#define SRV_BACKUP	0x0002	/* this server is a backup server */
-#define SRV_MAPPORTS	0x0004	/* this server uses mapped ports */
-/* unused: 0x0008 */
-/* unused: 0x0010 */
-#define SRV_GOINGDOWN	0x0020	/* this server says that it's going down (404) */
-#define SRV_WARMINGUP	0x0040	/* this server is warming up after a failure */
-#define SRV_MAINTAIN	0x0080	/* this server is in maintenance mode */
-/* unused: 0x0100, 0x0200, 0x0400, 0x0800 */
-#define SRV_NON_STICK	0x1000	/* never add connections allocated to this server to a stick table */
+#define SRV_F_BACKUP       0x0001        /* this server is a backup server */
+#define SRV_F_MAPPORTS     0x0002        /* this server uses mapped ports */
+#define SRV_F_NON_STICK    0x0004        /* never add connections allocated to this server to a stick table */
 
 /* configured server options for send-proxy (server->pp_opts) */
 #define SRV_PP_V1          0x0001        /* proxy protocol version 1 */
@@ -103,9 +134,10 @@ struct tree_occ {
 
 struct server {
 	enum obj_type obj_type;                 /* object type == OBJ_TYPE_SERVER */
+	enum srv_state state, prev_state;       /* server state among SRV_ST_* */
+	enum srv_admin admin, prev_admin;       /* server maintenance status : SRV_ADMF_* */
+	unsigned char flags;                    /* server flags (SRV_F_*) */
 	struct server *next;
-	int state;				/* server state (SRV_*) */
-	int prev_state;				/* server state before last change (SRV_*) */
 	int cklen;				/* the len of the cookie, to speed up checks */
 	int rdr_len;				/* the length of the redirection prefix */
 	char *cookie;				/* the id set in the cookie */

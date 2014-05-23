@@ -6563,7 +6563,7 @@ out_uri_auth_compat:
 
 			if (newsrv->trackit) {
 				struct proxy *px;
-				struct server *srv;
+				struct server *srv, *loop;
 				char *pname, *sname;
 
 				pname = newsrv->trackit;
@@ -6597,11 +6597,24 @@ out_uri_auth_compat:
 					goto next_srv;
 				}
 
-				if (!(srv->check.state & CHK_ST_CONFIGURED)) {
+				if (!(srv->check.state & CHK_ST_CONFIGURED) &&
+				    !(srv->agent.state & CHK_ST_CONFIGURED) &&
+				    !srv->track && !srv->trackit) {
 					Alert("config : %s '%s', server '%s': unable to use %s/%s for "
-						"tracking as it does not have checks enabled.\n",
-						proxy_type_str(curproxy), curproxy->id,
-						newsrv->id, px->id, srv->id);
+					      "tracking as it does not have any check nor agent enabled.\n",
+					      proxy_type_str(curproxy), curproxy->id,
+					      newsrv->id, px->id, srv->id);
+					cfgerr++;
+					goto next_srv;
+				}
+
+				for (loop = srv->track; loop && loop != newsrv; loop = loop->track);
+
+				if (loop) {
+					Alert("config : %s '%s', server '%s': unable to track %s/%s as it "
+					      "belongs to a tracking chain looping back to %s/%s.\n",
+					      proxy_type_str(curproxy), curproxy->id,
+					      newsrv->id, px->id, srv->id, px->id, loop->id);
 					cfgerr++;
 					goto next_srv;
 				}
@@ -6617,8 +6630,9 @@ out_uri_auth_compat:
 				}
 
 				/* if the other server is forced disabled, we have to do the same here */
-				if (srv->state & SRV_MAINTAIN) {
-					newsrv->state &= ~SRV_RUNNING;
+				if (srv->admin & SRV_ADMF_MAINT) {
+					newsrv->admin |= SRV_ADMF_IMAINT;
+					newsrv->state = SRV_ST_STOPPED;
 					newsrv->check.health = 0;
 					newsrv->agent.health = 0;
 				}
@@ -6754,7 +6768,7 @@ out_uri_auth_compat:
 				err_code |= ERR_WARN;
 			}
 
-			if ((newsrv->state & SRV_MAPPORTS) && (curproxy->options2 & PR_O2_RDPC_PRST)) {
+			if ((newsrv->flags & SRV_F_MAPPORTS) && (curproxy->options2 & PR_O2_RDPC_PRST)) {
 				Warning("config : %s '%s' : RDP cookie persistence will not work for server '%s' because it lacks an explicit port number.\n",
 				        proxy_type_str(curproxy), curproxy->id, newsrv->id);
 				err_code |= ERR_WARN;

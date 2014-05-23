@@ -86,6 +86,39 @@ enum {
 	STAT_CLI_O_POOLS,    /* dump memory pools */
 };
 
+/* Actions available for the stats admin forms */
+enum {
+	ST_ADM_ACTION_NONE = 0,
+
+	/* enable/disable health checks */
+	ST_ADM_ACTION_DHLTH,
+	ST_ADM_ACTION_EHLTH,
+
+	/* force health check status */
+	ST_ADM_ACTION_HRUNN,
+	ST_ADM_ACTION_HNOLB,
+	ST_ADM_ACTION_HDOWN,
+
+	/* enable/disable agent checks */
+	ST_ADM_ACTION_DAGENT,
+	ST_ADM_ACTION_EAGENT,
+
+	/* force agent check status */
+	ST_ADM_ACTION_ARUNN,
+	ST_ADM_ACTION_ADOWN,
+
+	/* set admin state */
+	ST_ADM_ACTION_READY,
+	ST_ADM_ACTION_DRAIN,
+	ST_ADM_ACTION_MAINT,
+	ST_ADM_ACTION_SHUTDOWN,
+	/* these are the ancient actions, still available for compatibility */
+	ST_ADM_ACTION_DISABLE,
+	ST_ADM_ACTION_ENABLE,
+	ST_ADM_ACTION_STOP,
+	ST_ADM_ACTION_START,
+};
+
 static int stats_dump_info_to_buffer(struct stream_interface *si);
 static int stats_dump_pools_to_buffer(struct stream_interface *si);
 static int stats_dump_full_sess_to_buffer(struct stream_interface *si, struct session *sess);
@@ -143,6 +176,7 @@ static const char stats_sock_usage_msg[] =
 	"  show table [id]: report table usage stats or dump this table's contents\n"
 	"  get weight     : report a server's current weight\n"
 	"  set weight     : change a server's weight\n"
+	"  set server     : change a server's state or weight\n"
 	"  set table [id] : update or create a table entry's data\n"
 	"  set timeout    : change a timeout setting\n"
 	"  set maxconn    : change a maxconn setting\n"
@@ -1361,6 +1395,79 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			}
 			return 1;
 		}
+		else if (strcmp(args[1], "server") == 0) {
+			struct server *sv;
+			const char *warning;
+
+			sv = expect_server_admin(s, si, args[2]);
+			if (!sv)
+				return 1;
+
+			if (strcmp(args[3], "weight") == 0) {
+				warning = server_parse_weight_change_request(sv, args[4]);
+				if (warning) {
+					appctx->ctx.cli.msg = warning;
+					appctx->st0 = STAT_CLI_PRINT;
+				}
+			}
+			else if (strcmp(args[3], "state") == 0) {
+				if (strcmp(args[4], "ready") == 0)
+					srv_adm_set_ready(sv);
+				else if (strcmp(args[4], "drain") == 0)
+					srv_adm_set_drain(sv);
+				else if (strcmp(args[4], "maint") == 0)
+					srv_adm_set_maint(sv);
+				else {
+					appctx->ctx.cli.msg = "'set server <srv> state' expects 'ready', 'drain' and 'maint'.\n";
+					appctx->st0 = STAT_CLI_PRINT;
+				}
+			}
+			else if (strcmp(args[3], "health") == 0) {
+				if (sv->track) {
+					appctx->ctx.cli.msg = "cannot change health on a tracking server.\n";
+					appctx->st0 = STAT_CLI_PRINT;
+				}
+				else if (strcmp(args[4], "up") == 0) {
+					sv->check.health = sv->check.rise + sv->check.fall - 1;
+					srv_set_running(sv, "changed from CLI");
+				}
+				else if (strcmp(args[4], "stopping") == 0) {
+					sv->check.health = sv->check.rise + sv->check.fall - 1;
+					srv_set_stopping(sv, "changed from CLI");
+				}
+				else if (strcmp(args[4], "down") == 0) {
+					sv->check.health = 0;
+					srv_set_stopped(sv, "changed from CLI");
+				}
+				else {
+					appctx->ctx.cli.msg = "'set server <srv> health' expects 'up', 'stopping', or 'down'.\n";
+					appctx->st0 = STAT_CLI_PRINT;
+				}
+			}
+			else if (strcmp(args[3], "agent") == 0) {
+				if (!(sv->agent.state & CHK_ST_ENABLED)) {
+					appctx->ctx.cli.msg = "agent checks are not enabled on this server.\n";
+					appctx->st0 = STAT_CLI_PRINT;
+				}
+				else if (strcmp(args[4], "up") == 0) {
+					sv->agent.health = sv->agent.rise + sv->agent.fall - 1;
+					srv_set_running(sv, "changed from CLI");
+				}
+				else if (strcmp(args[4], "down") == 0) {
+					sv->agent.health = 0;
+					srv_set_stopped(sv, "changed from CLI");
+				}
+				else {
+					appctx->ctx.cli.msg = "'set server <srv> agent' expects 'up' or 'down'.\n";
+					appctx->st0 = STAT_CLI_PRINT;
+				}
+			}
+			else {
+				appctx->ctx.cli.msg = "'set server <srv>' only supports 'agent', 'health', 'state' and 'weight'.\n";
+				appctx->st0 = STAT_CLI_PRINT;
+			}
+			return 1;
+		}
 		else if (strcmp(args[1], "timeout") == 0) {
 			if (strcmp(args[2], "cli") == 0) {
 				unsigned timeout;
@@ -1703,33 +1810,30 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			sv->agent.state |= CHK_ST_ENABLED;
 			return 1;
 		}
-		if (strcmp(args[1], "server") == 0) {
+		else if (strcmp(args[1], "health") == 0) {
 			struct server *sv;
 
 			sv = expect_server_admin(s, si, args[2]);
 			if (!sv)
 				return 1;
 
-			if (sv->state & SRV_MAINTAIN) {
-				/* The server is really in maintenance, we can change the server state */
-				if (sv->track) {
-					/* If this server tracks the status of another one,
-					* we must restore the good status.
-					*/
-					if (sv->track->state & SRV_RUNNING) {
-						set_server_up(&sv->check);
-						sv->check.health = sv->check.rise;	/* up, but will fall down at first failure */
-					} else {
-						sv->state &= ~SRV_MAINTAIN;
-						sv->check.state &= ~CHK_ST_PAUSED;
-						set_server_down(&sv->check);
-					}
-				} else {
-					set_server_up(&sv->check);
-					sv->check.health = sv->check.rise;	/* up, but will fall down at first failure */
-				}
+			if (!(sv->check.state & CHK_ST_CONFIGURED)) {
+				appctx->ctx.cli.msg = "Health checks are not configured on this server, cannot enable.\n";
+				appctx->st0 = STAT_CLI_PRINT;
+				return 1;
 			}
 
+			sv->check.state |= CHK_ST_ENABLED;
+			return 1;
+		}
+		else if (strcmp(args[1], "server") == 0) {
+			struct server *sv;
+
+			sv = expect_server_admin(s, si, args[2]);
+			if (!sv)
+				return 1;
+
+			srv_adm_set_ready(sv);
 			return 1;
 		}
 		else if (strcmp(args[1], "frontend") == 0) {
@@ -1759,7 +1863,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			return 1;
 		}
 		else { /* unknown "enable" parameter */
-			appctx->ctx.cli.msg = "'enable' only supports 'frontend' and 'server'.\n";
+			appctx->ctx.cli.msg = "'enable' only supports 'agent', 'frontend', 'health', and 'server'.\n";
 			appctx->st0 = STAT_CLI_PRINT;
 			return 1;
 		}
@@ -1775,6 +1879,16 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			sv->agent.state &= ~CHK_ST_ENABLED;
 			return 1;
 		}
+		else if (strcmp(args[1], "health") == 0) {
+			struct server *sv;
+
+			sv = expect_server_admin(s, si, args[2]);
+			if (!sv)
+				return 1;
+
+			sv->check.state &= ~CHK_ST_ENABLED;
+			return 1;
+		}
 		else if (strcmp(args[1], "server") == 0) {
 			struct server *sv;
 
@@ -1782,13 +1896,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			if (!sv)
 				return 1;
 
-			if (! (sv->state & SRV_MAINTAIN)) {
-				/* Not already in maintenance, we can change the server state */
-				sv->state |= SRV_MAINTAIN;
-				sv->check.state |= CHK_ST_PAUSED;
-				set_server_down(&sv->check);
-			}
-
+			srv_adm_set_maint(sv);
 			return 1;
 		}
 		else if (strcmp(args[1], "frontend") == 0) {
@@ -1818,7 +1926,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			return 1;
 		}
 		else { /* unknown "disable" parameter */
-			appctx->ctx.cli.msg = "'disable' only supports 'frontend' and 'server'.\n";
+			appctx->ctx.cli.msg = "'disable' only supports 'agent', 'frontend', 'health', and 'server'.\n";
 			appctx->st0 = STAT_CLI_PRINT;
 			return 1;
 		}
@@ -2756,20 +2864,29 @@ static int stats_dump_li_stats(struct stream_interface *si, struct proxy *px, st
  * from stream interface <si>, stats flags <flags>, and server state <state>.
  * The caller is responsible for clearing the trash if needed. Returns non-zero
  * if it emits anything, zero otherwise. The <state> parameter can take the
- * following values : 0=DOWN, 1=going up, 2=going down, 3=UP, 4,5=NOLB,
- * 6,7=DRAIN, 8=unchecked.
+ * following values : 0=DOWN, 1=DOWN(agent) 2=going up, 3=going down, 4=UP, 5,6=NOLB,
+ * 7,8=DRAIN, 9=unchecked.
  */
 static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, int flags, struct server *sv, int state)
 {
 	struct appctx *appctx = __objt_appctx(si->end);
-	struct server *ref = sv->track ? sv->track : sv;
+	struct server *via, *ref;
 	char str[INET6_ADDRSTRLEN];
 	struct chunk src;
 	int i;
 
+	/* we have "via" which is the tracked server as described in the configuration,
+	 * and "ref" which is the checked server and the end of the chain.
+	 */
+	via = sv->track ? sv->track : sv;
+	ref = via;
+	while (ref->track)
+		ref = ref->track;
+
 	if (appctx->ctx.stats.flags & STAT_FMT_HTML) {
-		static char *srv_hlt_st[9] = {
+		static char *srv_hlt_st[10] = {
 			"DOWN",
+			"DOWN (agent)",
 			"DN %d/%d &uarr;",
 			"UP %d/%d &darr;",
 			"UP",
@@ -2780,12 +2897,12 @@ static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, in
 			"<i>no check</i>"
 		};
 
-		if ((sv->state & SRV_MAINTAIN) || (ref->state & SRV_MAINTAIN))
+		if (sv->admin & SRV_ADMF_MAINT)
 			chunk_appendf(&trash, "<tr class=\"maintain\">");
 		else
 			chunk_appendf(&trash,
 			              "<tr class=\"%s%d\">",
-			              (sv->state & SRV_BACKUP) ? "backup" : "active", state);
+			              (sv->flags & SRV_F_BACKUP) ? "backup" : "active", state);
 
 		if ((px->cap & PR_CAP_BE) && px->srv && (appctx->ctx.stats.flags & STAT_ADMIN))
 			chunk_appendf(&trash,
@@ -2911,23 +3028,45 @@ static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, in
 		/* status, lest check */
 		chunk_appendf(&trash, "<td class=ac>");
 
-		if (sv->state & SRV_MAINTAIN) {
+		if (sv->admin & SRV_ADMF_MAINT) {
 			chunk_appendf(&trash, "%s ", human_time(now.tv_sec - sv->last_change, 1));
 			chunk_appendf(&trash, "MAINT");
 		}
-		else if (ref != sv && ref->state & SRV_MAINTAIN) {
+		else if ((ref->agent.state & CHK_ST_ENABLED) && (ref->state == SRV_ST_STOPPED)) {
 			chunk_appendf(&trash, "%s ", human_time(now.tv_sec - ref->last_change, 1));
-			chunk_appendf(&trash, "MAINT(via)");
+			chunk_appendf(&trash, srv_hlt_st[1]); /* DOWN (agent) */
 		}
 		else if (ref->check.state & CHK_ST_ENABLED) {
 			chunk_appendf(&trash, "%s ", human_time(now.tv_sec - ref->last_change, 1));
 			chunk_appendf(&trash,
 			              srv_hlt_st[state],
-			              (ref->state & SRV_RUNNING) ? (ref->check.health - ref->check.rise + 1) : (ref->check.health),
-			              (ref->state & SRV_RUNNING) ? (ref->check.fall) : (ref->check.rise));
+			              (ref->state != SRV_ST_STOPPED) ? (ref->check.health - ref->check.rise + 1) : (ref->check.health),
+			              (ref->state != SRV_ST_STOPPED) ? (ref->check.fall) : (ref->check.rise));
 		}
 
-		if (sv->check.state & CHK_ST_ENABLED) {
+		if ((sv->state == SRV_ST_STOPPED) &&
+		    ((sv->agent.state & (CHK_ST_ENABLED|CHK_ST_PAUSED)) == CHK_ST_ENABLED) && !(sv->agent.health)) {
+			chunk_appendf(&trash,
+			              "</td><td class=ac><u> %s%s",
+			              (sv->agent.state & CHK_ST_INPROGRESS) ? "* " : "",
+			              get_check_status_info(sv->agent.status));
+
+			if (sv->agent.status >= HCHK_STATUS_L57DATA)
+				chunk_appendf(&trash, "/%d", sv->agent.code);
+
+			if (sv->agent.status >= HCHK_STATUS_CHECKED && sv->agent.duration >= 0)
+				chunk_appendf(&trash, " in %lums", sv->agent.duration);
+
+			chunk_appendf(&trash, "<div class=tips>%s",
+				      get_check_status_description(sv->agent.status));
+			if (*sv->agent.desc) {
+				chunk_appendf(&trash, ": ");
+				chunk_initlen(&src, sv->agent.desc, 0, strlen(sv->agent.desc));
+				chunk_htmlencode(&trash, &src);
+			}
+			chunk_appendf(&trash, "</div></u>");
+		}
+		else if ((sv->check.state & (CHK_ST_ENABLED|CHK_ST_PAUSED)) == CHK_ST_ENABLED) {
 			chunk_appendf(&trash,
 			              "</td><td class=ac><u> %s%s",
 			              (sv->check.state & CHK_ST_INPROGRESS) ? "* " : "",
@@ -2958,8 +3097,8 @@ static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, in
 		              "<td class=ac>%s</td><td class=ac>%s</td>"
 		              "",
 		              (sv->eweight * px->lbprm.wmult + px->lbprm.wdiv - 1) / px->lbprm.wdiv,
-		              (sv->state & SRV_BACKUP) ? "-" : "Y",
-		              (sv->state & SRV_BACKUP) ? "Y" : "-");
+		              (sv->flags & SRV_F_BACKUP) ? "-" : "Y",
+		              (sv->flags & SRV_F_BACKUP) ? "Y" : "-");
 
 		/* check failures: unique, fatal, down time */
 		if (sv->check.state & CHK_ST_ENABLED) {
@@ -2975,26 +3114,25 @@ static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, in
 			              ref->observe ? "/Health Analyses" : "",
 			              ref->counters.down_trans, human_time(srv_downtime(sv), 1));
 		}
-		else if (sv != ref) {
-			if (sv->state & SRV_MAINTAIN)
-				chunk_appendf(&trash, "<td class=ac colspan=3></td>");
-			else
-				chunk_appendf(&trash,
-					      "<td class=ac colspan=3><a class=lfsb href=\"#%s/%s\">via %s/%s</a></td>",
-					      ref->proxy->id, ref->id, ref->proxy->id, ref->id);
+		else if (!(sv->admin & SRV_ADMF_FMAINT) && sv != ref) {
+			/* tracking a server */
+			chunk_appendf(&trash,
+			              "<td class=ac colspan=3><a class=lfsb href=\"#%s/%s\">via %s/%s</a></td>",
+			              via->proxy->id, via->id, via->proxy->id, via->id);
 		}
 		else
 			chunk_appendf(&trash, "<td colspan=3></td>");
 
 		/* throttle */
-		if ((sv->state & SRV_WARMINGUP) && !server_is_draining(sv))
+		if (sv->state == SRV_ST_STARTING && !server_is_draining(sv))
 			chunk_appendf(&trash, "<td class=ac>%d %%</td></tr>\n", server_throttle_rate(sv));
 		else
 			chunk_appendf(&trash, "<td class=ac>-</td></tr>\n");
 	}
 	else { /* CSV mode */
-		static char *srv_hlt_st[9] = {
+		static char *srv_hlt_st[10] = {
 			"DOWN,",
+			"DOWN (agent),",
 			"DOWN %d/%d,",
 			"UP %d/%d,",
 			"UP,",
@@ -3030,23 +3168,23 @@ static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, in
 		              sv->counters.retries, sv->counters.redispatches);
 
 		/* status */
-		if (sv->state & SRV_MAINTAIN)
+		if (sv->admin & SRV_ADMF_IMAINT)
+			chunk_appendf(&trash, "MAINT (via %s/%s),", via->proxy->id, via->id);
+		else if (sv->admin & SRV_ADMF_MAINT)
 			chunk_appendf(&trash, "MAINT,");
-		else if (ref != sv && ref->state & SRV_MAINTAIN)
-			chunk_appendf(&trash, "MAINT(via),");
 		else
 			chunk_appendf(&trash,
 			              srv_hlt_st[state],
-			              (ref->state & SRV_RUNNING) ? (ref->check.health - ref->check.rise + 1) : (ref->check.health),
-			              (ref->state & SRV_RUNNING) ? (ref->check.fall) : (ref->check.rise));
+			              (ref->state != SRV_ST_STOPPED) ? (ref->check.health - ref->check.rise + 1) : (ref->check.health),
+			              (ref->state != SRV_ST_STOPPED) ? (ref->check.fall) : (ref->check.rise));
 
 		chunk_appendf(&trash,
 		              /* weight, active, backup */
 		              "%d,%d,%d,"
 		              "",
 		              (sv->eweight * px->lbprm.wmult + px->lbprm.wdiv - 1) / px->lbprm.wdiv,
-		              (sv->state & SRV_BACKUP) ? 0 : 1,
-		              (sv->state & SRV_BACKUP) ? 1 : 0);
+		              (sv->flags & SRV_F_BACKUP) ? 0 : 1,
+		              (sv->flags & SRV_F_BACKUP) ? 1 : 0);
 
 		/* check failures: unique, fatal; last change, total downtime */
 		if (sv->check.state & CHK_ST_ENABLED)
@@ -3065,7 +3203,7 @@ static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, in
 		              relative_pid, px->uuid, sv->puid);
 
 		/* throttle */
-		if ((sv->state & SRV_WARMINGUP) && !server_is_draining(sv))
+		if (sv->state == SRV_ST_STARTING && !server_is_draining(sv))
 			chunk_appendf(&trash, "%d", server_throttle_rate(sv));
 
 		/* sessions: lbtot */
@@ -3469,10 +3607,18 @@ static void stats_dump_html_px_end(struct stream_interface *si, struct proxy *px
 			      "Choose the action to perform on the checked servers : "
 			      "<select name=action>"
 			      "<option value=\"\"></option>"
-			      "<option value=\"disable\">Disable</option>"
-			      "<option value=\"enable\">Enable</option>"
-			      "<option value=\"stop\">Soft Stop</option>"
-			      "<option value=\"start\">Soft Start</option>"
+			      "<option value=\"ready\">Set state to READY</option>"
+			      "<option value=\"drain\">Set state to DRAIN</option>"
+			      "<option value=\"maint\">set state to MAINT</option>"
+			      "<option value=\"dhlth\">Health: disable checks</option>"
+			      "<option value=\"ehlth\">Health: enable checks</option>"
+			      "<option value=\"hrunn\">Health: force UP</option>"
+			      "<option value=\"hnolb\">Health: force NOLB</option>"
+			      "<option value=\"hdown\">Health: force DOWN</option>"
+			      "<option value=\"dagent\">Agent: disable checks</option>"
+			      "<option value=\"eagent\">Agent: enable checks</option>"
+			      "<option value=\"arunn\">Agent: force UP</option>"
+			      "<option value=\"adown\">Agent: force DOWN</option>"
 			      "<option value=\"shutdown\">Kill Sessions</option>"
 			      "</select>"
 			      "<input type=\"hidden\" name=\"b\" value=\"#%d\">"
@@ -3596,7 +3742,7 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 	case STAT_PX_ST_SV:
 		/* stats.sv has been initialized above */
 		for (; appctx->ctx.stats.sv != NULL; appctx->ctx.stats.sv = sv->next) {
-			int sv_state; /* 0=DOWN, 1=going up, 2=going down, 3=UP, 4,5=NOLB, 6=unchecked */
+			int sv_state;
 
 			if (buffer_almost_full(rep->buf)) {
 				rep->flags |= CF_WAKE_WRITE;
@@ -3613,32 +3759,50 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 					continue;
 			}
 
-			if (sv->track)
-				svs = sv->track;
-			else
-				svs = sv;
+			svs = sv;
+			while (svs->track)
+				svs = svs->track;
 
-			/* FIXME: produce some small strings for "UP/DOWN x/y &#xxxx;" */
-			if (!(svs->check.state & CHK_ST_ENABLED))
-				sv_state = 8;
-			else if (svs->state & SRV_RUNNING) {
-				if (svs->check.health == svs->check.rise + svs->check.fall - 1)
-					sv_state = 3; /* UP */
+			if (sv->state == SRV_ST_RUNNING || sv->state == SRV_ST_STARTING) {
+				/* server is UP. The possibilities are :
+				 *   - UP, draining, going down    => state = 7
+				 *   - UP, going down              => state = 3
+				 *   - UP, draining                => state = 8
+				 *   - UP, checked                 => state = 4
+				 *   - UP, not checked nor tracked => state = 9
+				 */
+
+				if ((svs->check.state & CHK_ST_ENABLED) &&
+				    (svs->check.health < svs->check.rise + svs->check.fall - 1))
+					sv_state = 3;
 				else
-					sv_state = 2; /* going down */
+					sv_state = 4;
 
-				if (server_is_draining(svs))
+				if (server_is_draining(sv))
 					sv_state += 4;
-				else if (svs->state & SRV_GOINGDOWN)
-					sv_state += 2;
-			}
-			else
-				if (svs->check.health)
-					sv_state = 1; /* going up */
-				else
-					sv_state = 0; /* DOWN */
 
-			if (((sv_state == 0) || (sv->state & SRV_MAINTAIN)) && (appctx->ctx.stats.flags & STAT_HIDE_DOWN)) {
+				if (sv_state == 4 && !(svs->check.state & CHK_ST_ENABLED))
+					sv_state = 9; /* unchecked UP */
+			}
+			else if (sv->state == SRV_ST_STOPPING) {
+				if ((!(sv->check.state & CHK_ST_ENABLED) && !sv->track) ||
+				    (svs->check.health == svs->check.rise + svs->check.fall - 1))
+					sv_state = 6; /* NOLB */
+				else
+					sv_state = 5; /* NOLB going down */
+			}
+			else {	/* stopped */
+				if ((svs->agent.state & CHK_ST_ENABLED) && !svs->agent.health)
+					sv_state = 1; /* DOWN (agent) */
+				else if ((svs->check.state & CHK_ST_ENABLED) && !svs->check.health)
+					sv_state = 0; /* DOWN */
+				else if ((svs->agent.state & CHK_ST_ENABLED) || (svs->check.state & CHK_ST_ENABLED))
+					sv_state = 2; /* going up */
+				else
+					sv_state = 0; /* DOWN, unchecked */
+			}
+
+			if (((sv_state <= 1) || (sv->admin & SRV_ADMF_MAINT)) && (appctx->ctx.stats.flags & STAT_HIDE_DOWN)) {
 				/* do not report servers which are DOWN */
 				appctx->ctx.stats.sv = sv->next;
 				continue;
@@ -3738,23 +3902,25 @@ static void stats_dump_html_head(struct uri_auth *uri)
 	              ".socket	{background: #d0d0d0;}\n"
 	              ".backend	{background: #e8e8d0;}\n"
 	              ".active0	{background: #ff9090;}\n"
-	              ".active1	{background: #ffd020;}\n"
-	              ".active2	{background: #ffffa0;}\n"
-	              ".active3	{background: #c0ffc0;}\n"
-	              ".active4	{background: #ffffa0;}\n"  /* NOLB state shows same as going down */
-	              ".active5	{background: #20a0ff;}\n"  /* NOLB state shows different to be detected */
-	              ".active6	{background: #ffffa0;}\n"  /* DRAIN going down = same as going down */
-	              ".active7	{background: #20a0FF;}\n"  /* DRAIN must be detected (weight=0) */
-	              ".active8	{background: #e0e0e0;}\n"
+	              ".active1	{background: #ff9090;}\n"
+	              ".active2	{background: #ffd020;}\n"
+	              ".active3	{background: #ffffa0;}\n"
+	              ".active4	{background: #c0ffc0;}\n"
+	              ".active5	{background: #ffffa0;}\n"  /* NOLB state shows same as going down */
+	              ".active6	{background: #20a0ff;}\n"  /* NOLB state shows different to be detected */
+	              ".active7	{background: #ffffa0;}\n"  /* DRAIN going down = same as going down */
+	              ".active8 {background: #20a0FF;}\n"  /* DRAIN must be detected (weight=0) */
+	              ".active9	{background: #e0e0e0;}\n"
 	              ".backup0	{background: #ff9090;}\n"
-	              ".backup1	{background: #ff80ff;}\n"
-	              ".backup2	{background: #c060ff;}\n"
-	              ".backup3	{background: #b0d0ff;}\n"
-	              ".backup4	{background: #c060ff;}\n"  /* NOLB state shows same as going down */
-	              ".backup5	{background: #90b0e0;}\n"  /* NOLB state shows same as going down */
-	              ".backup6	{background: #c060ff;}\n"
-	              ".backup7	{background: #cc9900;}\n"
-	              ".backup8	{background: #e0e0e0;}\n"
+	              ".backup1	{background: #ff9090;}\n"
+	              ".backup2	{background: #ff80ff;}\n"
+	              ".backup3	{background: #c060ff;}\n"
+	              ".backup4	{background: #b0d0ff;}\n"
+	              ".backup5	{background: #c060ff;}\n"  /* NOLB state shows same as going down */
+	              ".backup6	{background: #90b0e0;}\n"  /* NOLB state shows same as going down */
+	              ".backup7	{background: #c060ff;}\n"
+	              ".backup8	{background: #cc9900;}\n"
+	              ".backup9	{background: #e0e0e0;}\n"
 	              ".maintain	{background: #c07820;}\n"
 	              ".rls      {letter-spacing: 0.2em; margin-right: 1px;}\n" /* right letter spacing (used for grouping digits) */
 	              "\n"
@@ -3830,21 +3996,21 @@ static void stats_dump_html_info(struct stream_interface *si, struct uri_auth *u
 	              "Running tasks: %d/%d; idle = %d %%<br>\n"
 	              "</td><td align=\"center\" nowrap>\n"
 	              "<table class=\"lgd\"><tr>\n"
-	              "<td class=\"active3\">&nbsp;</td><td class=\"noborder\">active UP </td>"
-	              "<td class=\"backup3\">&nbsp;</td><td class=\"noborder\">backup UP </td>"
+	              "<td class=\"active4\">&nbsp;</td><td class=\"noborder\">active UP </td>"
+	              "<td class=\"backup4\">&nbsp;</td><td class=\"noborder\">backup UP </td>"
 	              "</tr><tr>\n"
-	              "<td class=\"active2\"></td><td class=\"noborder\">active UP, going down </td>"
-	              "<td class=\"backup2\"></td><td class=\"noborder\">backup UP, going down </td>"
+	              "<td class=\"active3\"></td><td class=\"noborder\">active UP, going down </td>"
+	              "<td class=\"backup3\"></td><td class=\"noborder\">backup UP, going down </td>"
 	              "</tr><tr>\n"
-	              "<td class=\"active1\"></td><td class=\"noborder\">active DOWN, going up </td>"
-	              "<td class=\"backup1\"></td><td class=\"noborder\">backup DOWN, going up </td>"
+	              "<td class=\"active2\"></td><td class=\"noborder\">active DOWN, going up </td>"
+	              "<td class=\"backup2\"></td><td class=\"noborder\">backup DOWN, going up </td>"
 	              "</tr><tr>\n"
 	              "<td class=\"active0\"></td><td class=\"noborder\">active or backup DOWN &nbsp;</td>"
-	              "<td class=\"active8\"></td><td class=\"noborder\">not checked </td>"
+	              "<td class=\"active9\"></td><td class=\"noborder\">not checked </td>"
 	              "</tr><tr>\n"
 	              "<td class=\"maintain\"></td><td class=\"noborder\" colspan=\"3\">active or backup DOWN for maintenance (MAINT) &nbsp;</td>"
 	              "</tr><tr>\n"
-	              "<td class=\"active7\"></td><td class=\"noborder\" colspan=\"3\">active or backup SOFT STOPPED for maintenance &nbsp;</td>"
+	              "<td class=\"active8\"></td><td class=\"noborder\" colspan=\"3\">active or backup SOFT STOPPED for maintenance &nbsp;</td>"
 	              "</tr></table>\n"
 	              "Note: \"NOLB\"/\"DRAIN\" = UP with load-balancing disabled."
 	              "</td>"
@@ -3949,7 +4115,7 @@ static void stats_dump_html_info(struct stream_interface *si, struct uri_auth *u
 		switch (appctx->ctx.stats.st_code) {
 		case STAT_STATUS_DONE:
 			chunk_appendf(&trash,
-			              "<p><div class=active3>"
+			              "<p><div class=active4>"
 			              "<a class=lfsb href=\"%s%s%s%s\" title=\"Remove this message\">[X]</a> "
 			              "Action processed successfully."
 			              "</div>\n", uri->uri_prefix,
@@ -3959,7 +4125,7 @@ static void stats_dump_html_info(struct stream_interface *si, struct uri_auth *u
 			break;
 		case STAT_STATUS_NONE:
 			chunk_appendf(&trash,
-			              "<p><div class=active2>"
+			              "<p><div class=active3>"
 			              "<a class=lfsb href=\"%s%s%s%s\" title=\"Remove this message\">[X]</a> "
 			              "Nothing has changed."
 			              "</div>\n", uri->uri_prefix,
@@ -3969,7 +4135,7 @@ static void stats_dump_html_info(struct stream_interface *si, struct uri_auth *u
 			break;
 		case STAT_STATUS_PART:
 			chunk_appendf(&trash,
-			              "<p><div class=active2>"
+			              "<p><div class=active3>"
 			              "<a class=lfsb href=\"%s%s%s%s\" title=\"Remove this message\">[X]</a> "
 			              "Action partially processed.<br>"
 			              "Some server names are probably unknown or ambiguous (duplicated names in the backend)."
@@ -4016,7 +4182,7 @@ static void stats_dump_html_info(struct stream_interface *si, struct uri_auth *u
 			break;
 		default:
 			chunk_appendf(&trash,
-			              "<p><div class=active8>"
+			              "<p><div class=active9>"
 			              "<a class=lfsb href=\"%s%s%s%s\" title=\"Remove this message\">[X]</a> "
 			              "Unexpected result."
 			              "</div>\n", uri->uri_prefix,
@@ -4214,7 +4380,47 @@ static int stats_process_http_post(struct stream_interface *si)
 				}
 			}
 			else if (!action && (strcmp(key, "action") == 0)) {
-				if (strcmp(value, "disable") == 0) {
+				if (strcmp(value, "ready") == 0) {
+					action = ST_ADM_ACTION_READY;
+				}
+				else if (strcmp(value, "drain") == 0) {
+					action = ST_ADM_ACTION_DRAIN;
+				}
+				else if (strcmp(value, "maint") == 0) {
+					action = ST_ADM_ACTION_MAINT;
+				}
+				else if (strcmp(value, "shutdown") == 0) {
+					action = ST_ADM_ACTION_SHUTDOWN;
+				}
+				else if (strcmp(value, "dhlth") == 0) {
+					action = ST_ADM_ACTION_DHLTH;
+				}
+				else if (strcmp(value, "ehlth") == 0) {
+					action = ST_ADM_ACTION_EHLTH;
+				}
+				else if (strcmp(value, "hrunn") == 0) {
+					action = ST_ADM_ACTION_HRUNN;
+				}
+				else if (strcmp(value, "hnolb") == 0) {
+					action = ST_ADM_ACTION_HNOLB;
+				}
+				else if (strcmp(value, "hdown") == 0) {
+					action = ST_ADM_ACTION_HDOWN;
+				}
+				else if (strcmp(value, "dagent") == 0) {
+					action = ST_ADM_ACTION_DAGENT;
+				}
+				else if (strcmp(value, "eagent") == 0) {
+					action = ST_ADM_ACTION_EAGENT;
+				}
+				else if (strcmp(value, "arunn") == 0) {
+					action = ST_ADM_ACTION_ARUNN;
+				}
+				else if (strcmp(value, "adown") == 0) {
+					action = ST_ADM_ACTION_ADOWN;
+				}
+				/* else these are the old supported methods */
+				else if (strcmp(value, "disable") == 0) {
 					action = ST_ADM_ACTION_DISABLE;
 				}
 				else if (strcmp(value, "enable") == 0) {
@@ -4225,9 +4431,6 @@ static int stats_process_http_post(struct stream_interface *si)
 				}
 				else if (strcmp(value, "start") == 0) {
 					action = ST_ADM_ACTION_START;
-				}
-				else if (strcmp(value, "shutdown") == 0) {
-					action = ST_ADM_ACTION_SHUTDOWN;
 				}
 				else {
 					appctx->ctx.stats.st_code = STAT_STATUS_ERRP;
@@ -4249,43 +4452,113 @@ static int stats_process_http_post(struct stream_interface *si)
 				else if ((sv = findserver(px, value)) != NULL) {
 					switch (action) {
 					case ST_ADM_ACTION_DISABLE:
-						if ((px->state != PR_STSTOPPED) && !(sv->state & SRV_MAINTAIN)) {
-							/* Not already in maintenance, we can change the server state */
-							sv->state |= SRV_MAINTAIN;
-							sv->check.state |= CHK_ST_PAUSED;
-							set_server_down(&sv->check);
+						if (!(sv->admin & SRV_ADMF_FMAINT)) {
 							altered_servers++;
 							total_servers++;
+							srv_set_admin_flag(sv, SRV_ADMF_FMAINT);
 						}
 						break;
 					case ST_ADM_ACTION_ENABLE:
-						if ((px->state != PR_STSTOPPED) && (sv->state & SRV_MAINTAIN)) {
-							/* Already in maintenance, we can change the server state.
-							 * If this server tracks the status of another one,
-							 * we must restore the good status.
-							 */
-							if (!sv->track || (sv->track->state & SRV_RUNNING)) {
-								set_server_up(&sv->check);
-								sv->check.health = sv->check.rise;	/* up, but will fall down at first failure */
-							}
-							else {
-								sv->state &= ~SRV_MAINTAIN;
-								sv->check.state &= ~CHK_ST_PAUSED;
-								set_server_down(&sv->check);
-							}
+						if (sv->admin & SRV_ADMF_FMAINT) {
+							altered_servers++;
+							total_servers++;
+							srv_clr_admin_flag(sv, SRV_ADMF_FMAINT);
+						}
+						break;
+					case ST_ADM_ACTION_STOP:
+						if (!(sv->admin & SRV_ADMF_FDRAIN)) {
+							srv_set_admin_flag(sv, SRV_ADMF_FDRAIN);
 							altered_servers++;
 							total_servers++;
 						}
 						break;
-					case ST_ADM_ACTION_STOP:
 					case ST_ADM_ACTION_START:
-						if (action == ST_ADM_ACTION_START)
-							sv->uweight = sv->iweight;
-						else
-							sv->uweight = 0;
-
-						server_recalc_eweight(sv);
-
+						if (sv->admin & SRV_ADMF_FDRAIN) {
+							srv_clr_admin_flag(sv, SRV_ADMF_FDRAIN);
+							altered_servers++;
+							total_servers++;
+						}
+						break;
+					case ST_ADM_ACTION_DHLTH:
+						if (sv->check.state & CHK_ST_CONFIGURED) {
+							sv->check.state &= ~CHK_ST_ENABLED;
+							altered_servers++;
+							total_servers++;
+						}
+						break;
+					case ST_ADM_ACTION_EHLTH:
+						if (sv->check.state & CHK_ST_CONFIGURED) {
+							sv->check.state |= CHK_ST_ENABLED;
+							altered_servers++;
+							total_servers++;
+						}
+						break;
+					case ST_ADM_ACTION_HRUNN:
+						if (!(sv->track)) {
+							sv->check.health = sv->check.rise + sv->check.fall - 1;
+							srv_set_running(sv, "changed from Web interface");
+							altered_servers++;
+							total_servers++;
+						}
+						break;
+					case ST_ADM_ACTION_HNOLB:
+						if (!(sv->track)) {
+							sv->check.health = sv->check.rise + sv->check.fall - 1;
+							srv_set_stopping(sv, "changed from Web interface");
+							altered_servers++;
+							total_servers++;
+						}
+						break;
+					case ST_ADM_ACTION_HDOWN:
+						if (!(sv->track)) {
+							sv->check.health = 0;
+							srv_set_stopped(sv, "changed from Web interface");
+							altered_servers++;
+							total_servers++;
+						}
+						break;
+					case ST_ADM_ACTION_DAGENT:
+						if (sv->agent.state & CHK_ST_CONFIGURED) {
+							sv->agent.state &= ~CHK_ST_ENABLED;
+							altered_servers++;
+							total_servers++;
+						}
+						break;
+					case ST_ADM_ACTION_EAGENT:
+						if (sv->agent.state & CHK_ST_CONFIGURED) {
+							sv->agent.state |= CHK_ST_ENABLED;
+							altered_servers++;
+							total_servers++;
+						}
+						break;
+					case ST_ADM_ACTION_ARUNN:
+						if (sv->agent.state & CHK_ST_ENABLED) {
+							sv->agent.health = sv->agent.rise + sv->agent.fall - 1;
+							srv_set_running(sv, "changed from Web interface");
+							altered_servers++;
+							total_servers++;
+						}
+						break;
+					case ST_ADM_ACTION_ADOWN:
+						if (sv->agent.state & CHK_ST_ENABLED) {
+							sv->agent.health = 0;
+							srv_set_stopped(sv, "changed from Web interface");
+							altered_servers++;
+							total_servers++;
+						}
+						break;
+					case ST_ADM_ACTION_READY:
+						srv_adm_set_ready(sv);
+						altered_servers++;
+						total_servers++;
+						break;
+					case ST_ADM_ACTION_DRAIN:
+						srv_adm_set_drain(sv);
+						altered_servers++;
+						total_servers++;
+						break;
+					case ST_ADM_ACTION_MAINT:
+						srv_adm_set_maint(sv);
 						altered_servers++;
 						total_servers++;
 						break;

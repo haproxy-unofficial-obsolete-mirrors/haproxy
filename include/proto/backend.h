@@ -57,15 +57,23 @@ static void inline be_set_sess_last(struct proxy *be)
  */
 static inline int srv_is_usable(const struct server *srv)
 {
-	int state = srv->state;
+	enum srv_state state = srv->state;
 
 	if (!srv->eweight)
 		return 0;
-	if (state & (SRV_GOINGDOWN | SRV_MAINTAIN))
+	if (srv->admin & SRV_ADMF_MAINT)
 		return 0;
-	if (!(state & SRV_RUNNING))
+	if (srv->admin & SRV_ADMF_DRAIN)
 		return 0;
-	return 1;
+	switch (state) {
+	case SRV_ST_STARTING:
+	case SRV_ST_RUNNING:
+		return 1;
+	case SRV_ST_STOPPING:
+	case SRV_ST_STOPPED:
+		return 0;
+	}
+	return 0;
 }
 
 /* This function returns non-zero if the designated server was usable for LB
@@ -73,15 +81,23 @@ static inline int srv_is_usable(const struct server *srv)
  */
 static inline int srv_was_usable(const struct server *srv)
 {
-	int state = srv->prev_state;
+	enum srv_state state = srv->prev_state;
 
 	if (!srv->prev_eweight)
 		return 0;
-	if (state & (SRV_GOINGDOWN | SRV_MAINTAIN))
+	if (srv->prev_admin & SRV_ADMF_MAINT)
 		return 0;
-	if (!(state & SRV_RUNNING))
+	if (srv->prev_admin & SRV_ADMF_DRAIN)
 		return 0;
-	return 1;
+	switch (state) {
+	case SRV_ST_STARTING:
+	case SRV_ST_RUNNING:
+		return 1;
+	case SRV_ST_STOPPING:
+	case SRV_ST_STOPPED:
+		return 0;
+	}
+	return 0;
 }
 
 /* This function commits the current server state and weight onto the previous
@@ -90,6 +106,7 @@ static inline int srv_was_usable(const struct server *srv)
 static inline void srv_lb_commit_status(struct server *srv)
 {
 	srv->prev_state = srv->state;
+	srv->prev_admin = srv->admin;
 	srv->prev_eweight = srv->eweight;
 }
 
@@ -99,8 +116,14 @@ static inline void srv_lb_commit_status(struct server *srv)
 static inline int srv_lb_status_changed(const struct server *srv)
 {
 	return (srv->state != srv->prev_state ||
+		srv->admin != srv->prev_admin ||
 		srv->eweight != srv->prev_eweight);
 }
+
+/* sends a log message when a backend goes down, and also sets last
+ * change date.
+ */
+void set_backend_down(struct proxy *be);
 
 #endif /* _PROTO_BACKEND_H */
 
