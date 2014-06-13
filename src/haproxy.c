@@ -143,6 +143,7 @@ struct global global = {
 		.chksize = BUFSIZE,
 #ifdef USE_OPENSSL
 		.sslcachesize = SSLCACHESIZE,
+		.ssl_default_dh_param = SSL_DEFAULT_DH_PARAM,
 #ifdef DEFAULT_SSL_MAX_RECORD
 		.ssl_max_record = DEFAULT_SSL_MAX_RECORD,
 #endif
@@ -1604,6 +1605,7 @@ int main(int argc, char **argv)
 
 		if (proc == global.nbproc) {
 			if (global.mode & MODE_SYSTEMD) {
+				protocol_unbind_all();
 				for (proc = 0; proc < global.nbproc; proc++)
 					while (waitpid(children[proc], NULL, 0) == -1 && errno == EINTR);
 			}

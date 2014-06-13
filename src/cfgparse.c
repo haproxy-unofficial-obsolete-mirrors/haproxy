@@ -633,6 +633,19 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		}
 		global.tune.ssl_max_record = atol(args[1]);
 	}
+	else if (!strcmp(args[0], "tune.ssl.default-dh-param")) {
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		global.tune.ssl_default_dh_param = atol(args[1]);
+		if (global.tune.ssl_default_dh_param < 1024) {
+			Alert("parsing [%s:%d] : '%s' expects a value >= 1024.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+	}
 #endif
 	else if (!strcmp(args[0], "tune.bufsize")) {
 		if (*(args[1]) == 0) {
@@ -2007,6 +2020,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 
 		if (curproxy->cap & PR_CAP_FE) {
 			curproxy->timeout.client = defproxy.timeout.client;
+			curproxy->timeout.clientfin = defproxy.timeout.clientfin;
 			curproxy->timeout.tarpit = defproxy.timeout.tarpit;
 			curproxy->timeout.httpreq = defproxy.timeout.httpreq;
 			curproxy->timeout.httpka = defproxy.timeout.httpka;
@@ -2035,6 +2049,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		if (curproxy->cap & PR_CAP_BE) {
 			curproxy->timeout.connect = defproxy.timeout.connect;
 			curproxy->timeout.server = defproxy.timeout.server;
+			curproxy->timeout.serverfin = defproxy.timeout.serverfin;
 			curproxy->timeout.check = defproxy.timeout.check;
 			curproxy->timeout.queue = defproxy.timeout.queue;
 			curproxy->timeout.tarpit = defproxy.timeout.tarpit;
@@ -3869,7 +3884,7 @@ stats_error_parsing:
 			curproxy->options2 &= ~PR_O2_CHK_ANY;
 			curproxy->options2 |= PR_O2_MYSQL_CHK;
 
-			/* This is an exemple of an MySQL >=4.0 client Authentication packet kindly provided by Cyril Bonte.
+			/* This is an example of a MySQL >=4.0 client Authentication packet kindly provided by Cyril Bonte.
 			 * const char mysql40_client_auth_pkt[] = {
 			 * 	"\x0e\x00\x00"	// packet length
 			 * 	"\x01"		// packet number
@@ -3882,6 +3897,23 @@ stats_error_parsing:
 			 * 	"\x01"		// COM_QUIT command
 			 * };
 			 */
+
+			/* This is an example of a MySQL >=4.1  client Authentication packet provided by Nenad Merdanovic.
+			 * const char mysql41_client_auth_pkt[] = {
+			 * 	"\x0e\x00\x00\"		// packet length
+			 * 	"\x01"			// packet number
+			 * 	"\x00\x00\x00\x00"	// client capabilities
+			 * 	"\x00\x00\x00\x01"	// max packet
+			 *	"\x21"			// character set (UTF-8)
+			 *	char[23]		// All zeroes
+			 * 	"haproxy\x00"		// username (null terminated string)
+			 * 	"\x00"			// filler (always 0x00)
+			 * 	"\x01\x00\x00"		// packet length
+			 * 	"\x00"			// packet number
+			 * 	"\x01"			// COM_QUIT command
+			 * };
+			 */
+
 
 			if (*(args[2])) {
 				int cur_arg = 2;
@@ -3900,25 +3932,55 @@ stats_error_parsing:
 						}
 						mysqluser = args[cur_arg + 1];
 						userlen   = strlen(mysqluser);
-						packetlen = userlen + 7;
-						reqlen    = packetlen + 9;
 
-						free(curproxy->check_req);
-						curproxy->check_req = (char *)calloc(1, reqlen);
-						curproxy->check_len = reqlen;
+						if (*(args[cur_arg+2])) {
+							if (!strcmp(args[cur_arg+2], "post-41")) {
+		                                                packetlen = userlen + 7 + 27;
+								reqlen    = packetlen + 9;
 
-						snprintf(curproxy->check_req, 4, "%c%c%c",
-							((unsigned char) packetlen & 0xff),
-							((unsigned char) (packetlen >> 8) & 0xff),
-							((unsigned char) (packetlen >> 16) & 0xff));
+								free(curproxy->check_req);
+								curproxy->check_req = (char *)calloc(1, reqlen);
+								curproxy->check_len = reqlen;
 
-						curproxy->check_req[3] = 1;
-						curproxy->check_req[5] = 128;
-						curproxy->check_req[8] = 1;
-						memcpy(&curproxy->check_req[9], mysqluser, userlen);
-						curproxy->check_req[9 + userlen + 1 + 1]     = 1;
-						curproxy->check_req[9 + userlen + 1 + 1 + 4] = 1;
-						cur_arg += 2;
+								snprintf(curproxy->check_req, 4, "%c%c%c",
+									((unsigned char) packetlen & 0xff),
+									((unsigned char) (packetlen >> 8) & 0xff),
+									((unsigned char) (packetlen >> 16) & 0xff));
+
+								curproxy->check_req[3] = 1;
+								curproxy->check_req[5] = 130;
+								curproxy->check_req[11] = 1;
+								curproxy->check_req[12] = 33;
+								memcpy(&curproxy->check_req[36], mysqluser, userlen);
+								curproxy->check_req[36 + userlen + 1 + 1]     = 1;
+								curproxy->check_req[36 + userlen + 1 + 1 + 4] = 1;
+								cur_arg += 3;
+							} else {
+								Alert("parsing [%s:%d] : keyword '%s' only supports option 'post-41'.\n", file, linenum, args[cur_arg+2]);
+								err_code |= ERR_ALERT | ERR_FATAL;
+								goto out;
+							}
+						} else {
+							packetlen = userlen + 7;
+							reqlen    = packetlen + 9;
+
+							free(curproxy->check_req);
+							curproxy->check_req = (char *)calloc(1, reqlen);
+							curproxy->check_len = reqlen;
+
+							snprintf(curproxy->check_req, 4, "%c%c%c",
+								((unsigned char) packetlen & 0xff),
+								((unsigned char) (packetlen >> 8) & 0xff),
+								((unsigned char) (packetlen >> 16) & 0xff));
+
+							curproxy->check_req[3] = 1;
+							curproxy->check_req[5] = 128;
+							curproxy->check_req[8] = 1;
+							memcpy(&curproxy->check_req[9], mysqluser, userlen);
+							curproxy->check_req[9 + userlen + 1 + 1]     = 1;
+							curproxy->check_req[9 + userlen + 1 + 1 + 4] = 1;
+							cur_arg += 2;
+						}
 					} else {
 						/* unknown suboption - catchall */
 						Alert("parsing [%s:%d] : '%s %s' only supports optional values: 'user'.\n",
@@ -6452,31 +6514,15 @@ out_uri_auth_compat:
 
 		/* The small pools required for the capture lists */
 		if (curproxy->nb_req_cap) {
-			if (curproxy->mode == PR_MODE_HTTP) {
-				curproxy->req_cap_pool = create_pool("ptrcap",
-								     curproxy->nb_req_cap * sizeof(char *),
-								     MEM_F_SHARED);
-			} else {
-				Warning("config : 'capture request header' ignored for %s '%s' as it requires HTTP mode.\n",
-					proxy_type_str(curproxy), curproxy->id);
-				err_code |= ERR_WARN;
-				curproxy->to_log &= ~LW_REQHDR;
-				curproxy->nb_req_cap = 0;
-			}
+			curproxy->req_cap_pool = create_pool("ptrcap",
+			                                     curproxy->nb_req_cap * sizeof(char *),
+			                                     MEM_F_SHARED);
 		}
 
 		if (curproxy->nb_rsp_cap) {
-			if (curproxy->mode == PR_MODE_HTTP) {
-				curproxy->rsp_cap_pool = create_pool("ptrcap",
-								     curproxy->nb_rsp_cap * sizeof(char *),
-								     MEM_F_SHARED);
-			} else {
-				Warning("config : 'capture response header' ignored for %s '%s' as it requires HTTP mode.\n",
-					proxy_type_str(curproxy), curproxy->id);
-				err_code |= ERR_WARN;
-				curproxy->to_log &= ~LW_REQHDR;
-				curproxy->nb_rsp_cap = 0;
-			}
+			curproxy->rsp_cap_pool = create_pool("ptrcap",
+			                                     curproxy->nb_rsp_cap * sizeof(char *),
+			                                     MEM_F_SHARED);
 		}
 
 		/* first, we will invert the servers list order */

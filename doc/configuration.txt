@@ -497,6 +497,7 @@ The following keywords are supported in the "global" section :
    - tune.ssl.lifetime
    - tune.ssl.force-private-cache
    - tune.ssl.maxrecord
+   - tune.ssl.default-dh-param
    - tune.zlib.memlevel
    - tune.zlib.windowsize
 
@@ -1016,6 +1017,16 @@ tune.ssl.maxrecord <number>
   2859 gave good results during tests. Use "strace -e trace=write" to find the
   best value. Haproxy will automatically switch to this setting after an idle
   stream has been detected (see tune.idletimer above).
+
+tune.ssl.default-dh-param <number>
+  Sets the maximum size of the Diffie-Hellman parameters used for generating
+  the ephemeral/temporary Diffie-Hellman key in case of DHE key exchange. The
+  final size will try to match the size of the server's RSA (or DSA) key (e.g,
+  a 2048 bits temporary DH key for a 2048 bits RSA key), but will not exceed
+  this maximum value. Default value if 1024. Only 1024 or higher values are
+  allowed. Higher values will increase the CPU load, and values greater than
+  1024 bits are not supported by Java 7 and earlier clients. This value is not
+  used if static Diffie-Hellman parameters are supplied via the certificate file.
 
 tune.zlib.memlevel <number>
   Sets the memLevel parameter in zlib initialization for each session. It
@@ -4458,13 +4469,14 @@ no option logasap
              logging.
 
 
-option mysql-check [ user <username> ]
+option mysql-check [ user <username> [ post-41 ] ]
   Use MySQL health checks for server testing
   May be used in sections :   defaults | frontend | listen | backend
                                  yes   |    no    |   yes  |   yes
   Arguments :
     <username> This is the username which will be used when connecting to MySQL
                server.
+    post-41    Send post v4.1 client compatible checks
 
   If you specify a username, the check consists of sending two MySQL packet,
   one Client Authentication packet, and one QUIT packet, to correctly close
@@ -6432,7 +6444,7 @@ stick match <pattern> [table <table>] [{if | unless} <cond>]
                                  no    |    no    |   yes  |   yes
 
   Arguments :
-    <pattern>  is a pattern extraction rule as described in section 7.3. It
+    <pattern>  is a sample expression rule as described in section 7.3. It
                describes what elements of the incoming request or connection
                will be analysed in the hope to find a matching entry in a
                stickiness table. This rule is mandatory.
@@ -6498,7 +6510,7 @@ stick match <pattern> [table <table>] [{if | unless} <cond>]
         server s2 192.168.1.1:25
 
   See also : "stick-table", "stick on", "nbproc", "bind-process" and section 7
-             about ACLs and pattern extraction.
+             about ACLs and samples fetching.
 
 
 stick on <pattern> [table <table>] [{if | unless} <condition>]
@@ -6551,7 +6563,7 @@ stick store-request <pattern> [table <table>] [{if | unless} <condition>]
                                  no    |    no    |   yes  |   yes
 
   Arguments :
-    <pattern>  is a pattern extraction rule as described in section 7.3. It
+    <pattern>  is a sample expression rule as described in section 7.3. It
                describes what elements of the incoming request or connection
                will be analysed, extracted and stored in the table once a
                server is selected.
@@ -6631,7 +6643,7 @@ stick store-request <pattern> [table <table>] [{if | unless} <condition>]
         server s2 192.168.1.1:25
 
   See also : "stick-table", "stick on", "nbproc", "bind-process" and section 7
-             about ACLs and pattern extraction.
+             about ACLs and sample fetching.
 
 
 stick-table type {ip | integer | string [len <length>] | binary [len <length>]}
@@ -6667,7 +6679,7 @@ stick-table type {ip | integer | string [len <length>] | binary [len <length>]}
     binary     a table declared with "type binary" will store binary blocks
                of <len> bytes. If the block provided by the pattern
                extractor is larger than <len>, it will be truncated before
-               being stored. If the block provided by the pattern extractor
+               being stored. If the block provided by the sample expression
                is shorter than <len>, it will be padded by 0. When not
                specified, the block is automatically limited to 32 bytes.
 
@@ -6863,7 +6875,7 @@ stick store-response <pattern> [table <table>] [{if | unless} <condition>]
                                  no    |    no    |   yes  |   yes
 
   Arguments :
-    <pattern>  is a pattern extraction rule as described in section 7.3. It
+    <pattern>  is a sample expression rule as described in section 7.3. It
                describes what elements of the response or connection will
                be analysed, extracted and stored in the table once a
                server is selected.
@@ -7159,7 +7171,7 @@ tcp-request connection <action> [{if | unless} <condition>]
   accept the incoming connection. There is no specific limit to the number of
   rules which may be inserted.
 
-  Three types of actions are supported :
+  Five types of actions are supported :
     - accept :
         accepts the connection if the condition is true (when used with "if")
         or false (when used with "unless"). The first such rule executed ends
@@ -7188,6 +7200,18 @@ tcp-request connection <action> [{if | unless} <condition>]
         of load balancers are passed through by traffic coming from public
         hosts.
 
+    - capture <sample> len <length> :
+        This only applies to "tcp-request content" rules. It captures sample
+        expression <sample> from the request buffer, and converts it to a
+        string of at most <len> characters. The resulting string is stored into
+        the next request "capture" slot, so it will possibly appear next to
+        some captured HTTP headers. It will then automatically appear in the
+        logs, and it will be possible to extract it using sample fetch rules to
+        feed it into headers or anything. The length should be limited given
+        that this size will be allocated for each capture during the whole
+        session life. Since it applies to Please check section 7.3 (Fetching
+        samples) and "capture request header" for more information.
+
     - { track-sc0 | track-sc1 | track-sc2 } <key> [table <table>] :
         enables tracking of sticky counters from current connection. These
         rules do not stop evaluation and do not change default action. Two sets
@@ -7202,7 +7226,7 @@ tcp-request connection <action> [{if | unless} <condition>]
         guideline, all may be used everywhere.
 
         These actions take one or two arguments :
-          <key>   is mandatory, and is a pattern extraction rule as described
+          <key>   is mandatory, and is a sample expression rule as described
                   in section 7.3. It describes what elements of the incoming
                   request or connection will be analysed, extracted, combined,
                   and used to select which table entry to update the counters.
@@ -7266,8 +7290,8 @@ tcp-request content <action> [{if | unless} <condition>]
   Arguments :
     <action>    defines the action to perform if the condition applies. Valid
                 actions include : "accept", "reject", "track-sc0", "track-sc1",
-                and "track-sc2". See "tcp-request connection" above for their
-                signification.
+                "track-sc2" and "capture". See "tcp-request connection" above
+                for their signification.
 
     <condition> is a standard layer 4-7 ACL-based condition (see section 7).
 
@@ -7295,9 +7319,10 @@ tcp-request content <action> [{if | unless} <condition>]
   contents. There is no specific limit to the number of rules which may be
   inserted.
 
-  Three types of actions are supported :
-    - accept :
-    - reject :
+  Four types of actions are supported :
+    - accept : the request is accepted
+    - reject : the request is rejected and the connection is closed
+    - capture : the specified sample expression is captured
     - { track-sc0 | track-sc1 | track-sc2 } <key> [table <table>]
 
   They have the same meaning as their counter-parts in "tcp-request connection"
@@ -12019,7 +12044,7 @@ variables on the same format string. This is particularly handy with quoted
 string formats ("Q").
 
 If a variable is named between square brackets ('[' .. ']') then it is used
-as a pattern extraction rule (see section 7.3). This it useful to add some
+as a sample expression rule (see section 7.3). This it useful to add some
 less common information such as the client's SSL certificate's DN, or to log
 the key that would be used to store an entry into a stick table.
 
@@ -12064,7 +12089,7 @@ Please refer to the table below for currently defined variables :
   | H | %CS  | captured_response_cookie                      | string      |
   |   | %H   | hostname                                      | string      |
   |   | %ID  | unique-id                                     | string      |
-  | H | %ST  | status_code                                   | numeric     |
+  |   | %ST  | status_code                                   | numeric     |
   |   | %T   | gmt_date_time                                 | date        |
   |   | %Tc  | Tc                                            | numeric     |
   |   | %Tl  | local_date_time                               | date        |
@@ -12087,10 +12112,10 @@ Please refer to the table below for currently defined variables :
   |   | %fi  | frontend_ip              (accepting address)  | IP          |
   |   | %fp  | frontend_port            (accepting address)  | numeric     |
   |   | %ft  | frontend_name_transport ('~' suffix for SSL)  | string      |
-  | H | %hr  | captured_request_headers default style        | string      |
-  | H | %hrl | captured_request_headers CLF style            | string list |
-  | H | %hs  | captured_response_headers default style       | string      |
-  | H | %hsl | captured_response_headers CLF style           | string list |
+  |   | %hr  | captured_request_headers default style        | string      |
+  |   | %hrl | captured_request_headers CLF style            | string list |
+  |   | %hs  | captured_response_headers default style       | string      |
+  |   | %hsl | captured_response_headers CLF style           | string list |
   |   | %ms  | accept date milliseconds                      | numeric     |
   |   | %pid | PID                                           | numeric     |
   | H | %r   | http_request                                  | string      |
@@ -12754,6 +12779,10 @@ and delimited with a vertical bar '|' without any space. Response headers
 follow the same representation, but are displayed after a space following the
 request headers block. These blocks are displayed just before the HTTP request
 in the logs.
+
+As a special case, it is possible to specify an HTTP header capture in a TCP
+frontend. The purpose is to enable logging of headers which will be parsed in
+an HTTP backend if the request is then switched to this HTTP backend.
 
   Example :
         # This instance chains to the outgoing proxy
