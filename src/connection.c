@@ -243,6 +243,8 @@ void conn_update_sock_polling(struct connection *c)
 int conn_recv_proxy(struct connection *conn, int flag)
 {
 	char *line, *end;
+	struct proxy_hdr_v2 *hdr_v2;
+	const char v2sig[] = PP2_SIGNATURE;
 
 	/* we might have been called just after an asynchronous shutr */
 	if (conn->flags & CO_FL_SOCK_RD_SH)
@@ -280,13 +282,11 @@ int conn_recv_proxy(struct connection *conn, int flag)
 	end = trash.str + trash.len;
 
 	/* Decode a possible proxy request, fail early if it does not match */
-	if (strncmp(line, "PROXY ", 6) != 0) {
-		conn->err_code = CO_ER_PRX_NOT_HDR;
-		goto fail;
-	}
+	if (strncmp(line, "PROXY ", 6) != 0)
+		goto not_v1;
 
 	line += 6;
-	if (trash.len < 18) /* shortest possible line */
+	if (trash.len < 9) /* shortest possible line */
 		goto missing;
 
 	if (!memcmp(line, "TCP4 ", 5) != 0) {
@@ -391,17 +391,74 @@ int conn_recv_proxy(struct connection *conn, int flag)
 		((struct sockaddr_in6 *)&conn->addr.to)->sin6_port          = htons(dport);
 		conn->flags |= CO_FL_ADDR_FROM_SET | CO_FL_ADDR_TO_SET;
 	}
+	else if (memcmp(line, "UNKNOWN\r\n", 9) == 0) {
+		/* This can be a UNIX socket forwarded by an haproxy upstream */
+		line += 9;
+	}
 	else {
-		/* The protocol does not match something known (TCP4/TCP6) */
+		/* The protocol does not match something known (TCP4/TCP6/UNKNOWN) */
 		conn->err_code = CO_ER_PRX_BAD_PROTO;
 		goto fail;
 	}
 
+	trash.len = line - trash.str;
+	goto eat_header;
+
+ not_v1:
+	/* try PPv2 */
+	if (trash.len < PP2_HEADER_LEN)
+		goto missing;
+
+	hdr_v2 = (struct proxy_hdr_v2 *)trash.str;
+
+	if (memcmp(hdr_v2->sig, v2sig, PP2_SIGNATURE_LEN) != 0 ||
+	    (hdr_v2->ver_cmd & PP2_VERSION_MASK) != PP2_VERSION) {
+		conn->err_code = CO_ER_PRX_NOT_HDR;
+		goto fail;
+	}
+
+	if (trash.len < PP2_HEADER_LEN + ntohs(hdr_v2->len))
+		goto missing;
+
+	switch (hdr_v2->ver_cmd & PP2_CMD_MASK) {
+	case 0x01: /* PROXY command */
+		switch (hdr_v2->fam) {
+		case 0x11:  /* TCPv4 */
+			((struct sockaddr_in *)&conn->addr.from)->sin_family = AF_INET;
+			((struct sockaddr_in *)&conn->addr.from)->sin_addr.s_addr = hdr_v2->addr.ip4.src_addr;
+			((struct sockaddr_in *)&conn->addr.from)->sin_port = hdr_v2->addr.ip4.src_port;
+			((struct sockaddr_in *)&conn->addr.to)->sin_family = AF_INET;
+			((struct sockaddr_in *)&conn->addr.to)->sin_addr.s_addr = hdr_v2->addr.ip4.dst_addr;
+			((struct sockaddr_in *)&conn->addr.to)->sin_port = hdr_v2->addr.ip4.dst_port;
+			conn->flags |= CO_FL_ADDR_FROM_SET | CO_FL_ADDR_TO_SET;
+			break;
+		case 0x21:  /* TCPv6 */
+			((struct sockaddr_in6 *)&conn->addr.from)->sin6_family = AF_INET6;
+			memcpy(&((struct sockaddr_in6 *)&conn->addr.from)->sin6_addr, hdr_v2->addr.ip6.src_addr, 16);
+			((struct sockaddr_in6 *)&conn->addr.from)->sin6_port = hdr_v2->addr.ip6.src_port;
+			((struct sockaddr_in6 *)&conn->addr.to)->sin6_family = AF_INET6;
+			memcpy(&((struct sockaddr_in6 *)&conn->addr.to)->sin6_addr, hdr_v2->addr.ip6.dst_addr, 16);
+			((struct sockaddr_in6 *)&conn->addr.to)->sin6_port = hdr_v2->addr.ip6.dst_port;
+			conn->flags |= CO_FL_ADDR_FROM_SET | CO_FL_ADDR_TO_SET;
+			break;
+		}
+		/* unsupported protocol, keep local connection address */
+		break;
+	case 0x00: /* LOCAL command */
+		/* keep local connection address for LOCAL */
+		break;
+	default:
+		goto bad_header; /* not a supported command */
+	}
+
+	trash.len = PP2_HEADER_LEN + ntohs(hdr_v2->len);
+	goto eat_header;
+
+ eat_header:
 	/* remove the PROXY line from the request. For this we re-read the
 	 * exact line at once. If we don't get the exact same result, we
 	 * fail.
 	 */
-	trash.len = line - trash.str;
 	do {
 		int len2 = recv(conn->t.sock.fd, trash.str, trash.len, 0);
 		if (len2 < 0 && errno == EINTR)
@@ -554,10 +611,9 @@ static int make_tlv(char *dest, int dest_len, char type, uint16_t length, char *
 
 int make_proxy_line_v2(char *buf, int buf_len, struct server *srv, struct connection *remote)
 {
-	const char pp2_signature[12] = {0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A};
+	const char pp2_signature[] = PP2_SIGNATURE;
 	int ret = 0;
-	struct proxy_hdr_v2 *hdr_p = (struct proxy_hdr_v2 *)buf;
-	union proxy_addr *addr_p = (union proxy_addr *)(buf + PP2_HEADER_LEN);
+	struct proxy_hdr_v2 *hdr = (struct proxy_hdr_v2 *)buf;
 	struct sockaddr_storage null_addr = {0};
 	struct sockaddr_storage *src = &null_addr;
 	struct sockaddr_storage *dst = &null_addr;
@@ -570,7 +626,7 @@ int make_proxy_line_v2(char *buf, int buf_len, struct server *srv, struct connec
 
 	if (buf_len < PP2_HEADER_LEN)
 		return 0;
-	memcpy(hdr_p->sig, pp2_signature, PP2_SIGNATURE_LEN);
+	memcpy(hdr->sig, pp2_signature, PP2_SIGNATURE_LEN);
 
 	if (remote) {
 		src = &remote->addr.from;
@@ -579,30 +635,30 @@ int make_proxy_line_v2(char *buf, int buf_len, struct server *srv, struct connec
 	if (src && dst && src->ss_family == dst->ss_family && src->ss_family == AF_INET) {
 		if (buf_len < PP2_HDR_LEN_INET)
 			return 0;
-		hdr_p->cmd = PP2_VERSION | PP2_CMD_PROXY;
-		hdr_p->fam = PP2_FAM_INET | PP2_TRANS_STREAM;
-		addr_p->ipv4_addr.src_addr = ((struct sockaddr_in *)src)->sin_addr.s_addr;
-		addr_p->ipv4_addr.dst_addr = ((struct sockaddr_in *)dst)->sin_addr.s_addr;
-		addr_p->ipv4_addr.src_port = ((struct sockaddr_in *)src)->sin_port;
-		addr_p->ipv4_addr.dst_port = ((struct sockaddr_in *)dst)->sin_port;
+		hdr->ver_cmd = PP2_VERSION | PP2_CMD_PROXY;
+		hdr->fam = PP2_FAM_INET | PP2_TRANS_STREAM;
+		hdr->addr.ip4.src_addr = ((struct sockaddr_in *)src)->sin_addr.s_addr;
+		hdr->addr.ip4.dst_addr = ((struct sockaddr_in *)dst)->sin_addr.s_addr;
+		hdr->addr.ip4.src_port = ((struct sockaddr_in *)src)->sin_port;
+		hdr->addr.ip4.dst_port = ((struct sockaddr_in *)dst)->sin_port;
 		ret = PP2_HDR_LEN_INET;
 	}
 	else if (src && dst && src->ss_family == dst->ss_family && src->ss_family == AF_INET6) {
 		if (buf_len < PP2_HDR_LEN_INET6)
 			return 0;
-		hdr_p->cmd = PP2_VERSION | PP2_CMD_PROXY;
-		hdr_p->fam = PP2_FAM_INET6 | PP2_TRANS_STREAM;
-		memcpy(addr_p->ipv6_addr.src_addr, &((struct sockaddr_in6 *)src)->sin6_addr, 16);
-		memcpy(addr_p->ipv6_addr.dst_addr, &((struct sockaddr_in6 *)dst)->sin6_addr, 16);
-		addr_p->ipv6_addr.src_port = ((struct sockaddr_in6 *)src)->sin6_port;
-		addr_p->ipv6_addr.dst_port = ((struct sockaddr_in6 *)dst)->sin6_port;
+		hdr->ver_cmd = PP2_VERSION | PP2_CMD_PROXY;
+		hdr->fam = PP2_FAM_INET6 | PP2_TRANS_STREAM;
+		memcpy(hdr->addr.ip6.src_addr, &((struct sockaddr_in6 *)src)->sin6_addr, 16);
+		memcpy(hdr->addr.ip6.dst_addr, &((struct sockaddr_in6 *)dst)->sin6_addr, 16);
+		hdr->addr.ip6.src_port = ((struct sockaddr_in6 *)src)->sin6_port;
+		hdr->addr.ip6.dst_port = ((struct sockaddr_in6 *)dst)->sin6_port;
 		ret = PP2_HDR_LEN_INET6;
 	}
 	else {
 		if (buf_len < PP2_HDR_LEN_UNSPEC)
 			return 0;
-		hdr_p->cmd = PP2_VERSION | PP2_CMD_LOCAL;
-		hdr_p->fam = PP2_FAM_UNSPEC | PP2_TRANS_UNSPEC;
+		hdr->ver_cmd = PP2_VERSION | PP2_CMD_LOCAL;
+		hdr->fam = PP2_FAM_UNSPEC | PP2_TRANS_UNSPEC;
 		ret = PP2_HDR_LEN_UNSPEC;
 	}
 
@@ -639,7 +695,7 @@ int make_proxy_line_v2(char *buf, int buf_len, struct server *srv, struct connec
 	}
 #endif
 
-	hdr_p->len = htons((uint16_t)(ret - PP2_HEADER_LEN));
+	hdr->len = htons((uint16_t)(ret - PP2_HEADER_LEN));
 
 	return ret;
 }

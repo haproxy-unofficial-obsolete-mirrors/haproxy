@@ -2118,7 +2118,11 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		free(defproxy.server_id_hdr_name);
 		defproxy.server_id_hdr_len = 0;
 		free(defproxy.expect_str);
-		if (defproxy.expect_regex) regfree(defproxy.expect_regex);
+		if (defproxy.expect_regex) {
+			regfree(defproxy.expect_regex);
+			free(defproxy.expect_regex);
+			defproxy.expect_regex = NULL;
+		}
 
 		if (defproxy.conf.logformat_string != default_http_log_format &&
 		    defproxy.conf.logformat_string != default_tcp_log_format &&
@@ -4208,7 +4212,11 @@ stats_error_parsing:
 				}
 				curproxy->options2 |= PR_O2_EXP_RSTS;
 				free(curproxy->expect_str);
-				if (curproxy->expect_regex) regfree(curproxy->expect_regex);
+				if (curproxy->expect_regex) {
+					regfree(curproxy->expect_regex);
+					free(curproxy->expect_regex);
+					curproxy->expect_regex = NULL;
+				}
 				curproxy->expect_str = strdup(args[cur_arg + 1]);
 				curproxy->expect_regex = calloc(1, sizeof(regex_t));
 				if (regcomp(curproxy->expect_regex, args[cur_arg + 1], REG_EXTENDED) != 0) {
@@ -4227,7 +4235,11 @@ stats_error_parsing:
 				}
 				curproxy->options2 |= PR_O2_EXP_RSTR;
 				free(curproxy->expect_str);
-				if (curproxy->expect_regex) regfree(curproxy->expect_regex);
+				if (curproxy->expect_regex) {
+					regfree(curproxy->expect_regex);
+					free(curproxy->expect_regex);
+					curproxy->expect_regex = NULL;
+				}
 				curproxy->expect_str = strdup(args[cur_arg + 1]);
 				curproxy->expect_regex = calloc(1, sizeof(regex_t));
 				if (regcomp(curproxy->expect_regex, args[cur_arg + 1], REG_EXTENDED) != 0) {
@@ -6502,6 +6514,13 @@ out_uri_auth_compat:
 			curproxy->check_len = sizeof(sslv3_client_hello_pkt) - 1;
 			curproxy->check_req = (char *)malloc(curproxy->check_len);
 			memcpy(curproxy->check_req, sslv3_client_hello_pkt, curproxy->check_len);
+		}
+
+		if (!LIST_ISEMPTY(&curproxy->tcpcheck_rules) &&
+		    (curproxy->options2 & PR_O2_CHK_ANY) != PR_O2_TCPCHK_CHK) {
+			Warning("config : %s '%s' uses tcp-check rules without 'option tcp-check', so the rules are ignored.\n",
+				proxy_type_str(curproxy), curproxy->id);
+			err_code |= ERR_WARN;
 		}
 
 		/* ensure that cookie capture length is not too large */
