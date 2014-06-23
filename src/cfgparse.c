@@ -856,6 +856,9 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		}
 		global.gid = atol(args[1]);
 	}
+	else if (!strcmp(args[0], "external-check")) {
+		global.external_check = 1;
+	}
 	/* user/group name handling */
 	else if (!strcmp(args[0], "user")) {
 		struct passwd *ha_user;
@@ -1527,11 +1530,14 @@ static int create_cond_regex_rule(const char *file, int line,
 				  const char *cmd, const char *reg, const char *repl,
 				  const char **cond_start)
 {
-	regex_t *preg = NULL;
+	struct my_regex *preg = NULL;
 	char *errmsg = NULL;
 	const char *err;
+	char *error;
 	int ret_code = 0;
 	struct acl_cond *cond = NULL;
+	int cs;
+	int cap;
 
 	if (px == &defproxy) {
 		Alert("parsing [%s:%d] : '%s' not allowed in 'defaults' section.\n", file, line, cmd);
@@ -1570,15 +1576,19 @@ static int create_cond_regex_rule(const char *file, int line,
 	                                  ((px->cap & PR_CAP_BE) ? SMP_VAL_BE_HRS_HDR : SMP_VAL_FE_HRS_HDR),
 	                                  file, line);
 
-	preg = calloc(1, sizeof(regex_t));
+	preg = calloc(1, sizeof(*preg));
 	if (!preg) {
 		Alert("parsing [%s:%d] : '%s' : not enough memory to build regex.\n", file, line, cmd);
 		ret_code = ERR_ALERT | ERR_FATAL;
 		goto err;
 	}
 
-	if (regcomp(preg, reg, REG_EXTENDED | flags) != 0) {
-		Alert("parsing [%s:%d] : '%s' : bad regular expression '%s'.\n", file, line, cmd, reg);
+	cs = !(flags & REG_ICASE);
+	cap = !(flags & REG_NOSUB);
+	error = NULL;
+	if (!regex_comp(reg, preg, cs, cap, &error)) {
+		Alert("parsing [%s:%d] : '%s' : regular expression '%s' : %s\n", file, line, cmd, reg, error);
+		free(error);
 		ret_code = ERR_ALERT | ERR_FATAL;
 		goto err;
 	}
@@ -1598,7 +1608,7 @@ static int create_cond_regex_rule(const char *file, int line,
 	return ret_code;
 
  err_free:
-	regfree(preg);
+	regex_free(preg);
  err:
 	free(preg);
 	free(errmsg);
@@ -1811,6 +1821,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 {
 	static struct proxy *curproxy = NULL;
 	const char *err;
+	char *error;
 	int rc;
 	unsigned val;
 	int err_code = 0;
@@ -1971,8 +1982,8 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 				curproxy->expect_str = strdup(defproxy.expect_str);
 				if (defproxy.expect_regex) {
 					/* note: this regex is known to be valid */
-					curproxy->expect_regex = calloc(1, sizeof(regex_t));
-					regcomp(curproxy->expect_regex, defproxy.expect_str, REG_EXTENDED);
+					curproxy->expect_regex = calloc(1, sizeof(*curproxy->expect_regex));
+					regex_comp(defproxy.expect_str, curproxy->expect_regex, 1, 1, NULL);
 				}
 			}
 
@@ -2094,6 +2105,11 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		curproxy->conf.used_listener_id = EB_ROOT;
 		curproxy->conf.used_server_id = EB_ROOT;
 
+		if (defproxy.check_path)
+			curproxy->check_path = strdup(defproxy.check_path);
+		if (defproxy.check_command)
+			curproxy->check_command = strdup(defproxy.check_command);
+
 		goto out;
 	}
 	else if (!strcmp(args[0], "defaults")) {  /* use this one to assign default values */
@@ -2102,6 +2118,8 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		 * config parsing to free all default values.
 		 */
 		free(defproxy.check_req);
+		free(defproxy.check_command);
+		free(defproxy.check_path);
 		free(defproxy.cookie_name);
 		free(defproxy.rdp_cookie_name);
 		free(defproxy.cookie_domain);
@@ -2119,7 +2137,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		defproxy.server_id_hdr_len = 0;
 		free(defproxy.expect_str);
 		if (defproxy.expect_regex) {
-			regfree(defproxy.expect_regex);
+			regex_free(defproxy.expect_regex);
 			free(defproxy.expect_regex);
 			defproxy.expect_regex = NULL;
 		}
@@ -2609,6 +2627,41 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 		}
 	}/* end else if (!strcmp(args[0], "cookie"))  */
+	else if (!strcmp(args[0], "external-check")) {
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d] : missing argument after '%s'.\n",
+			      file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+                }
+
+		if (!strcmp(args[1], "command")) {
+			if (*(args[1]) == 0) {
+				Alert("parsing [%s:%d] : missing argument after '%s'.\n",
+				      file, linenum, args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			free(curproxy->check_command);
+			curproxy->check_command = strdup(args[2]);
+		}
+		else if (!strcmp(args[1], "path")) {
+			if (*(args[1]) == 0) {
+				Alert("parsing [%s:%d] : missing argument after '%s'.\n",
+				      file, linenum, args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			free(curproxy->check_path);
+			curproxy->check_path = strdup(args[2]);
+		}
+		else {
+			Alert("parsing [%s:%d] : external-check: unknown argument '%s'.\n",
+			      file, linenum, args[1]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+	}/* end else if (!strcmp(args[0], "external-check"))  */
 	else if (!strcmp(args[0], "persist")) {  /* persist */
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : missing persist method.\n",
@@ -4016,6 +4069,13 @@ stats_error_parsing:
 			curproxy->options2 &= ~PR_O2_CHK_ANY;
 			curproxy->options2 |= PR_O2_TCPCHK_CHK;
 		}
+		else if (!strcmp(args[1], "external-check")) {
+			/* excute an external command to check servers' health */
+			free(curproxy->check_req);
+			curproxy->check_req = NULL;
+			curproxy->options2 &= ~PR_O2_CHK_ANY;
+			curproxy->options2 |= PR_O2_EXT_CHK;
+		}
 		else if (!strcmp(args[1], "forwardfor")) {
 			int cur_arg;
 
@@ -4213,15 +4273,17 @@ stats_error_parsing:
 				curproxy->options2 |= PR_O2_EXP_RSTS;
 				free(curproxy->expect_str);
 				if (curproxy->expect_regex) {
-					regfree(curproxy->expect_regex);
+					regex_free(curproxy->expect_regex);
 					free(curproxy->expect_regex);
 					curproxy->expect_regex = NULL;
 				}
 				curproxy->expect_str = strdup(args[cur_arg + 1]);
-				curproxy->expect_regex = calloc(1, sizeof(regex_t));
-				if (regcomp(curproxy->expect_regex, args[cur_arg + 1], REG_EXTENDED) != 0) {
-					Alert("parsing [%s:%d] : '%s %s %s' : bad regular expression '%s'.\n",
-					      file, linenum, args[0], args[1], ptr_arg, args[cur_arg + 1]);
+				curproxy->expect_regex = calloc(1, sizeof(*curproxy->expect_regex));
+				error = NULL;
+				if (!regex_comp(args[cur_arg + 1], curproxy->expect_regex, 1, 1, &error)) {
+					Alert("parsing [%s:%d] : '%s %s %s' : bad regular expression '%s': %s.\n",
+					      file, linenum, args[0], args[1], ptr_arg, args[cur_arg + 1], error);
+					free(error);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
@@ -4236,15 +4298,17 @@ stats_error_parsing:
 				curproxy->options2 |= PR_O2_EXP_RSTR;
 				free(curproxy->expect_str);
 				if (curproxy->expect_regex) {
-					regfree(curproxy->expect_regex);
+					regex_free(curproxy->expect_regex);
 					free(curproxy->expect_regex);
 					curproxy->expect_regex = NULL;
 				}
 				curproxy->expect_str = strdup(args[cur_arg + 1]);
-				curproxy->expect_regex = calloc(1, sizeof(regex_t));
-				if (regcomp(curproxy->expect_regex, args[cur_arg + 1], REG_EXTENDED) != 0) {
-					Alert("parsing [%s:%d] : '%s %s %s' : bad regular expression '%s'.\n",
-					      file, linenum, args[0], args[1], ptr_arg, args[cur_arg + 1]);
+				curproxy->expect_regex = calloc(1, sizeof(*curproxy->expect_regex));
+				error = NULL;
+				if (!regex_comp(args[cur_arg + 1], curproxy->expect_regex, 1, 1, &error)) {
+					Alert("parsing [%s:%d] : '%s %s %s' : bad regular expression '%s': %s.\n",
+					      file, linenum, args[0], args[1], ptr_arg, args[cur_arg + 1], error);
+					free(error);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
@@ -4456,10 +4520,12 @@ stats_error_parsing:
 				tcpcheck->action = TCPCHK_ACT_EXPECT;
 				tcpcheck->string_len = 0;
 				tcpcheck->string = NULL;
-				tcpcheck->expect_regex = calloc(1, sizeof(regex_t));
-				if (regcomp(tcpcheck->expect_regex, args[cur_arg + 1], REG_EXTENDED) != 0) {
-					Alert("parsing [%s:%d] : '%s %s %s' : bad regular expression '%s'.\n",
-					      file, linenum, args[0], args[1], ptr_arg, args[cur_arg + 1]);
+				tcpcheck->expect_regex = calloc(1, sizeof(*tcpcheck->expect_regex));
+				error = NULL;
+				if (!regex_comp(args[cur_arg + 1], tcpcheck->expect_regex, 1, 1, &error)) {
+					Alert("parsing [%s:%d] : '%s %s %s' : bad regular expression '%s': %s.\n",
+					      file, linenum, args[0], args[1], ptr_arg, args[cur_arg + 1], error);
+					free(error);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
@@ -6064,6 +6130,48 @@ int check_config_validity()
 					"send-state", proxy_type_str(curproxy), curproxy->id);
 				err_code |= ERR_WARN;
 				curproxy->options &= ~PR_O2_CHK_SNDST;
+			}
+		}
+
+		if ((curproxy->options2 & PR_O2_CHK_ANY) == PR_O2_EXT_CHK) {
+			if (!global.external_check) {
+				Alert("Proxy '%s' : '%s' unable to find required 'global.external-check'.\n",
+				      curproxy->id, "option external-check");
+				cfgerr++;
+			}
+			if (!curproxy->check_command) {
+				Alert("Proxy '%s' : '%s' unable to find required 'external-check command'.\n",
+				      curproxy->id, "option external-check");
+				cfgerr++;
+			}
+		}
+
+		if (curproxy->check_command) {
+			int clear = 0;
+			if ((curproxy->options2 & PR_O2_CHK_ANY) != PR_O2_EXT_CHK) {
+				Warning("config : '%s' will be ignored for %s '%s' (requires 'option external-check').\n",
+					"external-check command", proxy_type_str(curproxy), curproxy->id);
+				err_code |= ERR_WARN;
+				clear = 1;
+			}
+			if (curproxy->check_command[0] != '/' && !curproxy->check_path) {
+				Alert("Proxy '%s': '%s' does not have a leading '/' and 'external-command path' is not set.\n",
+				      curproxy->id, "external-check command");
+				cfgerr++;
+			}
+			if (clear) {
+				free(curproxy->check_command);
+				curproxy->check_command = NULL;
+			}
+		}
+
+		if (curproxy->check_path) {
+			if ((curproxy->options2 & PR_O2_CHK_ANY) != PR_O2_EXT_CHK) {
+				Warning("config : '%s' will be ignored for %s '%s' (requires 'option external-check').\n",
+					"external-check path", proxy_type_str(curproxy), curproxy->id);
+				err_code |= ERR_WARN;
+				free(curproxy->check_path);
+				curproxy->check_path = NULL;
 			}
 		}
 

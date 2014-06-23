@@ -3179,10 +3179,10 @@ static inline void inet_set_tos(int fd, struct sockaddr_storage from, int tos)
 /* Returns the number of characters written to destination,
  * -1 on internal error and -2 if no replacement took place.
  */
-static int http_replace_header(regex_t* re, char* dst, uint dst_size, char* val,
-                               const char* rep_str)
+static int http_replace_header(struct my_regex *re, char *dst, uint dst_size, char *val, int len,
+                               const char *rep_str)
 {
-	if (regexec(re, val, MAX_MATCH, pmatch, 0))
+	if (!regex_exec_match2(re, val, len, MAX_MATCH, pmatch))
 		return -2;
 
 	return exp_replace(dst, dst_size, val, rep_str, pmatch);
@@ -3191,8 +3191,8 @@ static int http_replace_header(regex_t* re, char* dst, uint dst_size, char* val,
 /* Returns the number of characters written to destination,
  * -1 on internal error and -2 if no replacement took place.
  */
-static int http_replace_value(regex_t* re, char* dst, uint dst_size, char* val, char delim,
-                              const char* rep_str)
+static int http_replace_value(struct my_regex *re, char *dst, uint dst_size, char *val, int len, char delim,
+                              const char *rep_str)
 {
 	char* p = val;
 	char* dst_end = dst + dst_size;
@@ -3200,16 +3200,13 @@ static int http_replace_value(regex_t* re, char* dst, uint dst_size, char* val, 
 
 	for (;;) {
 		char *p_delim;
-		const char* tok_end;
 
-		if ((p_delim = (char*)strchr(p, delim))) {
-			*p_delim = 0;
-			tok_end = p_delim;
-		} else {
-			tok_end = p + strlen(p);
-		}
+		/* look for delim. */
+		p_delim = p;
+		while (p_delim < p + len && *p_delim != delim)
+			p_delim++;
 
-		if (regexec(re, p, MAX_MATCH, pmatch, 0) == 0) {
+		if (regex_exec_match2(re, p, p_delim-p, MAX_MATCH, pmatch)) {
 			int replace_n = exp_replace(dst_p, dst_end - dst_p, p, rep_str, pmatch);
 
 			if (replace_n < 0)
@@ -3217,7 +3214,7 @@ static int http_replace_value(regex_t* re, char* dst, uint dst_size, char* val, 
 
 			dst_p += replace_n;
 		} else {
-			uint len = tok_end - p;
+			uint len = p_delim - p;
 
 			if (dst_p + len >= dst_end)
 				return -1;
@@ -3229,21 +3226,20 @@ static int http_replace_value(regex_t* re, char* dst, uint dst_size, char* val, 
 		if (dst_p >= dst_end)
 			return -1;
 
-		if (p_delim) {
-			*p_delim = delim;
-			*dst_p++ = delim;
-			p = p_delim + 1;
-		} else {
-			*dst_p = 0;
+		/* end of the replacements. */
+		if (p_delim >= p + len)
 			break;
-		}
+
+		/* Next part. */
+		*dst_p++ = delim;
+		p = p_delim + 1;
 	}
 
 	return dst_p - dst;
 }
 
 static int http_transform_header(struct session* s, struct http_msg *msg, const char* name, uint name_len,
-                                 char* buf, struct hdr_idx* idx, struct list *fmt, regex_t* re,
+                                 char* buf, struct hdr_idx* idx, struct list *fmt, struct my_regex *re,
                                  struct hdr_ctx* ctx, int action)
 {
 	ctx->idx = 0;
@@ -3253,12 +3249,10 @@ static int http_transform_header(struct session* s, struct http_msg *msg, const 
 		int delta;
 		char* val = (char*)ctx->line + name_len + 2;
 		char* val_end = (char*)ctx->line + hdr->len;
-		char save_val_end = *val_end;
 		char* reg_dst_buf;
 		uint reg_dst_buf_size;
 		int n_replaced;
 
-		*val_end = 0;
 		trash.len = build_logline(s, trash.str, trash.size, fmt);
 
 		if (trash.len >= trash.size - 1)
@@ -3270,17 +3264,15 @@ static int http_transform_header(struct session* s, struct http_msg *msg, const 
 		switch (action) {
 		case HTTP_REQ_ACT_REPLACE_VAL:
 		case HTTP_RES_ACT_REPLACE_VAL:
-			n_replaced = http_replace_value(re, reg_dst_buf, reg_dst_buf_size, val, ',', trash.str);
+			n_replaced = http_replace_value(re, reg_dst_buf, reg_dst_buf_size, val, val_end-val, ',', trash.str);
 			break;
 		case HTTP_REQ_ACT_REPLACE_HDR:
 		case HTTP_RES_ACT_REPLACE_HDR:
-			n_replaced = http_replace_header(re, reg_dst_buf, reg_dst_buf_size, val, trash.str);
+			n_replaced = http_replace_header(re, reg_dst_buf, reg_dst_buf_size, val, val_end-val, trash.str);
 			break;
 		default: /* impossible */
 			return -1;
 		}
-
-		*val_end = save_val_end;
 
 		switch (n_replaced) {
 		case -1: return -1;
@@ -3389,7 +3381,7 @@ http_req_get_intercept_rule(struct proxy *px, struct list *rules, struct session
 		case HTTP_REQ_ACT_REPLACE_VAL:
 			if (http_transform_header(s, &txn->req, rule->arg.hdr_add.name, rule->arg.hdr_add.name_len,
 			                          txn->req.chn->buf->p, &txn->hdr_idx, &rule->arg.hdr_add.fmt,
-			                          rule->arg.hdr_add.re, &ctx, rule->action))
+			                          &rule->arg.hdr_add.re, &ctx, rule->action))
 				return HTTP_RULE_RES_BADREQ;
 			break;
 
@@ -3578,7 +3570,7 @@ http_res_get_intercept_rule(struct proxy *px, struct list *rules, struct session
 		case HTTP_RES_ACT_REPLACE_VAL:
 			if (http_transform_header(s, &txn->rsp, rule->arg.hdr_add.name, rule->arg.hdr_add.name_len,
 			                          txn->rsp.chn->buf->p, &txn->hdr_idx, &rule->arg.hdr_add.fmt,
-			                          rule->arg.hdr_add.re, &ctx, rule->action))
+			                          &rule->arg.hdr_add.re, &ctx, rule->action))
 				return NULL; /* note: we should report an error here */
 			break;
 
@@ -4892,7 +4884,7 @@ void http_end_txn_clean_session(struct session *s)
 	s->req->cons->conn_retries = 0;  /* used for logging too */
 	s->req->cons->exp       = TICK_ETERNITY;
 	s->req->cons->flags    &= SI_FL_DONT_WAKE; /* we're in the context of process_session */
-	s->req->flags &= ~(CF_SHUTW|CF_SHUTW_NOW|CF_AUTO_CONNECT|CF_WRITE_ERROR|CF_STREAMER|CF_STREAMER_FAST|CF_NEVER_WAIT|CF_WAKE_CONNECT|CF_READ_NOEXP);
+	s->req->flags &= ~(CF_SHUTW|CF_SHUTW_NOW|CF_AUTO_CONNECT|CF_WRITE_ERROR|CF_STREAMER|CF_STREAMER_FAST|CF_NEVER_WAIT|CF_WAKE_CONNECT);
 	s->rep->flags &= ~(CF_SHUTR|CF_SHUTR_NOW|CF_READ_ATTACHED|CF_READ_ERROR|CF_READ_NOEXP|CF_STREAMER|CF_STREAMER_FAST|CF_WRITE_PARTIAL|CF_NEVER_WAIT);
 	s->flags &= ~(SN_DIRECT|SN_ASSIGNED|SN_ADDR_SET|SN_BE_ASSIGNED|SN_FORCE_PRST|SN_IGNORE_PRST);
 	s->flags &= ~(SN_CURR_SESS|SN_REDIRECTABLE|SN_SRV_REUSED);
@@ -5313,13 +5305,6 @@ int http_request_forward_body(struct session *s, struct channel *req, int an_bit
 		 */
 		msg->msg_state = HTTP_MSG_ERROR;
 		http_resync_states(s);
-
-		if (req->flags & CF_READ_TIMEOUT)
-			goto cli_timeout;
-
-		if (req->flags & CF_WRITE_TIMEOUT)
-			goto srv_timeout;
-
 		return 1;
 	}
 
@@ -5486,11 +5471,6 @@ int http_request_forward_body(struct session *s, struct channel *req, int an_bit
 				channel_auto_read(req);
 			}
 
-			/* if we received everything, we don't want to expire anymore */
-			if (msg->msg_state == HTTP_MSG_DONE) {
-				req->flags |= CF_READ_NOEXP;
-				req->rex = TICK_ETERNITY;
-			}
 			return 0;
 		}
 	}
@@ -5598,68 +5578,6 @@ int http_request_forward_body(struct session *s, struct channel *req, int an_bit
 			s->flags |= SN_FINST_H;
 		else
 			s->flags |= SN_FINST_D;
-	}
-	return 0;
-
- cli_timeout:
-	if (!(s->flags & SN_ERR_MASK))
-		s->flags |= SN_ERR_CLITO;
-
-	if (!(s->flags & SN_FINST_MASK)) {
-		if (txn->rsp.msg_state < HTTP_MSG_ERROR)
-			s->flags |= SN_FINST_H;
-		else
-			s->flags |= SN_FINST_D;
-	}
-
-	if (txn->status > 0) {
-		/* Don't send any error message if something was already sent */
-		stream_int_retnclose(req->prod, NULL);
-	}
-	else {
-		txn->status = 408;
-		stream_int_retnclose(req->prod, http_error_message(s, HTTP_ERR_408));
-	}
-
-	msg->msg_state = HTTP_MSG_ERROR;
-	req->analysers = 0;
-	s->rep->analysers = 0; /* we're in data phase, we want to abort both directions */
-
-	session_inc_http_err_ctr(s);
-	s->fe->fe_counters.failed_req++;
-	s->be->be_counters.failed_req++;
-	if (s->listener->counters)
-		s->listener->counters->failed_req++;
-	return 0;
-
- srv_timeout:
-	if (!(s->flags & SN_ERR_MASK))
-		s->flags |= SN_ERR_SRVTO;
-
-	if (!(s->flags & SN_FINST_MASK)) {
-		if (txn->rsp.msg_state < HTTP_MSG_ERROR)
-			s->flags |= SN_FINST_H;
-		else
-			s->flags |= SN_FINST_D;
-	}
-
-	if (txn->status > 0) {
-		/* Don't send any error message if something was already sent */
-		stream_int_retnclose(req->prod, NULL);
-	}
-	else {
-		txn->status = 504;
-		stream_int_retnclose(req->prod, http_error_message(s, HTTP_ERR_504));
-	}
-
-	msg->msg_state = HTTP_MSG_ERROR;
-	req->analysers = 0;
-	s->rep->analysers = 0; /* we're in data phase, we want to abort both directions */
-
-	s->be->be_counters.failed_resp++;
-	if (objt_server(s->target)) {
-		objt_server(s->target)->counters.failed_resp++;
-		health_adjust(objt_server(s->target), HANA_STATUS_HTTP_READ_TIMEOUT);
 	}
 	return 0;
 }
@@ -5829,11 +5747,8 @@ int http_wait_for_response(struct session *s, struct channel *rep, int an_bit)
 			return 0;
 		}
 
-		/* read/write timeout : return a 504 to the client.
-		 * The write timeout may happen when we're uploading POST
-		 * data that the server is not consuming fast enough.
-		 */
-		else if (rep->flags & (CF_READ_TIMEOUT|CF_WRITE_TIMEOUT)) {
+		/* read timeout : return a 504 to the client. */
+		else if (rep->flags & CF_READ_TIMEOUT) {
 			if (msg->err_pos >= 0)
 				http_capture_bad_message(&s->be->invalid_rep, s, msg, msg->msg_state, s->fe);
 			else if (txn->flags & TX_NOT_FIRST)
@@ -5928,12 +5843,6 @@ int http_wait_for_response(struct session *s, struct channel *rep, int an_bit)
 			/* process_session() will take care of the error */
 			return 0;
 		}
-
-		/* we don't want to expire on the server side first until the client
-		 * has sent all the expected message body.
-		 */
-		if (txn->req.msg_state >= HTTP_MSG_BODY && txn->req.msg_state < HTTP_MSG_DONE)
-			rep->flags |= CF_READ_NOEXP;
 
 		channel_dont_close(rep);
 		rep->flags |= CF_READ_DONTWAIT; /* try to get back here ASAP */
@@ -6750,12 +6659,6 @@ int http_response_forward_body(struct session *s, struct channel *res, int an_bi
 				}
 				return 1;
 			}
-
-			/* if we received everything, we don't want to expire anymore */
-			if (msg->msg_state == HTTP_MSG_DONE) {
-				res->flags |= CF_READ_NOEXP;
-				res->rex = TICK_ETERNITY;
-			}
 			return 0;
 		}
 	}
@@ -6882,7 +6785,6 @@ int http_response_forward_body(struct session *s, struct channel *res, int an_bi
  */
 int apply_filter_to_req_headers(struct session *s, struct channel *req, struct hdr_exp *exp)
 {
-	char term;
 	char *cur_ptr, *cur_end, *cur_next;
 	int cur_idx, old_idx, last_hdr;
 	struct http_txn *txn = &s->txn;
@@ -6916,15 +6818,7 @@ int apply_filter_to_req_headers(struct session *s, struct channel *req, struct h
 		 * and the next header starts at cur_next.
 		 */
 
-		/* The annoying part is that pattern matching needs
-		 * that we modify the contents to null-terminate all
-		 * strings before testing them.
-		 */
-
-		term = *cur_end;
-		*cur_end = '\0';
-
-		if (regexec(exp->preg, cur_ptr, MAX_MATCH, pmatch, 0) == 0) {
+		if (regex_exec_match2(exp->preg, cur_ptr, cur_end-cur_ptr, MAX_MATCH, pmatch)) {
 			switch (exp->action) {
 			case ACT_SETBE:
 				/* It is not possible to jump a second time.
@@ -6985,8 +6879,6 @@ int apply_filter_to_req_headers(struct session *s, struct channel *req, struct h
 
 			}
 		}
-		if (cur_end)
-			*cur_end = term; /* restore the string terminator */
 
 		/* keep the link from this header to next one in case of later
 		 * removal of next header.
@@ -7005,7 +6897,6 @@ int apply_filter_to_req_headers(struct session *s, struct channel *req, struct h
  */
 int apply_filter_to_req_line(struct session *s, struct channel *req, struct hdr_exp *exp)
 {
-	char term;
 	char *cur_ptr, *cur_end;
 	int done;
 	struct http_txn *txn = &s->txn;
@@ -7028,15 +6919,7 @@ int apply_filter_to_req_line(struct session *s, struct channel *req, struct hdr_
 
 	/* Now we have the request line between cur_ptr and cur_end */
 
-	/* The annoying part is that pattern matching needs
-	 * that we modify the contents to null-terminate all
-	 * strings before testing them.
-	 */
-
-	term = *cur_end;
-	*cur_end = '\0';
-
-	if (regexec(exp->preg, cur_ptr, MAX_MATCH, pmatch, 0) == 0) {
+	if (regex_exec_match2(exp->preg, cur_ptr, cur_end-cur_ptr, MAX_MATCH, pmatch)) {
 		switch (exp->action) {
 		case ACT_SETBE:
 			/* It is not possible to jump a second time.
@@ -7067,7 +6950,6 @@ int apply_filter_to_req_line(struct session *s, struct channel *req, struct hdr_
 			break;
 
 		case ACT_REPLACE:
-			*cur_end = term; /* restore the string terminator */
 			trash.len = exp_replace(trash.str, trash.size, cur_ptr, exp->replace, pmatch);
 			if (trash.len < 0)
 				return -1;
@@ -7096,7 +6978,6 @@ int apply_filter_to_req_line(struct session *s, struct channel *req, struct hdr_
 			return 1;
 		}
 	}
-	*cur_end = term; /* restore the string terminator */
 	return done;
 }
 
@@ -7766,7 +7647,6 @@ void manage_client_side_cookies(struct session *s, struct channel *req)
  */
 int apply_filter_to_resp_headers(struct session *s, struct channel *rtr, struct hdr_exp *exp)
 {
-	char term;
 	char *cur_ptr, *cur_end, *cur_next;
 	int cur_idx, old_idx, last_hdr;
 	struct http_txn *txn = &s->txn;
@@ -7799,15 +7679,7 @@ int apply_filter_to_resp_headers(struct session *s, struct channel *rtr, struct 
 		 * and the next header starts at cur_next.
 		 */
 
-		/* The annoying part is that pattern matching needs
-		 * that we modify the contents to null-terminate all
-		 * strings before testing them.
-		 */
-
-		term = *cur_end;
-		*cur_end = '\0';
-
-		if (regexec(exp->preg, cur_ptr, MAX_MATCH, pmatch, 0) == 0) {
+		if (regex_exec_match2(exp->preg, cur_ptr, cur_end-cur_ptr, MAX_MATCH, pmatch)) {
 			switch (exp->action) {
 			case ACT_ALLOW:
 				txn->flags |= TX_SVALLOW;
@@ -7850,8 +7722,6 @@ int apply_filter_to_resp_headers(struct session *s, struct channel *rtr, struct 
 
 			}
 		}
-		if (cur_end)
-			*cur_end = term; /* restore the string terminator */
 
 		/* keep the link from this header to next one in case of later
 		 * removal of next header.
@@ -7868,7 +7738,6 @@ int apply_filter_to_resp_headers(struct session *s, struct channel *rtr, struct 
  */
 int apply_filter_to_sts_line(struct session *s, struct channel *rtr, struct hdr_exp *exp)
 {
-	char term;
 	char *cur_ptr, *cur_end;
 	int done;
 	struct http_txn *txn = &s->txn;
@@ -7891,15 +7760,7 @@ int apply_filter_to_sts_line(struct session *s, struct channel *rtr, struct hdr_
 
 	/* Now we have the status line between cur_ptr and cur_end */
 
-	/* The annoying part is that pattern matching needs
-	 * that we modify the contents to null-terminate all
-	 * strings before testing them.
-	 */
-
-	term = *cur_end;
-	*cur_end = '\0';
-
-	if (regexec(exp->preg, cur_ptr, MAX_MATCH, pmatch, 0) == 0) {
+	if (regex_exec_match2(exp->preg, cur_ptr, cur_end-cur_ptr, MAX_MATCH, pmatch)) {
 		switch (exp->action) {
 		case ACT_ALLOW:
 			txn->flags |= TX_SVALLOW;
@@ -7912,7 +7773,6 @@ int apply_filter_to_sts_line(struct session *s, struct channel *rtr, struct hdr_
 			break;
 
 		case ACT_REPLACE:
-			*cur_end = term; /* restore the string terminator */
 			trash.len = exp_replace(trash.str, trash.size, cur_ptr, exp->replace, pmatch);
 			if (trash.len < 0)
 				return -1;
@@ -7941,7 +7801,6 @@ int apply_filter_to_sts_line(struct session *s, struct channel *rtr, struct hdr_
 			return 1;
 		}
 	}
-	*cur_end = term; /* restore the string terminator */
 	return done;
 }
 
@@ -8895,21 +8754,13 @@ void http_reset_txn(struct session *s)
 	s->rep->analyse_exp = TICK_ETERNITY;
 }
 
-static inline void free_regex(regex_t* re)
-{
-	if (re) {
-		regfree(re);
-		free(re);
-	}
-}
-
 void free_http_res_rules(struct list *r)
 {
 	struct http_res_rule *tr, *pr;
 
 	list_for_each_entry_safe(pr, tr, r, list) {
 		LIST_DEL(&pr->list);
-		free_regex(pr->arg.hdr_add.re);
+		regex_free(&pr->arg.hdr_add.re);
 		free(pr);
 	}
 }
@@ -8923,7 +8774,7 @@ void free_http_req_rules(struct list *r)
 		if (pr->action == HTTP_REQ_ACT_AUTH)
 			free(pr->arg.auth.realm);
 
-		free_regex(pr->arg.hdr_add.re);
+		regex_free(&pr->arg.hdr_add.re);
 		free(pr);
 	}
 }
@@ -8934,6 +8785,7 @@ struct http_req_rule *parse_http_req_cond(const char **args, const char *file, i
 	struct http_req_rule *rule;
 	struct http_req_action_kw *custom = NULL;
 	int cur_arg;
+	char *error;
 
 	rule = (struct http_req_rule*)calloc(1, sizeof(struct http_req_rule));
 	if (!rule) {
@@ -9081,14 +8933,11 @@ struct http_req_rule *parse_http_req_cond(const char **args, const char *file, i
 		rule->arg.hdr_add.name_len = strlen(rule->arg.hdr_add.name);
 		LIST_INIT(&rule->arg.hdr_add.fmt);
 
-		if (!(rule->arg.hdr_add.re = calloc(1, sizeof(*rule->arg.hdr_add.re)))) {
-			Alert("parsing [%s:%d]: out of memory.\n", file, linenum);
-			goto out_err;
-		}
-
-		if (regcomp(rule->arg.hdr_add.re, args[cur_arg + 1], REG_EXTENDED)) {
-			Alert("parsing [%s:%d] : '%s' : bad regular expression.\n", file, linenum,
-			      args[cur_arg + 1]);
+		error = NULL;
+		if (!regex_comp(args[cur_arg + 1], &rule->arg.hdr_add.re, 1, 1, &error)) {
+			Alert("parsing [%s:%d] : '%s' : %s.\n", file, linenum,
+			      args[cur_arg + 1], error);
+			free(error);
 			goto out_err;
 		}
 
@@ -9303,6 +9152,7 @@ struct http_res_rule *parse_http_res_cond(const char **args, const char *file, i
 	struct http_res_rule *rule;
 	struct http_res_action_kw *custom = NULL;
 	int cur_arg;
+	char *error;
 
 	rule = calloc(1, sizeof(*rule));
 	if (!rule) {
@@ -9435,14 +9285,11 @@ struct http_res_rule *parse_http_res_cond(const char **args, const char *file, i
 		rule->arg.hdr_add.name_len = strlen(rule->arg.hdr_add.name);
 		LIST_INIT(&rule->arg.hdr_add.fmt);
 
-		if (!(rule->arg.hdr_add.re = calloc(1, sizeof(*rule->arg.hdr_add.re)))) {
-			Alert("parsing [%s:%d]: out of memory.\n", file, linenum);
-			goto out_err;
-		}
-
-		if (regcomp(rule->arg.hdr_add.re, args[cur_arg + 1], REG_EXTENDED)) {
-			Alert("parsing [%s:%d] : '%s' : bad regular expression.\n", file, linenum,
-			      args[cur_arg + 1]);
+		error = NULL;
+		if (!regex_comp(args[cur_arg + 1], &rule->arg.hdr_add.re, 1, 1, &error)) {
+			Alert("parsing [%s:%d] : '%s' : %s.\n", file, linenum,
+			      args[cur_arg + 1], error);
+			free(error);
 			goto out_err;
 		}
 

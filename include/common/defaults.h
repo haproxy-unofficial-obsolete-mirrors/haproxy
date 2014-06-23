@@ -128,6 +128,7 @@
 #define DEF_AGENT_FALLTIME    1
 #define DEF_AGENT_RISETIME    1
 #define DEF_CHECK_REQ   "OPTIONS / HTTP/1.0\r\n"
+#define DEF_CHECK_PATH  ""
 #define DEF_SMTP_CHECK_REQ   "HELO localhost\r\n"
 #define DEF_LDAP_CHECK_REQ   "\x30\x0c\x02\x01\x01\x60\x07\x02\x01\x03\x04\x00\x80\x00"
 #define DEF_REDIS_CHECK_REQ  "*1\r\n$4\r\nPING\r\n"
@@ -230,4 +231,12 @@
 #define TIME_STATS_SAMPLES 512
 #endif
 
+/* max ocsp cert id asn1 encoded length */
+#ifndef OCSP_MAX_CERTID_ASN1_LENGTH
+#define OCSP_MAX_CERTID_ASN1_LENGTH 128
+#endif
+
+#ifndef OCSP_MAX_RESPONSE_TIME_SKEW
+#define OCSP_MAX_RESPONSE_TIME_SKEW 300
+#endif
 #endif /* _COMMON_DEFAULTS_H */

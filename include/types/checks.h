@@ -73,6 +73,10 @@ enum {
 	HCHK_STATUS_L7OKCD,		/* L7 check conditionally passed */
 	HCHK_STATUS_L7STS,		/* L7 response error, for example HTTP 5xx */
 
+	HCHK_STATUS_PROCERR,		/* External process check failure */
+	HCHK_STATUS_PROCTOUT,		/* External process check timeout */
+	HCHK_STATUS_PROCOK,		/* External process check passed */
+
 	HCHK_STATUS_SIZE
 };
 
@@ -145,6 +149,9 @@ struct check {
 	int rise, fall;				/* time in iterations */
 	int type;				/* Check type, one of PR_O2_*_CHK */
 	struct server *server;			/* back-pointer to server */
+	char **argv;				/* the arguments to use if running a process-based check */
+	char **envp;				/* the environment to use if running a process-based check */
+	struct pid_list *curpid;		/* entry in pid_list used for current process-based test, or -1 if not in test */
 };
 
 struct check_status {
@@ -177,7 +184,7 @@ struct tcpcheck_rule {
 	/* sent string is string */
 	char *string;                           /* sent or expected string */
 	int string_len;                         /* string lenght */
-	regex_t *expect_regex;                  /* expected */
+	struct my_regex *expect_regex;          /* expected */
 	int inverse;                            /* 0 = regular match, 1 = inverse match */
 	unsigned short port;                    /* port to connect to */
 	unsigned short conn_opts;               /* options when setting up a new connection */
