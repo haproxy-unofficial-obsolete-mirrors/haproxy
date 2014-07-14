@@ -565,7 +565,7 @@ group <group name>
   Similar to "gid" but uses the GID of group name <group name> from /etc/group.
   See also "gid" and "user".
 
-log <address> <facility> [max level [min level]]
+log <address> [len <length>] <facility> [max level [min level]]
   Adds a global syslog server. Up to two global servers can be defined. They
   will receive logs for startups and exits, as well as all logs from proxies
   configured with "log global".
@@ -589,6 +589,18 @@ log <address> <facility> [max level [min level]]
         variables by preceding their name with a dollar sign ('$') and
         optionally enclosing them with braces ('{}'), similarly to what is done
         in Bourne shell.
+
+  <length> is an optional maximum line length. Log lines larger than this value
+           will be truncated before being sent. The reason is that syslog
+           servers act differently on log line length. All servers support the
+           default value of 1024, but some servers simply drop larger lines
+           while others do log them. If a server supports long lines, it may
+           make sense to set this value here in order to avoid truncating long
+           lines. Similarly, if a server drops long lines, it is preferable to
+           truncate them before sending them. Accepted values are 80 to 65535
+           inclusive. The default value of 1024 is generally fine for all
+           standard usages. Some specific cases of long captures or
+           JSON-formated logs may require larger values.
 
   <facility> must be one of the 24 standard syslog facilities :
 
@@ -1788,7 +1800,13 @@ bind /<path> [, ...] [param*]
                     - 'ipv4@'  -> address is always IPv4
                     - 'ipv6@'  -> address is always IPv6
                     - 'unix@'  -> address is a path to a local unix socket
-                    - 'abns@'  -> address is in abstract namespace (Linux only)
+                    - 'abns@'  -> address is in abstract namespace (Linux only).
+                      Note: since abstract sockets are not "rebindable", they
+                            do not cope well with multi-process mode during
+                            soft-restart, so it is better to avoid them if
+                            nbproc is greater than 1. The effect is that if the
+                            new process fails to start, only one of the old ones
+                            will be able to rebind to the socket.
                     - 'fd@<n>' -> use file descriptor <n> inherited from the
                       parent. The fd must be bound and may or may not already
                       be listening.
@@ -2140,7 +2158,8 @@ compression offload
   invalid payloads. In this case, simply removing the header in the
   configuration does not work because it applies before the header is parsed,
   so that prevents haproxy from compressing. The "offload" setting should
-  then be used for such scenarios.
+  then be used for such scenarios. Note: for now, the "offload" setting is
+  ignored when set in a defaults section.
 
   Compression is disabled when:
     * the request does not advertise a supported compression algorithm in the
@@ -3358,7 +3377,7 @@ ignore-persist { if | unless } <condition>
 
 
 log global
-log <address> <facility> [<level> [<minlevel>]]
+log <address> [len <length>] <facility> [<level> [<minlevel>]]
 no log
   Enable per-instance logging of events and traffic.
   May be used in sections :   defaults | frontend | listen | backend
@@ -3397,6 +3416,18 @@ no log
                environment variables by preceding their name with a dollar
                sign ('$') and optionally enclosing them with braces ('{}'),
                similarly to what is done in Bourne shell.
+
+    <length>   is an optional maximum line length. Log lines larger than this
+               value will be truncated before being sent. The reason is that
+               syslog servers act differently on log line length. All servers
+               support the default value of 1024, but some servers simply drop
+               larger lines while others do log them. If a server supports long
+               lines, it may make sense to set this value here in order to avoid
+               truncating long lines. Similarly, if a server drops long lines,
+               it is preferable to truncate them before sending them. Accepted
+               values are 80 to 65535 inclusive. The default value of 1024 is
+               generally fine for all standard usages. Some specific cases of
+               long captures or JSON-formated logs may require larger values.
 
     <facility> must be one of the 24 standard syslog facilities :
 
@@ -9928,27 +9959,11 @@ base64
   transfer binary content in a way that can be reliably transferred (eg:
   an SSL ID can be copied in a header).
 
-lower
-  Convert a string sample to lower case. This can only be placed after a string
-  sample fetch function or after a transformation keyword returning a string
-  type. The result is of type string.
-
-upper
-  Convert a string sample to upper case. This can only be placed after a string
-  sample fetch function or after a transformation keyword returning a string
-  type. The result is of type string.
-
 hex
   Converts a binary input sample to an hex string containing two hex digits per
   input byte. It is used to log or transfer hex dumps of some binary input data
   in a way that can be reliably transferred (eg: an SSL ID can be copied in a
   header).
-
-ipmask(<mask>)
-  Apply a mask to an IPv4 address, and use the result for lookups and storage.
-  This can be used to make all hosts within a certain mask to share the same
-  table entries and as such use the same server. The mask can be passed in
-  dotted form (eg: 255.255.255.0) or in CIDR form (eg: 24).
 
 http_date([<offset>])
   Converts an integer supposed to contain a date since epoch to a string
@@ -9957,6 +9972,19 @@ http_date([<offset>])
   the date before the conversion is operated. This is particularly useful to
   emit Date header fields, Expires values in responses when combined with a
   positive offset, or Last-Modified values when the offset is negative.
+
+in_table(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, a boolean false
+  is returned. Otherwise a boolean true is returned. This can be used to verify
+  the presence of a certain key in a table tracking some elements (eg: whether
+  or not a source IP address or an Authorization header was already seen).
+
+ipmask(<mask>)
+  Apply a mask to an IPv4 address, and use the result for lookups and storage.
+  This can be used to make all hosts within a certain mask to share the same
+  table entries and as such use the same server. The mask can be passed in
+  dotted form (eg: 255.255.255.0) or in CIDR form (eg: 24).
 
 language(<value>[,<default>])
   Returns the value with the highest q-factor from a list as extracted from the
@@ -9984,6 +10012,25 @@ language(<value>[,<default>])
     use_backend french  if fr
     use_backend english if en
     default_backend choose_your_language
+
+lower
+  Convert a string sample to lower case. This can only be placed after a string
+  sample fetch function or after a transformation keyword returning a string
+  type. The result is of type string.
+
+ltime(<format>[,<offset>])
+  Converts an integer supposed to contain a date since epoch to a string
+  representing this date in local time using a format defined by the <format>
+  string using strftime(3). The purpose is to allow any date format to be used
+  in logs. An optional <offset> in seconds may be applied to the input date
+  (positive or negative). See the strftime() man page for the format supported
+  by your operating system. See also the utime converter.
+
+  Example :
+
+      # Emit two colons, one with the local time and another with ip:port
+      # Eg:  20140710162350 127.0.0.1:57325
+      log-format %[date,ltime(%Y%m%d%H%M%S)]\ %ci:%cp
 
 map(<map_file>[,<default_value>])
 map_<match_type>(<map_file>[,<default_value>])
@@ -10041,6 +10088,164 @@ map_<match_type>_<output_type>(<map_file>[,<default_value>])
       |       |       `-------------------- middle spaces ignored
       |       `---------------------------- key
       `------------------------------------ leading spaces ignored
+
+table_bytes_in_rate(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, integer value zero
+  is returned. Otherwise the converter returns the average client-to-server
+  bytes rate associated with the input sample in the designated table, measured
+  in amount of bytes over the period configured in the table. See also the
+  sc_bytes_in_rate sample fetch keyword.
+
+
+table_bytes_out_rate(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, integer value zero
+  is returned. Otherwise the converter returns the average server-to-client
+  bytes rate associated with the input sample in the designated table, measured
+  in amount of bytes over the period configured in the table. See also the
+  sc_bytes_out_rate sample fetch keyword.
+
+table_conn_cnt(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, integer value zero
+  is returned. Otherwise the converter returns the cumulated amount of incoming
+  connections associated with the input sample in the designated table. See
+  also the sc_conn_cnt sample fetch keyword.
+
+table_conn_cur(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, integer value zero
+  is returned. Otherwise the converter returns the current amount of concurrent
+  tracked connections associated with the input sample in the designated table.
+  See also the sc_conn_cur sample fetch keyword.
+
+table_conn_rate(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, integer value zero
+  is returned. Otherwise the converter returns the average incoming connection
+  rate associated with the input sample in the designated table. See also the
+  sc_conn_rate sample fetch keyword.
+
+table_gpc0(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, integer value zero
+  is returned. Otherwise the converter returns the current value of the first
+  general purpose counter associated with the input sample in the designated
+  table. See also the sc_get_gpc0 sample fetch keyword.
+
+table_gpc0_rate(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, integer value zero
+  is returned. Otherwise the converter returns the frequency which the gpc0
+  counter was incremented over the configured period in the table, associated
+  with the input sample in the designated table. See also the sc_get_gpc0_rate
+  sample fetch keyword.
+
+table_http_err_cnt(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, integer value zero
+  is returned. Otherwise the converter returns the cumulated amount of HTTP
+  errors associated with the input sample in the designated table. See also the
+  sc_http_err_cnt sample fetch keyword.
+
+table_http_err_rate(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, integer value zero
+  is returned. Otherwise the average rate of HTTP errors associated with the
+  input sample in the designated table, measured in amount of errors over the
+  period configured in the table. See also the sc_http_err_rate sample fetch
+  keyword.
+
+table_http_req_cnt(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, integer value zero
+  is returned. Otherwise the converter returns the cumulated amount of HTTP
+  requests associated with the input sample in the designated table. See also
+  the sc_http_req_cnt sample fetch keyword.
+
+table_http_req_rate(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, integer value zero
+  is returned. Otherwise the average rate of HTTP requests associated with the
+  input sample in the designated table, measured in amount of requests over the
+  period configured in the table. See also the sc_http_req_rate sample fetch
+  keyword.
+
+table_kbytes_in(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, integer value zero
+  is returned. Otherwise the converter returns the cumulated amount of client-
+  to-server data associated with the input sample in the designated table,
+  measured in kilobytes. The test is currently performed on 32-bit integers,
+  which limits values to 4 terabytes. See also the sc_kbytes_in sample fetch
+  keyword.
+
+table_kbytes_out(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, integer value zero
+  is returned. Otherwise the converter returns the cumulated amount of server-
+  to-client data associated with the input sample in the designated table,
+  measured in kilobytes. The test is currently performed on 32-bit integers,
+  which limits values to 4 terabytes. See also the sc_kbytes_out sample fetch
+  keyword.
+
+table_server_id(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, integer value zero
+  is returned. Otherwise the converter returns the server ID associated with
+  the input sample in the designated table. A server ID is associated to a
+  sample by a "stick" rule when a connection to a server succeeds. A server ID
+  zero means that no server is associated with this key.
+
+table_sess_cnt(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, integer value zero
+  is returned. Otherwise the converter returns the cumulated amount of incoming
+  sessions associated with the input sample in the designated table. Note that
+  a session here refers to an incoming connection being accepted by the
+  "tcp-request connection" rulesets. See also the sc_sess_cnt sample fetch
+  keyword.
+
+table_sess_rate(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, integer value zero
+  is returned. Otherwise the converter returns the average incoming session
+  rate associated with the input sample in the designated table. Note that a
+  session here refers to an incoming connection being accepted by the
+  "tcp-request connection" rulesets. See also the sc_sess_rate sample fetch
+  keyword.
+
+table_trackers(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, integer value zero
+  is returned. Otherwise the converter returns the current amount of concurrent
+  connections tracking the same key as the input sample in the designated
+  table. It differs from table_conn_cur in that it does not rely on any stored
+  information but on the table's reference count (the "use" value which is
+  returned by "show table" on the CLI). This may sometimes be more suited for
+  layer7 tracking. It can be used to tell a server how many concurrent
+  connections there are from a given address for example. See also the
+  sc_trackers sample fetch keyword.
+
+upper
+  Convert a string sample to upper case. This can only be placed after a string
+  sample fetch function or after a transformation keyword returning a string
+  type. The result is of type string.
+
+utime(<format>[,<offset>])
+  Converts an integer supposed to contain a date since epoch to a string
+  representing this date in UTC time using a format defined by the <format>
+  string using strftime(3). The purpose is to allow any date format to be used
+  in logs. An optional <offset> in seconds may be applied to the input date
+  (positive or negative). See the strftime() man page for the format supported
+  by your operating system. See also the ltime converter.
+
+  Example :
+
+      # Emit two colons, one with the UTC time and another with ip:port
+      # Eg:  20140710162350 127.0.0.1:57325
+      log-format %[date,utime(%Y%m%d%H%M%S)]\ %ci:%cp
 
 
 7.3.2. Fetching samples from internal states
@@ -10427,19 +10632,17 @@ sc_kbytes_in(<ctr>[,<table>]) : integer
 sc0_kbytes_in([<table>]) : integer
 sc1_kbytes_in([<table>]) : integer
 sc2_kbytes_in([<table>]) : integer
-  Returns the amount of client-to-server data from the currently tracked
-  counters, measured in kilobytes over the period configured in the table. The
-  test is currently performed on 32-bit integers, which limits values to 4
-  terabytes. See also src_kbytes_in.
+  Returns the total amount of client-to-server data from the currently tracked
+  counters, measured in kilobytes. The test is currently performed on 32-bit
+  integers, which limits values to 4 terabytes. See also src_kbytes_in.
 
 sc_kbytes_out(<ctr>[,<table>]) : integer
 sc0_kbytes_out([<table>]) : integer
 sc1_kbytes_out([<table>]) : integer
 sc2_kbytes_out([<table>]) : integer
-  Returns the amount of server-to-client data from the currently tracked
-  counters, measured in kilobytes over the period configured in the table. The
-  test is currently performed on 32-bit integers, which limits values to 4
-  terabytes. See also src_kbytes_out.
+  Returns the total amount of server-to-client data from the currently tracked
+  counters, measured in kilobytes. The test is currently performed on 32-bit
+  integers, which limits values to 4 terabytes. See also src_kbytes_out.
 
 sc_sess_cnt(<ctr>[,<table>]) : integer
 sc0_sess_cnt([<table>]) : integer
@@ -10603,19 +10806,18 @@ src_inc_gpc0([<table>]) : integer
         tcp-request connection reject if abuse kill
 
 src_kbytes_in([<table>]) : integer
-  Returns the amount of data received from the incoming connection's source
-  address in the current proxy's stick-table or in the designated stick-table,
-  measured in kilobytes over the period configured in the table. If the address
-  is not found, zero is returned. The test is currently performed on 32-bit
-  integers, which limits values to 4 terabytes. See also
-  sc/sc0/sc1/sc2_kbytes_in.
+  Returns the total amount of data received from the incoming connection's
+  source address in the current proxy's stick-table or in the designated
+  stick-table, measured in kilobytes. If the address is not found, zero is
+  returned. The test is currently performed on 32-bit integers, which limits
+  values to 4 terabytes. See also sc/sc0/sc1/sc2_kbytes_in.
 
 src_kbytes_out([<table>]) : integer
-  Returns the amount of data sent to the incoming connection's source address
-  in the current proxy's stick-table or in the designated stick-table, measured
-  in kilobytes over the period configured in the table. If the address is not
-  found, zero is returned. The test is currently performed on 32-bit integers,
-  which limits values to 4 terabytes. See also sc/sc0/sc1/sc2_kbytes_out.
+  Returns the total amount of data sent to the incoming connection's source
+  address in the current proxy's stick-table or in the designated stick-table,
+  measured in kilobytes. If the address is not found, zero is returned. The
+  test is currently performed on 32-bit integers, which limits values to 4
+  terabytes. See also sc/sc0/sc1/sc2_kbytes_out.
 
 src_port : integer
   Returns an integer value corresponding to the TCP source port of the
@@ -10769,6 +10971,10 @@ ssl_c_sha1 : binary
   Returns the SHA-1 fingerprint of the certificate presented by the client when
   the incoming connection was made over an SSL/TLS transport layer. This can be
   used to stick a client to a server, or to pass this information to a server.
+  Note that the output is binary, so if you want to pass that signature to the
+  server, you need to encode it in hex or base64, such as in the example below:
+
+     http-request set-header X-SSL-Client-SHA1 %[ssl_c_sha1,hex]
 
 ssl_c_sig_alg : string
   Returns the name of the algorithm used to sign the certificate presented by
@@ -13112,44 +13318,76 @@ text is doubled ('""'), which is the format that most tools recognize. Please
 do not insert any column before these ones in order not to break tools which
 use hard-coded column positions.
 
-  0. pxname: proxy name
-  1. svname: service name (FRONTEND for frontend, BACKEND for backend, any name
-    for server)
-  2. qcur: current queued requests
-  3. qmax: max queued requests
-  4. scur: current sessions
-  5. smax: max sessions
-  6. slim: sessions limit
-  7. stot: total sessions
-  8. bin: bytes in
-  9. bout: bytes out
- 10. dreq: denied requests
- 11. dresp: denied responses
- 12. ereq: request errors
- 13. econ: connection errors
- 14. eresp: response errors (among which srv_abrt)
- 15. wretr: retries (warning)
- 16. wredis: redispatches (warning)
- 17. status: status (UP/DOWN/NOLB/MAINT/MAINT(via)...)
- 18. weight: server weight (server), total weight (backend)
- 19. act: server is active (server), number of active servers (backend)
- 20. bck: server is backup (server), number of backup servers (backend)
- 21. chkfail: number of failed checks
- 22. chkdown: number of UP->DOWN transitions
- 23. lastchg: last status change (in seconds)
- 24. downtime: total downtime (in seconds)
- 25. qlimit: queue limit
- 26. pid: process id (0 for first instance, 1 for second, ...)
- 27. iid: unique proxy id
- 28. sid: service id (unique inside a proxy)
- 29. throttle: warm up status
- 30. lbtot: total number of times a server was selected
- 31. tracked: id of proxy/server if tracking is enabled
- 32. type (0=frontend, 1=backend, 2=server, 3=socket)
- 33. rate: number of sessions per second over last elapsed second
- 34. rate_lim: limit on new sessions per second
- 35. rate_max: max number of new sessions per second
- 36. check_status: status of last health check, one of:
+In brackets after each field name are the types which may have a value for
+that field. The types are L (Listeners), F (Frontends), B (Backends), and
+S (Servers).
+
+  0. pxname [LFBS]: proxy name
+  1. svname [LFBS]: service name (FRONTEND for frontend, BACKEND for backend,
+     any name for server/listener)
+  2. qcur [..BS]: current queued requests. For the backend this reports the
+     number queued without a server assigned.
+  3. qmax [..BS]: max value of qcur
+  4. scur [LFBS]: current sessions
+  5. smax [LFBS]: max sessions
+  6. slim [LFBS]: configured session limit
+  7. stot [LFBS]: cumulative number of connections
+  8. bin [LFBS]: bytes in
+  9. bout [LFBS]: bytes out
+ 10. dreq [LFB.]: requests denied because of security concerns.
+     - For tcp this is because of a matched tcp-request content rule.
+     - For http this is because of a matched http-request or tarpit rule.
+ 11. dresp [LFBS]: responses denied because of security concerns.
+     - For http this is because of a matched http-request rule, or
+       "option checkcache".
+ 12. ereq [LF..]: request errors. Some of the possible causes are:
+     - early termination from the client, before the request has been sent.
+     - read error from the client
+     - client timeout
+     - client closed connection
+     - various bad requests from the client.
+     - request was tarpitted.
+ 13. econ [..BS]: number of requests that encountered an error trying to
+     connect to a backend server. The backend stat is the sum of the stat
+     for all servers of that backend, plus any connection errors not
+     associated with a particular server (such as the backend having no
+     active servers).
+ 14. eresp [..BS]: response errors. srv_abrt will be counted here also.
+     Some other errors are:
+     - write error on the client socket (won't be counted for the server stat)
+     - failure applying filters to the response.
+ 15. wretr [..BS]: number of times a connection to a server was retried.
+ 16. wredis [..BS]: number of times a request was redispatched to another
+     server. The server value counts the number of times that server was
+     switched away from.
+ 17. status [LFBS]: status (UP/DOWN/NOLB/MAINT/MAINT(via)...)
+ 18. weight [..BS]: server weight (server), total weight (backend)
+ 19. act [..BS]: server is active (server), number of active servers (backend)
+ 20. bck [..BS]: server is backup (server), number of backup servers (backend)
+ 21. chkfail [...S]: number of failed checks. (Only counts checks failed when
+     the server is up.)
+ 22. chkdown [..BS]: number of UP->DOWN transitions. The backend counter counts
+     transitions to the whole backend being down, rather than the sum of the
+     counters for each server.
+ 23. lastchg [..BS]: number of seconds since the last UP<->DOWN transition
+ 24. downtime [..BS]: total downtime (in seconds). The value for the backend
+     is the downtime for the whole backend, not the sum of the server downtime.
+ 25. qlimit [...S]: configured maxqueue for the server, or nothing in the
+     value is 0 (default, meaning no limit)
+ 26. pid [LFBS]: process id (0 for first instance, 1 for second, ...)
+ 27. iid [LFBS]: unique proxy id
+ 28. sid [L..S]: server id (unique inside a proxy)
+ 29. throttle [...S]: current throttle percentage for the server, when
+     slowstart is active, or no value if not in slowstart.
+ 30. lbtot [..BS]: total number of times a server was selected, either for new
+     sessions, or when re-dispatching. The server counter is the number
+     of times that server was selected.
+ 31. tracked [...S]: id of proxy/server if tracking is enabled.
+ 32. type [LFBS]: (0=frontend, 1=backend, 2=server, 3=socket/listener)
+ 33. rate [.FBS]: number of sessions per second over last elapsed second
+ 34. rate_lim [.F..]: configured limit on new sessions per second
+ 35. rate_max [.FBS]: max number of new sessions per second
+ 36. check_status [...S]: status of last health check, one of:
         UNK     -> unknown
         INI     -> initializing
         SOCKERR -> socket error
@@ -13166,31 +13404,36 @@ use hard-coded column positions.
         L7TOUT  -> layer 7 (HTTP/SMTP) timeout
         L7RSP   -> layer 7 invalid response - protocol error
         L7STS   -> layer 7 response error, for example HTTP 5xx
- 37. check_code: layer5-7 code, if available
- 38. check_duration: time in ms took to finish last health check
- 39. hrsp_1xx: http responses with 1xx code
- 40. hrsp_2xx: http responses with 2xx code
- 41. hrsp_3xx: http responses with 3xx code
- 42. hrsp_4xx: http responses with 4xx code
- 43. hrsp_5xx: http responses with 5xx code
- 44. hrsp_other: http responses with other codes (protocol error)
- 45. hanafail: failed health checks details
- 46. req_rate: HTTP requests per second over last elapsed second
- 47. req_rate_max: max number of HTTP requests per second observed
- 48. req_tot: total number of HTTP requests received
- 49. cli_abrt: number of data transfers aborted by the client
- 50. srv_abrt: number of data transfers aborted by the server (inc. in eresp)
- 51. comp_in: number of HTTP response bytes fed to the compressor
- 52. comp_out: number of HTTP response bytes emitted by the compressor
- 53. comp_byp: number of bytes that bypassed the HTTP compressor (CPU/BW limit)
- 54. comp_rsp: number of HTTP responses that were compressed
- 55. lastsess: number of seconds since last session assigned to server/backend
- 56. last_chk: last health check contents or textual error
- 57. last_agt: last agent check contents or textual error
- 58. qtime: the average queue time in ms over the 1024 last requests
- 59. ctime: the average connect time in ms over the 1024 last requests
- 60. rtime: the average response time in ms over the 1024 last requests (0 for TCP)
- 61. ttime: the average total session time in ms over the 1024 last requests
+ 37. check_code [...S]: layer5-7 code, if available
+ 38. check_duration [...S]: time in ms took to finish last health check
+ 39. hrsp_1xx [.FBS]: http responses with 1xx code
+ 40. hrsp_2xx [.FBS]: http responses with 2xx code
+ 41. hrsp_3xx [.FBS]: http responses with 3xx code
+ 42. hrsp_4xx [.FBS]: http responses with 4xx code
+ 43. hrsp_5xx [.FBS]: http responses with 5xx code
+ 44. hrsp_other [.FBS]: http responses with other codes (protocol error)
+ 45. hanafail [...S]: failed health checks details
+ 46. req_rate [.F..]: HTTP requests per second over last elapsed second
+ 47. req_rate_max [.F..]: max number of HTTP requests per second observed
+ 48. req_tot [.F..]: total number of HTTP requests received
+ 49. cli_abrt [..BS]: number of data transfers aborted by the client
+ 50. srv_abrt [..BS]: number of data transfers aborted by the server
+     (inc. in eresp)
+ 51. comp_in [.FB.]: number of HTTP response bytes fed to the compressor
+ 52. comp_out [.FB.]: number of HTTP response bytes emitted by the compressor
+ 53. comp_byp [.FB.]: number of bytes that bypassed the HTTP compressor
+     (CPU/BW limit)
+ 54. comp_rsp [.FB.]: number of HTTP responses that were compressed
+ 55. lastsess [..BS]: number of seconds since last session assigned to
+     server/backend
+ 56. last_chk [...S]: last health check contents or textual error
+ 57. last_agt [...S]: last agent check contents or textual error
+ 58. qtime [..BS]: the average queue time in ms over the 1024 last requests
+ 59. ctime [..BS]: the average connect time in ms over the 1024 last requests
+ 60. rtime [..BS]: the average response time in ms over the 1024 last requests
+     (0 for TCP)
+ 61. ttime [..BS]: the average total session time in ms over the 1024 last
+     requests
 
 
 9.2. Unix Socket commands
@@ -13871,7 +14114,7 @@ shutdown session <id>
   endless transfer is ongoing. Such terminated sessions are reported with a 'K'
   flag in the logs.
 
-shutdown sessions <backend>/<server>
+shutdown sessions server <backend>/<server>
   Immediately terminate all the sessions attached to the specified server. This
   can be used to terminate long-running sessions after a server is put into
   maintenance mode, for instance. Such terminated sessions are reported with a

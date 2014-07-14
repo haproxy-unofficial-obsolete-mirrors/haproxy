@@ -28,7 +28,6 @@
 #include <common/config.h>
 #include <common/mini-clist.h>
 
-#define MAX_SYSLOG_LEN          1024
 #define NB_LOG_FACILITIES       24
 #define NB_LOG_LEVELS           8
 #define SYSLOG_PORT             514
@@ -153,6 +152,7 @@ struct logsrv {
 	int facility;
 	int level;
 	int minlvl;
+	int maxlen;
 };
 
 #endif /* _TYPES_LOG_H */

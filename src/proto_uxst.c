@@ -68,6 +68,7 @@ static struct protocol proto_unix = {
 	.disable_all = disable_all_listeners,
 	.get_src = uxst_get_src,
 	.get_dst = uxst_get_dst,
+	.pause = uxst_pause_listener,
 	.listeners = LIST_HEAD_INIT(proto_unix.listeners),
 	.nb_listeners = 0,
 };
@@ -166,8 +167,10 @@ static int uxst_bind_listener(struct listener *listener, char *errmsg, int errle
 	const char *path;
 	int ext, ready;
 	socklen_t ready_len;
-
+	int err;
 	int ret;
+
+	err = ERR_NONE;
 
 	/* ensure we never return garbage */
 	if (errlen)
@@ -191,29 +194,34 @@ static int uxst_bind_listener(struct listener *listener, char *errmsg, int errle
 	if (path[0]) {
 		ret = snprintf(tempname, MAXPATHLEN, "%s.%d.tmp", path, pid);
 		if (ret < 0 || ret >= MAXPATHLEN) {
+			err |= ERR_FATAL | ERR_ALERT;
 			msg = "name too long for UNIX socket";
 			goto err_return;
 		}
 
 		ret = snprintf(backname, MAXPATHLEN, "%s.%d.bak", path, pid);
 		if (ret < 0 || ret >= MAXPATHLEN) {
+			err |= ERR_FATAL | ERR_ALERT;
 			msg = "name too long for UNIX socket";
 			goto err_return;
 		}
 
 		/* 2. clean existing orphaned entries */
 		if (unlink(tempname) < 0 && errno != ENOENT) {
+			err |= ERR_FATAL | ERR_ALERT;
 			msg = "error when trying to unlink previous UNIX socket";
 			goto err_return;
 		}
 
 		if (unlink(backname) < 0 && errno != ENOENT) {
+			err |= ERR_FATAL | ERR_ALERT;
 			msg = "error when trying to unlink previous UNIX socket";
 			goto err_return;
 		}
 
 		/* 3. backup existing socket */
 		if (link(path, backname) < 0 && errno != ENOENT) {
+			err |= ERR_FATAL | ERR_ALERT;
 			msg = "error when trying to preserve previous UNIX socket";
 			goto err_return;
 		}
@@ -231,24 +239,35 @@ static int uxst_bind_listener(struct listener *listener, char *errmsg, int errle
 
 	fd = socket(PF_UNIX, SOCK_STREAM, 0);
 	if (fd < 0) {
+		err |= ERR_FATAL | ERR_ALERT;
 		msg = "cannot create UNIX socket";
 		goto err_unlink_back;
 	}
 
  fd_ready:
 	if (fd >= global.maxsock) {
+		err |= ERR_FATAL | ERR_ALERT;
 		msg = "socket(): not enough free sockets, raise -n argument";
 		goto err_unlink_temp;
 	}
 	
 	if (fcntl(fd, F_SETFL, O_NONBLOCK) == -1) {
+		err |= ERR_FATAL | ERR_ALERT;
 		msg = "cannot make UNIX socket non-blocking";
 		goto err_unlink_temp;
 	}
 	
 	if (!ext && bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 		/* note that bind() creates the socket <tempname> on the file system */
-		msg = "cannot bind UNIX socket";
+		if (errno == EADDRINUSE) {
+			/* the old process might still own it, let's retry */
+			err |= ERR_RETRYABLE | ERR_ALERT;
+			msg = "cannot listen to socket";
+		}
+		else {
+			err |= ERR_FATAL | ERR_ALERT;
+			msg = "cannot bind UNIX socket";
+		}
 		goto err_unlink_temp;
 	}
 
@@ -261,6 +280,7 @@ static int uxst_bind_listener(struct listener *listener, char *errmsg, int errle
 	    (((listener->bind_conf->ux.uid != -1 || listener->bind_conf->ux.gid != -1) &&
 	      (chown(tempname, listener->bind_conf->ux.uid, listener->bind_conf->ux.gid) == -1)) ||
 	     (listener->bind_conf->ux.mode != 0 && chmod(tempname, listener->bind_conf->ux.mode) == -1))) {
+		err |= ERR_FATAL | ERR_ALERT;
 		msg = "cannot change UNIX socket ownership";
 		goto err_unlink_temp;
 	}
@@ -272,6 +292,7 @@ static int uxst_bind_listener(struct listener *listener, char *errmsg, int errle
 
 	if (!(ext && ready) && /* only listen if not already done by external process */
 	    listen(fd, listener->backlog ? listener->backlog : listener->maxconn) < 0) {
+		err |= ERR_FATAL | ERR_ALERT;
 		msg = "cannot listen to UNIX socket";
 		goto err_unlink_temp;
 	}
@@ -281,6 +302,7 @@ static int uxst_bind_listener(struct listener *listener, char *errmsg, int errle
 	 * backname. Abstract sockets are not renamed.
 	 */
 	if (!ext && path[0] && rename(tempname, path) < 0) {
+		err |= ERR_FATAL | ERR_ALERT;
 		msg = "cannot switch final and temporary UNIX sockets";
 		goto err_rename;
 	}
@@ -303,17 +325,18 @@ static int uxst_bind_listener(struct listener *listener, char *errmsg, int errle
 	fd_insert(fd);
 	fdtab[fd].iocb = listener->proto->accept;
 	fdtab[fd].owner = listener; /* reference the listener instead of a task */
-	return ERR_NONE;
+	return err;
+
  err_rename:
 	ret = rename(backname, path);
 	if (ret < 0 && errno == ENOENT)
 		unlink(path);
  err_unlink_temp:
-	if (!ext)
+	if (!ext && path[0])
 		unlink(tempname);
 	close(fd);
  err_unlink_back:
-	if (!ext)
+	if (!ext && path[0])
 		unlink(backname);
  err_return:
 	if (msg && errlen) {
@@ -322,7 +345,7 @@ static int uxst_bind_listener(struct listener *listener, char *errmsg, int errle
 		else
 			snprintf(errmsg, errlen, "%s [fd %d]", msg, fd);
 	}
-	return ERR_FATAL | ERR_ALERT;
+	return err;
 }
 
 /* This function closes the UNIX sockets for the specified listener.
@@ -349,6 +372,20 @@ void uxst_add_listener(struct listener *listener)
 	listener->proto = &proto_unix;
 	LIST_ADDQ(&proto_unix.listeners, &listener->proto_list);
 	proto_unix.nb_listeners++;
+}
+
+/* Pause a listener. Returns < 0 in case of failure, 0 if the listener
+ * was totally stopped, or > 0 if correctly paused. Nothing is done for
+ * plain unix sockets since currently it's the new process which handles
+ * the renaming. Abstract sockets are completely unbound.
+ */
+int uxst_pause_listener(struct listener *l)
+{
+	if (((struct sockaddr_un *)&l->addr)->sun_path[0])
+		return 1;
+
+	unbind_listener(l);
+	return 0;
 }
 
 

@@ -905,7 +905,7 @@ struct sample *sample_process(struct proxy *px, struct session *l4, void *l7,
 
 	if (p == NULL) {
 		p = &temp_smp;
-		p->flags = 0;
+		memset(p, 0, sizeof(*p));
 	}
 
 	if (!expr->fetch->process(px, l4, l7, opt, expr->arg_p, p, expr->fetch->kw))
@@ -1160,7 +1160,8 @@ struct sample *sample_fetch_string(struct proxy *px, struct session *l4, void *l
 {
 	struct sample *smp = &temp_smp;
 
-	smp->flags = 0;
+	memset(smp, 0, sizeof(*smp));
+
 	if (!sample_process(px, l4, l7, opt, expr, smp)) {
 		if ((smp->flags & SMP_F_MAY_CHANGE) && !(opt & SMP_OPT_FINAL))
 			return smp;
@@ -1257,6 +1258,46 @@ static int sample_conv_ipmask(const struct arg *arg_p, struct sample *smp)
 {
 	smp->data.ipv4.s_addr &= arg_p->data.ipv4.s_addr;
 	smp->type = SMP_T_IPV4;
+	return 1;
+}
+
+/* takes an UINT value on input supposed to represent the time since EPOCH,
+ * adds an optional offset found in args[1] and emits a string representing
+ * the local time in the format specified in args[1] using strftime().
+ */
+static int sample_conv_ltime(const struct arg *args, struct sample *smp)
+{
+	struct chunk *temp;
+	time_t curr_date = smp->data.uint;
+
+	/* add offset */
+	if (args[1].type == ARGT_SINT || args[1].type == ARGT_UINT)
+		curr_date += args[1].data.sint;
+
+	temp = get_trash_chunk();
+	temp->len = strftime(temp->str, temp->size, args[0].data.str.str, localtime(&curr_date));
+	smp->data.str = *temp;
+	smp->type = SMP_T_STR;
+	return 1;
+}
+
+/* takes an UINT value on input supposed to represent the time since EPOCH,
+ * adds an optional offset found in args[1] and emits a string representing
+ * the UTC date in the format specified in args[1] using strftime().
+ */
+static int sample_conv_utime(const struct arg *args, struct sample *smp)
+{
+	struct chunk *temp;
+	time_t curr_date = smp->data.uint;
+
+	/* add offset */
+	if (args[1].type == ARGT_SINT || args[1].type == ARGT_UINT)
+		curr_date += args[1].data.sint;
+
+	temp = get_trash_chunk();
+	temp->len = strftime(temp->str, temp->size, args[0].data.str.str, gmtime(&curr_date));
+	smp->data.str = *temp;
+	smp->type = SMP_T_STR;
 	return 1;
 }
 
@@ -1362,6 +1403,8 @@ static struct sample_conv_kw_list sample_conv_kws = {ILH, {
 	{ "lower",  sample_conv_str2lower, 0,            NULL, SMP_T_STR,  SMP_T_STR  },
 	{ "hex",    sample_conv_bin2hex,   0,            NULL, SMP_T_BIN,  SMP_T_STR  },
 	{ "ipmask", sample_conv_ipmask,    ARG1(1,MSK4), NULL, SMP_T_IPV4, SMP_T_IPV4 },
+	{ "ltime",  sample_conv_ltime,     ARG2(1,STR,SINT), NULL, SMP_T_UINT, SMP_T_STR },
+	{ "utime",  sample_conv_utime,     ARG2(1,STR,SINT), NULL, SMP_T_UINT, SMP_T_STR },
 	{ NULL, NULL, 0, 0, 0 },
 }};
 

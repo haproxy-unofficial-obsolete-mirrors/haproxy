@@ -2143,22 +2143,22 @@ int parse_qvalue(const char *qvalue, const char **end)
 {
 	int q = 1000;
 
-	if (!isdigit(*qvalue))
+	if (!isdigit((unsigned char)*qvalue))
 		goto out;
 	q = (*qvalue++ - '0') * 1000;
 
 	if (*qvalue++ != '.')
 		goto out;
 
-	if (!isdigit(*qvalue))
+	if (!isdigit((unsigned char)*qvalue))
 		goto out;
 	q += (*qvalue++ - '0') * 100;
 
-	if (!isdigit(*qvalue))
+	if (!isdigit((unsigned char)*qvalue))
 		goto out;
 	q += (*qvalue++ - '0') * 10;
 
-	if (!isdigit(*qvalue))
+	if (!isdigit((unsigned char)*qvalue))
 		goto out;
 	q += (*qvalue++ - '0') * 1;
  out:
@@ -4808,7 +4808,6 @@ void http_end_txn_clean_session(struct session *s)
 
 	s->logs.t_close = tv_ms_elapsed(&s->logs.tv_accept, &now);
 	session_process_counters(s);
-	session_stop_content_counters(s);
 
 	if (s->txn.status) {
 		int n;
@@ -4842,6 +4841,8 @@ void http_end_txn_clean_session(struct session *s)
 		s->do_log(s);
 	}
 
+	/* stop tracking content-based counters */
+	session_stop_content_counters(s);
 	session_update_time_stats(s);
 
 	s->logs.accept_date = date; /* user-visible date for logging */
@@ -5314,7 +5315,7 @@ int http_request_forward_body(struct session *s, struct channel *req, int an_bit
 	 * an "Expect: 100-continue" header.
 	 */
 
-	if (msg->sov) {
+	if (msg->sov > 0) {
 		/* we have msg->sov which points to the first byte of message
 		 * body, and req->buf.p still points to the beginning of the
 		 * message. We forward the headers now, as we don't need them
@@ -5428,6 +5429,8 @@ int http_request_forward_body(struct session *s, struct channel *req, int an_bit
 			 * such as last chunk of data or trailers.
 			 */
 			b_adv(req->buf, msg->next);
+			if (unlikely(!(s->rep->flags & CF_READ_ATTACHED)))
+				msg->sov -= msg->next;
 			msg->next = 0;
 
 			/* for keep-alive we don't want to forward closes on DONE */
@@ -5478,6 +5481,9 @@ int http_request_forward_body(struct session *s, struct channel *req, int an_bit
  missing_data:
 	/* we may have some pending data starting at req->buf->p */
 	b_adv(req->buf, msg->next);
+	if (unlikely(!(s->rep->flags & CF_READ_ATTACHED)))
+		msg->sov -= msg->next + MIN(msg->chunk_len, req->buf->i);
+
 	msg->next = 0;
 	msg->chunk_len -= channel_forward(req, msg->chunk_len);
 
@@ -6492,7 +6498,7 @@ int http_response_forward_body(struct session *s, struct channel *res, int an_bi
 	/* in most states, we should abort in case of early close */
 	channel_auto_close(res);
 
-	if (msg->sov) {
+	if (msg->sov > 0) {
 		/* we have msg->sov which points to the first byte of message
 		 * body, and res->buf.p still points to the beginning of the
 		 * message. We forward the headers now, as we don't need them
@@ -9747,6 +9753,9 @@ smp_prefetch_http(struct proxy *px, struct session *s, void *l7, unsigned int op
 	return 1;
 }
 
+/* Note: these functinos *do* modify the sample. Even in case of success, at
+ * least the type and uint value are modified.
+ */
 #define CHECK_HTTP_MESSAGE_FIRST() \
 	do { int r = smp_prefetch_http(px, l4, l7, opt, args, smp, 1); if (r <= 0) return r; } while (0)
 
@@ -10247,6 +10256,7 @@ smp_fetch_base(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
 	struct http_txn *txn = l7;
 	char *ptr, *end, *beg;
 	struct hdr_ctx ctx;
+	struct chunk *temp;
 
 	CHECK_HTTP_MESSAGE_FIRST();
 
@@ -10255,9 +10265,10 @@ smp_fetch_base(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
 		return smp_fetch_path(px, l4, l7, opt, args, smp, kw);
 
 	/* OK we have the header value in ctx.line+ctx.val for ctx.vlen bytes */
-	memcpy(trash.str, ctx.line + ctx.val, ctx.vlen);
+	temp = get_trash_chunk();
+	memcpy(temp->str, ctx.line + ctx.val, ctx.vlen);
 	smp->type = SMP_T_STR;
-	smp->data.str.str = trash.str;
+	smp->data.str.str = temp->str;
 	smp->data.str.len = ctx.vlen;
 
 	/* now retrieve the path */
@@ -11220,7 +11231,7 @@ static int sample_conv_q_prefered(const struct arg *args, struct sample *smp)
 	while (1) {
 
 		/* Jump spaces, quit if the end is detected. */
-		while (al < end && isspace(*al))
+		while (al < end && isspace((unsigned char)*al))
 			al++;
 		if (al >= end)
 			break;
@@ -11229,7 +11240,7 @@ static int sample_conv_q_prefered(const struct arg *args, struct sample *smp)
 		token = al;
 
 		/* Look for separator: isspace(), ',' or ';'. Next value if 0 length word. */
-		while (al < end && *al != ';' && *al != ',' && !isspace(*al))
+		while (al < end && *al != ';' && *al != ',' && !isspace((unsigned char)*al))
 			al++;
 		if (al == token)
 			goto expect_comma;
@@ -11258,7 +11269,7 @@ static int sample_conv_q_prefered(const struct arg *args, struct sample *smp)
 look_for_q:
 
 		/* Jump spaces, quit if the end is detected. */
-		while (al < end && isspace(*al))
+		while (al < end && isspace((unsigned char)*al))
 			al++;
 		if (al >= end)
 			goto process_value;
@@ -11277,7 +11288,7 @@ look_for_q:
 		al++;
 
 		/* Jump spaces, process value if the end is detected. */
-		while (al < end && isspace(*al))
+		while (al < end && isspace((unsigned char)*al))
 			al++;
 		if (al >= end)
 			goto process_value;
@@ -11288,7 +11299,7 @@ look_for_q:
 		al++;
 
 		/* Jump spaces, process value if the end is detected. */
-		while (al < end && isspace(*al))
+		while (al < end && isspace((unsigned char)*al))
 			al++;
 		if (al >= end)
 			goto process_value;
@@ -11299,7 +11310,7 @@ look_for_q:
 		al++;
 
 		/* Jump spaces, process value if the end is detected. */
-		while (al < end && isspace(*al))
+		while (al < end && isspace((unsigned char)*al))
 			al++;
 		if (al >= end)
 			goto process_value;

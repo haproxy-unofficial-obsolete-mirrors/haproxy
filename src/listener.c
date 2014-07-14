@@ -95,15 +95,16 @@ int pause_listener(struct listener *l)
 	if (l->state <= LI_PAUSED)
 		return 1;
 
-	if (l->proto->sock_prot == IPPROTO_TCP) {
-		if (shutdown(l->fd, SHUT_WR) != 0)
-			return 0; /* Solaris dies here */
+	if (l->proto->pause) {
+		/* Returns < 0 in case of failure, 0 if the listener
+		 * was totally stopped, or > 0 if correctly paused.
+		 */
+		int ret = l->proto->pause(l);
 
-		if (listen(l->fd, l->backlog ? l->backlog : l->maxconn) != 0)
-			return 0; /* OpenBSD dies here */
-
-		if (shutdown(l->fd, SHUT_RD) != 0)
-			return 0; /* should always be OK */
+		if (ret < 0)
+			return 0;
+		else if (ret == 0)
+			return 1;
 	}
 
 	if (l->state == LI_LIMITED)
@@ -119,10 +120,26 @@ int pause_listener(struct listener *l)
  * may replace enable_listener(). The resulting state will either be LI_READY
  * or LI_FULL. 0 is returned in case of failure to resume (eg: dead socket).
  * Listeners bound to a different process are not woken up unless we're in
- * foreground mode.
+ * foreground mode. If the listener was only in the assigned state, it's totally
+ * rebound. This can happen if a pause() has completely stopped it. If the
+ * resume fails, 0 is returned and an error might be displayed.
  */
 int resume_listener(struct listener *l)
 {
+	if (l->state == LI_ASSIGNED) {
+		char msg[100];
+		int err;
+
+		err = l->proto->bind(l, msg, sizeof(msg));
+		if (err & ERR_ALERT)
+			Alert("Resuming listener: %s\n", msg);
+		else if (err & ERR_WARN)
+			Warning("Resuming listener: %s\n", msg);
+
+		if (err & (ERR_FATAL | ERR_ABORT))
+			return 0;
+	}
+
 	if (l->state < LI_PAUSED)
 		return 0;
 
@@ -236,6 +253,7 @@ int unbind_listener(struct listener *listener)
 
 	if (listener->state >= LI_PAUSED) {
 		fd_delete(listener->fd);
+		listener->fd = -1;
 		listener->state = LI_ASSIGNED;
 	}
 	return ERR_NONE;

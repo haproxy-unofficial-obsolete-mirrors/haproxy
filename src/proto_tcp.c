@@ -80,6 +80,7 @@ static struct protocol proto_tcpv4 = {
 	.get_src = tcp_get_src,
 	.get_dst = tcp_get_dst,
 	.drain = tcp_drain,
+	.pause = tcp_pause_listener,
 	.listeners = LIST_HEAD_INIT(proto_tcpv4.listeners),
 	.nb_listeners = 0,
 };
@@ -102,6 +103,7 @@ static struct protocol proto_tcpv6 = {
 	.get_src = tcp_get_src,
 	.get_dst = tcp_get_dst,
 	.drain = tcp_drain,
+	.pause = tcp_pause_listener,
 	.listeners = LIST_HEAD_INIT(proto_tcpv6.listeners),
 	.nb_listeners = 0,
 };
@@ -947,6 +949,22 @@ void tcpv6_add_listener(struct listener *listener)
 	proto_tcpv6.nb_listeners++;
 }
 
+/* Pause a listener. Returns < 0 in case of failure, 0 if the listener
+ * was totally stopped, or > 0 if correctly paused.
+ */
+int tcp_pause_listener(struct listener *l)
+{
+	if (shutdown(l->fd, SHUT_WR) != 0)
+		return -1; /* Solaris dies here */
+
+	if (listen(l->fd, l->backlog ? l->backlog : l->maxconn) != 0)
+		return -1; /* OpenBSD dies here */
+
+	if (shutdown(l->fd, SHUT_RD) != 0)
+		return -1; /* should always be OK */
+	return 1;
+}
+
 /* This function performs the TCP request analysis on the current request. It
  * returns 1 if the processing can continue on next analysers, or zero if it
  * needs more data, encounters an error, or wants to immediately abort the
@@ -1022,12 +1040,16 @@ int tcp_inspect_request(struct session *s, struct channel *req, int an_bit)
 				 * applies.
 				 */
 				struct stktable_key *key;
+				struct sample smp;
 
 				if (stkctr_entry(&s->stkctr[tcp_trk_idx(rule->action)]))
 					continue;
 
 				t = rule->act_prm.trk_ctr.table.t;
-				key = stktable_fetch_key(t, s->be, s, &s->txn, SMP_OPT_DIR_REQ|SMP_OPT_FINAL, rule->act_prm.trk_ctr.expr);
+				key = stktable_fetch_key(t, s->be, s, &s->txn, SMP_OPT_DIR_REQ | partial, rule->act_prm.trk_ctr.expr, &smp);
+
+				if (smp.flags & SMP_F_MAY_CHANGE)
+					goto missing_data;
 
 				if (key && (ts = stktable_get_entry(t, key))) {
 					session_track_stkctr(&s->stkctr[tcp_trk_idx(rule->action)], t, ts);
@@ -1228,7 +1250,7 @@ int tcp_exec_req_rules(struct session *s)
 					continue;
 
 				t = rule->act_prm.trk_ctr.table.t;
-				key = stktable_fetch_key(t, s->be, s, &s->txn, SMP_OPT_DIR_REQ|SMP_OPT_FINAL, rule->act_prm.trk_ctr.expr);
+				key = stktable_fetch_key(t, s->be, s, &s->txn, SMP_OPT_DIR_REQ|SMP_OPT_FINAL, rule->act_prm.trk_ctr.expr, NULL);
 
 				if (key && (ts = stktable_get_entry(t, key)))
 					session_track_stkctr(&s->stkctr[tcp_trk_idx(rule->action)], t, ts);
