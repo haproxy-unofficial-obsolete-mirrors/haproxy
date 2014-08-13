@@ -122,6 +122,9 @@ struct redirect_rule *http_parse_redirect_rule(const char *file, int linenum, st
                                                const char **args, char **errmsg, int use_fmt);
 int smp_fetch_cookie(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
                  const struct arg *args, struct sample *smp, const char *kw);
+int
+smp_fetch_base32(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                 const struct arg *args, struct sample *smp, const char *kw);
 
 enum http_meth_t find_http_meth(const char *str, const int len);
 
@@ -203,6 +206,14 @@ static inline int http_body_bytes(const struct http_msg *msg)
 	if (len > msg->body_len)
 		len = msg->body_len;
 	return len;
+}
+
+/* for an http-request action HTTP_REQ_ACT_TRK_*, return a tracking index
+ * starting at zero for SC0. Unknown actions also return zero.
+ */
+static inline int http_req_trk_idx(int trk_action)
+{
+	return trk_action - HTTP_REQ_ACT_TRK_SC0;
 }
 
 /* for debugging, reports the HTTP message state name */

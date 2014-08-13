@@ -18,6 +18,7 @@
 #include <types/global.h>
 
 #include <common/chunk.h>
+#include <common/hash.h>
 #include <common/standard.h>
 #include <common/uri_auth.h>
 #include <common/base64.h>
@@ -654,6 +655,39 @@ static int c_meth2str(struct sample *smp)
 	return 1;
 }
 
+static int c_addr2bin(struct sample *smp)
+{
+	struct chunk *chk = get_trash_chunk();
+
+	if (smp->type == SMP_T_IPV4) {
+		chk->len = 4;
+		memcpy(chk->str, &smp->data.ipv4, chk->len);
+	}
+	else if (smp->type == SMP_T_IPV6) {
+		chk->len = 16;
+		memcpy(chk->str, &smp->data.ipv6, chk->len);
+	}
+	else
+		return 0;
+
+	smp->data.str = *chk;
+	smp->type = SMP_T_BIN;
+	return 1;
+}
+
+static int c_int2bin(struct sample *smp)
+{
+	struct chunk *chk = get_trash_chunk();
+
+	*(unsigned int *)chk->str = htonl(smp->data.uint);
+	chk->len = 4;
+
+	smp->data.str = *chk;
+	smp->type = SMP_T_BIN;
+	return 1;
+}
+
+
 /*****************************************************************/
 /*      Sample casts matrix:                                     */
 /*           sample_casts[from type][to type]                    */
@@ -663,11 +697,11 @@ static int c_meth2str(struct sample *smp)
 sample_cast_fct sample_casts[SMP_TYPES][SMP_TYPES] = {
 /*            to:  BOOL       UINT       SINT       ADDR        IPV4      IPV6        STR         BIN         METH */
 /* from: BOOL */ { c_none,    c_none,    c_none,    NULL,       NULL,     NULL,       c_int2str,  NULL,       NULL,       },
-/*       UINT */ { c_none,    c_none,    c_none,    c_int2ip,   c_int2ip, NULL,       c_int2str,  NULL,       NULL,       },
-/*       SINT */ { c_none,    c_none,    c_none,    c_int2ip,   c_int2ip, NULL,       c_int2str,  NULL,       NULL,       },
+/*       UINT */ { c_none,    c_none,    c_none,    c_int2ip,   c_int2ip, NULL,       c_int2str,  c_int2bin,  NULL,       },
+/*       SINT */ { c_none,    c_none,    c_none,    c_int2ip,   c_int2ip, NULL,       c_int2str,  c_int2bin,  NULL,       },
 /*       ADDR */ { NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       NULL,       NULL,       NULL,       },
-/*       IPV4 */ { NULL,      c_ip2int,  c_ip2int,  c_none,     c_none,   c_ip2ipv6,  c_ip2str,   NULL,       NULL,       },
-/*       IPV6 */ { NULL,      NULL,      NULL,      c_none,     NULL,     c_none,     c_ipv62str, NULL,       NULL,       },
+/*       IPV4 */ { NULL,      c_ip2int,  c_ip2int,  c_none,     c_none,   c_ip2ipv6,  c_ip2str,   c_addr2bin, NULL,       },
+/*       IPV6 */ { NULL,      NULL,      NULL,      c_none,     NULL,     c_none,     c_ipv62str, c_addr2bin, NULL,       },
 /*        STR */ { c_str2int, c_str2int, c_str2int, c_str2addr, c_str2ip, c_str2ipv6, c_none,     c_none,     c_str2meth, },
 /*        BIN */ { NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       c_bin2str,  c_none,     c_str2meth, },
 /*       METH */ { NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       c_meth2str, c_meth2str, c_none,     },
@@ -896,6 +930,18 @@ out_error:
  * Note: the fetch functions are required to properly set the return type. The
  * conversion functions must do so too. However the cast functions do not need
  * to since they're made to cast mutiple types according to what is required.
+ *
+ * The caller may indicate in <opt> if it considers the result final or not.
+ * The caller needs to check the SMP_F_MAY_CHANGE flag in p->flags to verify
+ * if the result is stable or not, according to the following table :
+ *
+ * return MAY_CHANGE FINAL   Meaning for the sample
+ *  NULL      0        *     Not present and will never be (eg: header)
+ *  NULL      1        0     Not present yet, could change (eg: POST param)
+ *  NULL      1        1     Not present yet, will not change anymore
+ *   smp      0        *     Present and will not change (eg: header)
+ *   smp      1        0     Present, may change (eg: request length)
+ *   smp      1        1     Present, last known value (eg: request length)
  */
 struct sample *sample_process(struct proxy *px, struct session *l4, void *l7,
                               unsigned int opt,
@@ -1153,7 +1199,16 @@ int smp_resolve_args(struct proxy *p)
  * and <opt> does not contain SMP_OPT_FINAL, then the sample is returned as-is
  * with its SMP_F_MAY_CHANGE flag so that the caller can check it and decide to
  * take actions (eg: wait longer). If a sample could not be found or could not
- * be converted, NULL is returned.
+ * be converted, NULL is returned. The caller MUST NOT use the sample if the
+ * SMP_F_MAY_CHANGE flag is present, as it is used only as a hint that there is
+ * still hope to get it after waiting longer, and is not converted to string.
+ * The possible output combinations are the following :
+ *
+ * return MAY_CHANGE FINAL   Meaning for the sample
+ *  NULL      *        *     Not present and will never be (eg: header)
+ *   smp      0        *     Final value converted (eg: header)
+ *   smp      1        0     Not present yet, may appear later (eg: header)
+ *   smp      1        1     never happens (either flag is cleared on output)
  */
 struct sample *sample_fetch_string(struct proxy *px, struct session *l4, void *l7,
                                    unsigned int opt, struct sample_expr *expr)
@@ -1219,6 +1274,16 @@ static int sample_conv_bin2hex(const struct arg *arg_p, struct sample *smp)
 	return 1;
 }
 
+/* hashes the binary input into a 32-bit unsigned int */
+static int sample_conv_djb2(const struct arg *arg_p, struct sample *smp)
+{
+	smp->data.uint = hash_djb2(smp->data.str.str, smp->data.str.len);
+	if (arg_p && arg_p->data.uint)
+		smp->data.uint = full_hash(smp->data.uint);
+	smp->type = SMP_T_UINT;
+	return 1;
+}
+
 static int sample_conv_str2lower(const struct arg *arg_p, struct sample *smp)
 {
 	int i;
@@ -1281,6 +1346,16 @@ static int sample_conv_ltime(const struct arg *args, struct sample *smp)
 	return 1;
 }
 
+/* hashes the binary input into a 32-bit unsigned int */
+static int sample_conv_sdbm(const struct arg *arg_p, struct sample *smp)
+{
+	smp->data.uint = hash_sdbm(smp->data.str.str, smp->data.str.len);
+	if (arg_p && arg_p->data.uint)
+		smp->data.uint = full_hash(smp->data.uint);
+	smp->type = SMP_T_UINT;
+	return 1;
+}
+
 /* takes an UINT value on input supposed to represent the time since EPOCH,
  * adds an optional offset found in args[1] and emits a string representing
  * the UTC date in the format specified in args[1] using strftime().
@@ -1298,6 +1373,16 @@ static int sample_conv_utime(const struct arg *args, struct sample *smp)
 	temp->len = strftime(temp->str, temp->size, args[0].data.str.str, gmtime(&curr_date));
 	smp->data.str = *temp;
 	smp->type = SMP_T_STR;
+	return 1;
+}
+
+/* hashes the binary input into a 32-bit unsigned int */
+static int sample_conv_wt6(const struct arg *arg_p, struct sample *smp)
+{
+	smp->data.uint = hash_wt6(smp->data.str.str, smp->data.str.len);
+	if (arg_p && arg_p->data.uint)
+		smp->data.uint = full_hash(smp->data.uint);
+	smp->type = SMP_T_UINT;
 	return 1;
 }
 
@@ -1405,6 +1490,9 @@ static struct sample_conv_kw_list sample_conv_kws = {ILH, {
 	{ "ipmask", sample_conv_ipmask,    ARG1(1,MSK4), NULL, SMP_T_IPV4, SMP_T_IPV4 },
 	{ "ltime",  sample_conv_ltime,     ARG2(1,STR,SINT), NULL, SMP_T_UINT, SMP_T_STR },
 	{ "utime",  sample_conv_utime,     ARG2(1,STR,SINT), NULL, SMP_T_UINT, SMP_T_STR },
+	{ "djb2",   sample_conv_djb2,      ARG1(0,UINT), NULL, SMP_T_BIN,  SMP_T_UINT },
+	{ "sdbm",   sample_conv_sdbm,      ARG1(0,UINT), NULL, SMP_T_BIN,  SMP_T_UINT },
+	{ "wt6",    sample_conv_wt6,       ARG1(0,UINT), NULL, SMP_T_BIN,  SMP_T_UINT },
 	{ NULL, NULL, 0, 0, 0 },
 }};
 

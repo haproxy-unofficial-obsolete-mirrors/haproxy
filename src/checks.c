@@ -93,7 +93,7 @@ static const struct check_status check_statuses[HCHK_STATUS_SIZE] = {
 
 	[HCHK_STATUS_PROCERR]	= { CHK_RES_FAILED,   "PROCERR",  "External check error" },
 	[HCHK_STATUS_PROCTOUT]	= { CHK_RES_FAILED,   "PROCTOUT", "External check timeout" },
-	[HCHK_STATUS_PROCOK]	= { CHK_RES_FAILED,   "PROCOK",   "External check passed" },
+	[HCHK_STATUS_PROCOK]	= { CHK_RES_PASSED,   "PROCOK",   "External check passed" },
 };
 
 static const struct analyze_status analyze_statuses[HANA_STATUS_SIZE] = {		/* 0: ignore, 1: error, 2: OK */
@@ -1519,6 +1519,7 @@ static void pid_list_expire(pid_t pid, int status)
 			elem->t->expire = now_ms;
 			elem->status = status;
 			elem->exited = 1;
+			task_wakeup(elem->t, TASK_WOKEN_IO);
 			return;
 		}
 	}
@@ -1627,7 +1628,7 @@ static int prepare_external_check(struct check *check)
 		if (!check->argv[i])
 			goto err;
 
-	return 0;
+	return 1;
 err:
 	if (check->envp) {
 		free(check->envp[1]);
@@ -1642,7 +1643,7 @@ err:
 		check->argv = NULL;
 	}
 	Alert(err_fmt, px->id, s->id);
-	return -1;
+	return 0;
 }
 
 /*
@@ -1666,12 +1667,6 @@ static int connect_proc_chk(struct task *t)
 	struct proxy *px = s->proxy;
 	int status;
 	pid_t pid;
-
-	if (!check->argv) {
-		status = prepare_external_check(check);
-		if (status < 0)
-			return SN_ERR_RESOURCE;
-	}
 
 	status = SN_ERR_RESOURCE;
 
@@ -2140,6 +2135,10 @@ int start_checks() {
 		for (s = px->srv; s; s = s->next) {
 			/* A task for the main check */
 			if (s->check.state & CHK_ST_CONFIGURED) {
+				if (s->check.type == PR_O2_EXT_CHK) {
+					if (!prepare_external_check(&s->check))
+						return -1;
+				}
 				if (!start_check_task(&s->check, mininter, nbcheck, srvpos))
 					return -1;
 				srvpos++;
