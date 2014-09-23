@@ -1914,6 +1914,10 @@ bind-process [ all | odd | even | <number 1-64>[-<number 1-64>] ] ...
   Each "bind" line may further be limited to a subset of the proxy's processes,
   please consult the "process" bind keyword in section 5.1.
 
+  When a frontend has no explicit "bind-process" line, it tries to bind to all
+  the processes referenced by its "bind" lines. That means that frontends can
+  easily adapt to their listeners' processes.
+
   If some backends are referenced by frontends bound to other processes, the
   backend automatically inherits the frontend's processes.
 
@@ -2916,7 +2920,8 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
               add-acl(<file name>) <key fmt> |
               del-acl(<file name>) <key fmt> |
               del-map(<file name>) <key fmt> |
-              set-map(<file name>) <key fmt> <value fmt>
+              set-map(<file name>) <key fmt> <value fmt> |
+              { track-sc0 | track-sc1 | track-sc2 } <key> [table <table>]
              }
              [ { if | unless } <condition> ]
   Access control for Layer 7 requests
@@ -7580,9 +7585,9 @@ tcp-request content <action> [{if | unless} <condition>]
   contents will always be immediately present when the rule is evaluated first.
 
   Tracking layer7 information is also possible provided that the information
-  are present when the rule is processed. The current solution for making the
-  rule engine wait for such information is to set an inspect delay and to
-  condition its execution with an ACL relying on such information.
+  are present when the rule is processed. The rule processing engine is able to
+  wait until the inspect delay expires when the data to be tracked is not yet
+  available.
 
   Example:
         # Accept HTTP requests containing a Host header saying "example.com"
@@ -7607,12 +7612,12 @@ tcp-request content <action> [{if | unless} <condition>]
   Example:
         # Track the last IP from X-Forwarded-For
         tcp-request inspect-delay 10s
-        tcp-request content track-sc0 hdr(x-forwarded-for,-1) if HTTP
+        tcp-request content track-sc0 hdr(x-forwarded-for,-1)
 
   Example:
         # track request counts per "base" (concatenation of Host+URL)
         tcp-request inspect-delay 10s
-        tcp-request content track-sc0 base table req-rate if HTTP
+        tcp-request content track-sc0 base table req-rate
 
   Example: track per-frontend and per-backend counters, block abusers at the
            frontend when the backend detects abuse.
@@ -14054,9 +14059,11 @@ show sess <id>
   of "show sess" (it corresponds to the session pointer). Those information are
   useless to most users but may be used by haproxy developers to troubleshoot a
   complex bug. The output format is intentionally not documented so that it can
-  freely evolve depending on demands. The special id "all" dumps the states of
-  all sessions, which can be avoided as much as possible as it is highly CPU
-  intensive and can take a lot of time.
+  freely evolve depending on demands. You may find a description of all fields
+  returned in src/dumpstats.c
+
+  The special id "all" dumps the states of all sessions, which must be avoided
+  as much as possible as it is highly CPU intensive and can take a lot of time.
 
 show stat [<iid> <type> <sid>]
   Dump statistics in the CSV format. By passing <id>, <type> and <sid>, it is
