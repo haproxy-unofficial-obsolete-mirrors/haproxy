@@ -72,6 +72,9 @@ smp_fetch_ssl_hello_type(struct proxy *px, struct session *s, void *l7, unsigned
 
 	chn = ((opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? s->rep : s->req;
 
+	if (!chn)
+		goto not_ssl_hello;
+
 	bleft = chn->buf->i;
 	data = (const unsigned char *)chn->buf->p;
 
@@ -210,8 +213,8 @@ smp_fetch_req_ssl_ver(struct proxy *px, struct session *s, void *l7, unsigned in
 	 * all the part of the request which fits in a buffer is already
 	 * there.
 	 */
-	if (msg_len > buffer_max_len(s->req) + s->req->buf->data - s->req->buf->p)
-		msg_len = buffer_max_len(s->req) + s->req->buf->data - s->req->buf->p;
+	if (msg_len > channel_recv_limit(s->req) + s->req->buf->data - s->req->buf->p)
+		msg_len = channel_recv_limit(s->req) + s->req->buf->data - s->req->buf->p;
 
 	if (bleft < msg_len)
 		goto too_short;
@@ -275,6 +278,9 @@ smp_fetch_ssl_hello_sni(struct proxy *px, struct session *s, void *l7, unsigned 
 		goto not_ssl_hello;
 
 	chn = ((opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? s->rep : s->req;
+
+	if (!chn)
+		goto not_ssl_hello;
 
 	bleft = chn->buf->i;
 	data = (unsigned char *)chn->buf->p;
@@ -606,7 +612,7 @@ smp_fetch_payload(struct proxy *px, struct session *s, void *l7, unsigned int op
 	smp->type = SMP_T_BIN;
 	smp->flags = SMP_F_VOLATILE | SMP_F_CONST;
 	chunk_initlen(&smp->data.str, chn->buf->p + buf_offset, 0, buf_size ? buf_size : (chn->buf->i - buf_offset));
-	if (!buf_size && !channel_full(chn) && !channel_input_closed(chn))
+	if (!buf_size && channel_may_recv(chn) && !channel_input_closed(chn))
 		smp->flags |= SMP_F_MAY_CHANGE;
 
 	return 1;

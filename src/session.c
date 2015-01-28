@@ -51,6 +51,9 @@
 struct pool_head *pool2_session;
 struct list sessions;
 
+/* list of sessions waiting for at least one buffer */
+struct list buffer_wq = LIST_HEAD_INIT(buffer_wq);
+
 static int conn_session_complete(struct connection *conn);
 static int conn_session_update(struct connection *conn);
 static struct task *expire_mini_session(struct task *t);
@@ -90,6 +93,7 @@ int session_accept(struct listener *l, int cfd, struct sockaddr_storage *addr)
 	cli_conn->addr.from = *addr;
 	cli_conn->flags |= CO_FL_ADDR_FROM_SET;
 	cli_conn->target = &l->obj_type;
+	cli_conn->proxy_netns = l->netns;
 
 	if (unlikely((s = pool_alloc2(pool2_session)) == NULL))
 		goto out_free_conn;
@@ -408,6 +412,7 @@ int session_complete(struct session *s)
 	/* OK, we're keeping the session, so let's properly initialize the session */
 	LIST_ADDQ(&sessions, &s->list);
 	LIST_INIT(&s->back_refs);
+	LIST_INIT(&s->buffer_wait);
 
 	s->flags |= SN_INITIALIZED;
 	s->unique_id = NULL;
@@ -476,17 +481,6 @@ int session_complete(struct session *s)
 	if (unlikely((s->req = pool_alloc2(pool2_channel)) == NULL))
 		goto out_free_task; /* no memory */
 
-	if (unlikely((s->req->buf = pool_alloc2(pool2_buffer)) == NULL))
-		goto out_free_req; /* no memory */
-
-	if (unlikely((s->rep = pool_alloc2(pool2_channel)) == NULL))
-		goto out_free_req_buf; /* no memory */
-
-	if (unlikely((s->rep->buf = pool_alloc2(pool2_buffer)) == NULL))
-		goto out_free_rep; /* no memory */
-
-	/* initialize the request buffer */
-	s->req->buf->size = global.tune.bufsize;
 	channel_init(s->req);
 	s->req->prod = &s->si[0];
 	s->req->cons = &s->si[1];
@@ -502,8 +496,9 @@ int session_complete(struct session *s)
 	s->req->wex = TICK_ETERNITY;
 	s->req->analyse_exp = TICK_ETERNITY;
 
-	/* initialize response buffer */
-	s->rep->buf->size = global.tune.bufsize;
+	if (unlikely((s->rep = pool_alloc2(pool2_channel)) == NULL))
+		goto out_free_req; /* no memory */
+
 	channel_init(s->rep);
 	s->rep->prod = &s->si[1];
 	s->rep->cons = &s->si[0];
@@ -549,7 +544,7 @@ int session_complete(struct session *s)
 		 * finished (=0, eg: monitoring), in both situations,
 		 * we can release everything and close.
 		 */
-		goto out_free_rep_buf;
+		goto out_free_rep;
 	}
 
 	/* if logs require transport layer information, note it on the connection */
@@ -567,18 +562,15 @@ int session_complete(struct session *s)
 	return 1;
 
 	/* Error unrolling */
- out_free_rep_buf:
-	pool_free2(pool2_buffer, s->rep->buf);
  out_free_rep:
 	pool_free2(pool2_channel, s->rep);
- out_free_req_buf:
-	pool_free2(pool2_buffer, s->req->buf);
  out_free_req:
 	pool_free2(pool2_channel, s->req);
  out_free_task:
 	/* and restore the connection pointer in case we destroyed it,
 	 * because kill_mini_session() will need it.
 	 */
+	LIST_DEL(&s->list);
 	s->target = &conn->obj_type;
 	return ret;
 }
@@ -620,8 +612,16 @@ static void session_free(struct session *s)
 	if (s->rep->pipe)
 		put_pipe(s->rep->pipe);
 
-	pool_free2(pool2_buffer, s->req->buf);
-	pool_free2(pool2_buffer, s->rep->buf);
+	/* We may still be present in the buffer wait queue */
+	if (!LIST_ISEMPTY(&s->buffer_wait)) {
+		LIST_DEL(&s->buffer_wait);
+		LIST_INIT(&s->buffer_wait);
+	}
+
+	b_drop(&s->req->buf);
+	b_drop(&s->rep->buf);
+	if (!LIST_ISEMPTY(&buffer_wq))
+		session_offer_buffers();
 
 	pool_free2(pool2_channel, s->req);
 	pool_free2(pool2_channel, s->rep);
@@ -670,11 +670,117 @@ static void session_free(struct session *s)
 		pool_flush2(pool2_requri);
 		pool_flush2(pool2_capture);
 		pool_flush2(pool2_session);
+		pool_flush2(pool2_connection);
+		pool_flush2(pool2_pendconn);
 		pool_flush2(fe->req_cap_pool);
 		pool_flush2(fe->rsp_cap_pool);
 	}
 }
 
+/* Allocates a single buffer for session <s>, but only if it's guaranteed that
+ * it's not the last available buffer. To be called at the beginning of recv()
+ * callbacks to ensure that the required buffers are properly allocated. If the
+ * buffer is the session's request buffer, an extra control is made so that we
+ * always keep <tune.buffers.reserved> buffers available after this allocation.
+ * In all circumstances we leave at least 2 buffers so that any later call from
+ * process_session() has a chance to succeed. The response buffer is not bound
+ * to this control. Returns 0 in case of failure, non-zero otherwise.
+ */
+int session_alloc_recv_buffer(struct session *s, struct buffer **buf)
+{
+	struct buffer *b;
+	int margin = 0;
+
+	if (buf == &s->req->buf)
+		margin = global.tune.reserved_bufs;
+
+	b = b_alloc_margin(buf, margin);
+	if (b)
+		return 1;
+
+	if (LIST_ISEMPTY(&s->buffer_wait))
+		LIST_ADDQ(&buffer_wq, &s->buffer_wait);
+	return 0;
+}
+
+/* Allocates a work buffer for session <s>. It is meant to be called inside
+ * process_session(). It will only allocate the side needed for the function
+ * to work fine. For a regular connection, only the response is needed so that
+ * an error message may be built and returned. In case where the initiator is
+ * an applet (eg: peers), then we need to allocate the request buffer for the
+ * applet to be able to send its data (in this case a response is not needed).
+ * Request buffers are never picked from the reserved pool, but response
+ * buffers may be allocated from the reserve. This is critical to ensure that
+ * a response may always flow and will never block a server from releasing a
+ * connection. Returns 0 in case of failure, non-zero otherwise.
+ */
+int session_alloc_work_buffer(struct session *s)
+{
+	int margin;
+	struct buffer **buf;
+
+	if (objt_appctx(s->si[0].end)) {
+		buf = &s->req->buf;
+		margin = global.tune.reserved_bufs;
+	}
+	else {
+		buf = &s->rep->buf;
+		margin = 0;
+	}
+
+	if (!LIST_ISEMPTY(&s->buffer_wait)) {
+		LIST_DEL(&s->buffer_wait);
+		LIST_INIT(&s->buffer_wait);
+	}
+
+	if (b_alloc_margin(buf, margin))
+		return 1;
+
+	LIST_ADDQ(&buffer_wq, &s->buffer_wait);
+	return 0;
+}
+
+/* releases unused buffers after processing. Typically used at the end of the
+ * update() functions. It will try to wake up as many tasks as the number of
+ * buffers that it releases. In practice, most often sessions are blocked on
+ * a single buffer, so it makes sense to try to wake two up when two buffers
+ * are released at once.
+ */
+void session_release_buffers(struct session *s)
+{
+	if (s->req->buf->size && buffer_empty(s->req->buf))
+		b_free(&s->req->buf);
+
+	if (s->rep->buf->size && buffer_empty(s->rep->buf))
+		b_free(&s->rep->buf);
+
+	/* if we're certain to have at least 1 buffer available, and there is
+	 * someone waiting, we can wake up a waiter and offer them.
+	 */
+	if (!LIST_ISEMPTY(&buffer_wq))
+		session_offer_buffers();
+}
+
+/* Runs across the list of pending sessions waiting for a buffer and wakes one
+ * up if buffers are available. Will stop when the run queue reaches <rqlimit>.
+ * Should not be called directly, use session_offer_buffers() instead.
+ */
+void __session_offer_buffers(int rqlimit)
+{
+	struct session *sess, *bak;
+
+	list_for_each_entry_safe(sess, bak, &buffer_wq, buffer_wait) {
+		if (rqlimit <= run_queue)
+			break;
+
+		if (sess->task->state & TASK_RUNNING)
+			continue;
+
+		LIST_DEL(&sess->buffer_wait);
+		LIST_INIT(&sess->buffer_wait);
+		task_wakeup(sess->task, TASK_WOKEN_RES);
+	}
+}
 
 /* perform minimal intializations, report 0 in case of error, 1 if OK. */
 int init_session()
@@ -1709,6 +1815,16 @@ struct task *process_session(struct task *t)
 			goto update_exp_and_leave;
 	}
 
+	/* below we may emit error messages so we have to ensure that we have
+	 * our buffers properly allocated.
+	 */
+	if (!session_alloc_work_buffer(s)) {
+		/* No buffer available, we've been subscribed to the list of
+		 * buffer waiters, let's wait for our turn.
+		 */
+		goto update_exp_and_leave;
+	}
+
 	/* 1b: check for low-level errors reported at the stream interface.
 	 * First we check if it's a retryable error (in which case we don't
 	 * want to tell the buffer). Otherwise we report the error one level
@@ -2507,6 +2623,7 @@ struct task *process_session(struct task *t)
 		if ((si_applet_call(s->req->cons) | si_applet_call(s->rep->cons)) != 0) {
 			if (task_in_rq(t)) {
 				t->expire = TICK_ETERNITY;
+				session_release_buffers(s);
 				return t;
 			}
 		}
@@ -2536,6 +2653,7 @@ struct task *process_session(struct task *t)
 		if (!tick_isset(t->expire))
 			ABORT_NOW();
 #endif
+		session_release_buffers(s);
 		return t; /* nothing more to do */
 	}
 

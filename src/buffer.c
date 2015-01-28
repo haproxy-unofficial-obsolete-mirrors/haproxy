@@ -22,12 +22,41 @@
 
 struct pool_head *pool2_buffer;
 
+/* These buffers are used to always have a valid pointer to an empty buffer in
+ * channels. The first buffer is set once a buffer is empty. The second one is
+ * set when a buffer is desired but no more are available. It helps knowing
+ * what channel wants a buffer. They can reliably be exchanged, the split
+ * between the two is only an optimization.
+ */
+struct buffer buf_empty  = { .p = buf_empty.data };
+struct buffer buf_wanted = { .p = buf_wanted.data };
 
 /* perform minimal intializations, report 0 in case of error, 1 if OK. */
 int init_buffer()
 {
+	void *buffer;
+
 	pool2_buffer = create_pool("buffer", sizeof (struct buffer) + global.tune.bufsize, MEM_F_SHARED);
-	return pool2_buffer != NULL;
+	if (!pool2_buffer)
+		return 0;
+
+	/* The reserved buffer is what we leave behind us. Thus we always need
+	 * at least one extra buffer in minavail otherwise we'll end up waking
+	 * up tasks with no memory available, causing a lot of useless wakeups.
+	 * That means that we always want to have at least 3 buffers available
+	 * (2 for current session, one for next session that might be needed to
+	 * release a server connection).
+	 */
+	pool2_buffer->minavail = MAX(global.tune.reserved_bufs, 3);
+	if (global.tune.buf_limit)
+		pool2_buffer->limit = global.tune.buf_limit;
+
+	buffer = pool_refill_alloc(pool2_buffer, pool2_buffer->minavail - 1);
+	if (!buffer)
+		return 0;
+
+	pool_free2(pool2_buffer, buffer);
+	return 1;
 }
 
 /* This function writes the string <str> at position <pos> which must be in
@@ -87,6 +116,11 @@ int buffer_insert_line2(struct buffer *b, char *pos, const char *str, int len)
 
 	if (bi_end(b) + delta >= b->data + b->size)
 		return 0;  /* no space left */
+
+	if (buffer_not_empty(b) &&
+	    bi_end(b) + delta > bo_ptr(b) &&
+	    bo_ptr(b) >= bi_end(b))
+		return 0;  /* no space left before wrapping data */
 
 	/* first, protect the end of the buffer */
 	memmove(pos + delta, pos, bi_end(b) - pos);

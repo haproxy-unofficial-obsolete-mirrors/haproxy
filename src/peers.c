@@ -178,7 +178,7 @@ static int peer_prepare_datamsg(struct stksess *ts, struct peer_session *ps, cha
  */
 static void peer_session_release(struct stream_interface *si)
 {
-	struct session *s = session_from_task(si->owner);
+	struct session *s = si_sess(si);
 	struct appctx *appctx = objt_appctx(si->end);
 	struct peer_session *ps = (struct peer_session *)appctx->ctx.peers.ptr;
 
@@ -212,7 +212,7 @@ static void peer_session_release(struct stream_interface *si)
  */
 static void peer_io_handler(struct stream_interface *si)
 {
-	struct session *s = session_from_task(si->owner);
+	struct session *s = si_sess(si);
 	struct peers *curpeers = (struct peers *)s->fe->parent;
 	struct appctx *appctx = objt_appctx(si->end);
 	int reql = 0;
@@ -1237,10 +1237,6 @@ static struct session *peer_session_create(struct peer *peer, struct peer_sessio
 	if ((s->req = pool_alloc2(pool2_channel)) == NULL)
 		goto out_fail_req; /* no memory */
 
-	if ((s->req->buf = pool_alloc2(pool2_buffer)) == NULL)
-		goto out_fail_req_buf; /* no memory */
-
-	s->req->buf->size = trash.size;
 	channel_init(s->req);
 	s->req->prod = &s->si[0];
 	s->req->cons = &s->si[1];
@@ -1263,10 +1259,6 @@ static struct session *peer_session_create(struct peer *peer, struct peer_sessio
 	if ((s->rep = pool_alloc2(pool2_channel)) == NULL)
 		goto out_fail_rep; /* no memory */
 
-	if ((s->rep->buf = pool_alloc2(pool2_buffer)) == NULL)
-		goto out_fail_rep_buf; /* no memory */
-
-	s->rep->buf->size = trash.size;
 	channel_init(s->rep);
 	s->rep->prod = &s->si[1];
 	s->rep->cons = &s->si[0];
@@ -1284,6 +1276,7 @@ static struct session *peer_session_create(struct peer *peer, struct peer_sessio
 	t->expire = TICK_ETERNITY;
 
 	s->rep->flags |= CF_READ_DONTWAIT;
+
 	/* it is important not to call the wakeup function directly but to
 	 * pass through task_wakeup(), because this one knows how to apply
 	 * priorities to tasks.
@@ -1300,11 +1293,7 @@ static struct session *peer_session_create(struct peer *peer, struct peer_sessio
 	return s;
 
 	/* Error unrolling */
- out_fail_rep_buf:
-	pool_free2(pool2_channel, s->rep);
  out_fail_rep:
-	pool_free2(pool2_buffer, s->req->buf);
- out_fail_req_buf:
 	pool_free2(pool2_channel, s->req);
  out_fail_req:
 	conn_free(conn);

@@ -96,6 +96,20 @@ static const struct check_status check_statuses[HCHK_STATUS_SIZE] = {
 	[HCHK_STATUS_PROCOK]	= { CHK_RES_PASSED,   "PROCOK",   "External check passed" },
 };
 
+const struct extcheck_env extcheck_envs[EXTCHK_SIZE] = {
+	[EXTCHK_PATH]                   = { "PATH",                   EXTCHK_SIZE_EVAL_INIT },
+	[EXTCHK_HAPROXY_PROXY_NAME]     = { "HAPROXY_PROXY_NAME",     EXTCHK_SIZE_EVAL_INIT },
+	[EXTCHK_HAPROXY_PROXY_ID]       = { "HAPROXY_PROXY_ID",       EXTCHK_SIZE_EVAL_INIT },
+	[EXTCHK_HAPROXY_PROXY_ADDR]     = { "HAPROXY_PROXY_ADDR",     EXTCHK_SIZE_EVAL_INIT },
+	[EXTCHK_HAPROXY_PROXY_PORT]     = { "HAPROXY_PROXY_PORT",     EXTCHK_SIZE_EVAL_INIT },
+	[EXTCHK_HAPROXY_SERVER_NAME]    = { "HAPROXY_SERVER_NAME",    EXTCHK_SIZE_EVAL_INIT },
+	[EXTCHK_HAPROXY_SERVER_ID]      = { "HAPROXY_SERVER_ID",      EXTCHK_SIZE_EVAL_INIT },
+	[EXTCHK_HAPROXY_SERVER_ADDR]    = { "HAPROXY_SERVER_ADDR",    EXTCHK_SIZE_EVAL_INIT },
+	[EXTCHK_HAPROXY_SERVER_PORT]    = { "HAPROXY_SERVER_PORT",    EXTCHK_SIZE_EVAL_INIT },
+	[EXTCHK_HAPROXY_SERVER_MAXCONN] = { "HAPROXY_SERVER_MAXCONN", EXTCHK_SIZE_EVAL_INIT },
+	[EXTCHK_HAPROXY_SERVER_CURCONN] = { "HAPROXY_SERVER_CURCONN", EXTCHK_SIZE_ULONG },
+};
+
 static const struct analyze_status analyze_statuses[HANA_STATUS_SIZE] = {		/* 0: ignore, 1: error, 2: OK */
 	[HANA_STATUS_UNKNOWN]		= { "Unknown",                         { 0, 0 }},
 
@@ -1387,6 +1401,7 @@ static int connect_conn_chk(struct task *t)
 	struct connection *conn = check->conn;
 	struct protocol *proto;
 	int ret;
+	int quickack;
 
 	/* tcpcheck send/expect initialisation */
 	if (check->type == PR_O2_TCPCHK_CHK)
@@ -1419,7 +1434,7 @@ static int connect_conn_chk(struct task *t)
 
 	/* prepare a new connection */
 	conn_init(conn);
-	conn_prepare(conn, s->check_common.proto, s->check_common.xprt);
+	conn_prepare(conn, s->check_common.proto, check->xprt);
 	conn_attach(conn, check, &check_conn_cb);
 	conn->target = &s->obj_type;
 
@@ -1442,18 +1457,23 @@ static int connect_conn_chk(struct task *t)
 		set_host_port(&conn->addr.to, check->port);
 	}
 
-	if (check->type == PR_O2_TCPCHK_CHK) {
+	/* only plain tcp-check supports quick ACK */
+	quickack = check->type == 0 || check->type == PR_O2_TCPCHK_CHK;
+
+	if (check->type == PR_O2_TCPCHK_CHK && !LIST_ISEMPTY(&s->proxy->tcpcheck_rules)) {
 		struct tcpcheck_rule *r = (struct tcpcheck_rule *) s->proxy->tcpcheck_rules.n;
 		/* if first step is a 'connect', then tcpcheck_main must run it */
 		if (r->action == TCPCHK_ACT_CONNECT) {
 			tcpcheck_main(conn);
 			return SN_ERR_UP;
 		}
+		if (r->action == TCPCHK_ACT_EXPECT)
+			quickack = 0;
 	}
 
 	ret = SN_ERR_INTERNAL;
 	if (proto->connect)
-		ret = proto->connect(conn, check->type, (check->type) ? 0 : 2);
+		ret = proto->connect(conn, check->type, quickack ? 2 : 0);
 	conn->flags |= CO_FL_WAKE_DATA;
 	if (s->check.send_proxy) {
 		conn->send_proxy_ofs = 1;
@@ -1568,6 +1588,62 @@ static int init_pid_list(void) {
 	return 0;
 }
 
+/* helper macro to set an environment variable and jump to a specific label on failure. */
+#define EXTCHK_SETENV(check, envidx, value, fail) { if (extchk_setenv(check, envidx, value)) goto fail; }
+
+/*
+ * helper function to allocate enough memory to store an environment variable.
+ * It will also check that the environment variable is updatable, and silently
+ * fail if not.
+ */
+static int extchk_setenv(struct check *check, int idx, const char *value)
+{
+	int len, ret;
+	char *envname;
+	int vmaxlen;
+
+	if (idx < 0 || idx >= EXTCHK_SIZE) {
+		Alert("Illegal environment variable index %d. Aborting.\n", idx);
+		return 1;
+	}
+
+	envname = extcheck_envs[idx].name;
+	vmaxlen = extcheck_envs[idx].vmaxlen;
+
+	/* Check if the environment variable is already set, and silently reject
+	 * the update if this one is not updatable. */
+	if ((vmaxlen == EXTCHK_SIZE_EVAL_INIT) && (check->envp[idx]))
+		return 0;
+
+	/* Instead of sending NOT_USED, sending an empty value is preferable */
+	if (strcmp(value, "NOT_USED") == 0) {
+		value = "";
+	}
+
+	len = strlen(envname) + 1;
+	if (vmaxlen == EXTCHK_SIZE_EVAL_INIT)
+		len += strlen(value);
+	else
+		len += vmaxlen;
+
+	if (!check->envp[idx])
+		check->envp[idx] = malloc(len + 1);
+
+	if (!check->envp[idx]) {
+		Alert("Failed to allocate memory for the environment variable '%s'. Aborting.\n", envname);
+		return 1;
+	}
+	ret = snprintf(check->envp[idx], len + 1, "%s=%s", envname, value);
+	if (ret < 0) {
+		Alert("Failed to store the environment variable '%s'. Reason : %s. Aborting.\n", envname, strerror(errno));
+		return 1;
+	}
+	else if (ret > len) {
+		Alert("Environment variable '%s' was truncated. Aborting.\n", envname);
+		return 1;
+	}
+	return 0;
+}
 
 static int prepare_external_check(struct check *check)
 {
@@ -1575,10 +1651,8 @@ static int prepare_external_check(struct check *check)
 	struct proxy *px = s->proxy;
 	struct listener *listener = NULL, *l;
 	int i;
-	const char *err_fmt = "Starting [%s:%s] check: out of memory.\n";
 	const char *path = px->check_path ? px->check_path : DEF_CHECK_PATH;
-	char host[46];
-	char serv[6];
+	char buf[256];
 
 	list_for_each_entry(l, &px->conf.listeners, by_fe)
 		/* Use the first INET, INET6 or UNIX listener */
@@ -1589,58 +1663,80 @@ static int prepare_external_check(struct check *check)
 			break;
 		}
 
-	if (!listener) {
-		err_fmt = "Starting [%s:%s] check: no listener.\n";
+	check->curpid = NULL;
+	check->envp = calloc((EXTCHK_SIZE + 1), sizeof(char *));
+	if (!check->envp) {
+		Alert("Failed to allocate memory for environment variables. Aborting\n");
 		goto err;
 	}
 
-	check->curpid = NULL;
-
-	check->envp = calloc(2, sizeof(check->argv));
-	if (!check->envp)
+	check->argv = calloc(6, sizeof(char *));
+	if (!check->argv) {
+		Alert("Starting [%s:%s] check: out of memory.\n", px->id, s->id);
 		goto err;
-	check->envp[0] = malloc(strlen("PATH=") + strlen(path) + 1);
-	if (!check->envp[0])
-		goto err;
-	strcpy(check->envp[0], "PATH=");
-	strcpy(check->envp[0] + strlen(check->envp[0]), path);
-	check->envp[1] = NULL;
-
-	check->argv = calloc(6, sizeof(check->argv));
-	if (!check->argv)
-		goto err;
+	}
 
 	check->argv[0] = px->check_command;
 
-	if (listener->addr.ss_family == AF_INET ||
+	if (!listener) {
+		check->argv[1] = strdup("NOT_USED");
+		check->argv[2] = strdup("NOT_USED");
+	}
+	else if (listener->addr.ss_family == AF_INET ||
 	    listener->addr.ss_family == AF_INET6) {
-		addr_to_str(&listener->addr, host, sizeof(host));
-		check->argv[1] = strdup(host);
-		port_to_str(&listener->addr, serv, sizeof(serv));
-		check->argv[2] = strdup(serv);
-	} else if (listener->addr.ss_family == AF_UNIX) {
+		addr_to_str(&listener->addr, buf, sizeof(buf));
+		check->argv[1] = strdup(buf);
+		port_to_str(&listener->addr, buf, sizeof(buf));
+		check->argv[2] = strdup(buf);
+	}
+	else if (listener->addr.ss_family == AF_UNIX) {
 		const struct sockaddr_un *un;
 
 		un = (struct sockaddr_un *)&listener->addr;
 		check->argv[1] = strdup(un->sun_path);
 		check->argv[2] = strdup("NOT_USED");
-	} else {
+	}
+	else {
+		Alert("Starting [%s:%s] check: unsupported address family.\n", px->id, s->id);
 		goto err;
 	}
 
-	addr_to_str(&s->addr, host, sizeof(host));
-	check->argv[3] = strdup(host);
-	port_to_str(&s->addr, serv, sizeof(serv));
-	check->argv[4] = strdup(serv);
+	addr_to_str(&s->addr, buf, sizeof(buf));
+	check->argv[3] = strdup(buf);
+	port_to_str(&s->addr, buf, sizeof(buf));
+	check->argv[4] = strdup(buf);
 
-	for (i = 0; i < 5; i++)
-		if (!check->argv[i])
+	for (i = 0; i < 5; i++) {
+		if (!check->argv[i]) {
+			Alert("Starting [%s:%s] check: out of memory.\n", px->id, s->id);
 			goto err;
+		}
+	}
+
+	EXTCHK_SETENV(check, EXTCHK_PATH, path, err);
+	/* Add proxy environment variables */
+	EXTCHK_SETENV(check, EXTCHK_HAPROXY_PROXY_NAME, px->id, err);
+	EXTCHK_SETENV(check, EXTCHK_HAPROXY_PROXY_ID, ultoa_r(px->uuid, buf, sizeof(buf)), err);
+	EXTCHK_SETENV(check, EXTCHK_HAPROXY_PROXY_ADDR, check->argv[1], err);
+	EXTCHK_SETENV(check, EXTCHK_HAPROXY_PROXY_PORT, check->argv[2], err);
+	/* Add server environment variables */
+	EXTCHK_SETENV(check, EXTCHK_HAPROXY_SERVER_NAME, s->id, err);
+	EXTCHK_SETENV(check, EXTCHK_HAPROXY_SERVER_ID, ultoa_r(s->puid, buf, sizeof(buf)), err);
+	EXTCHK_SETENV(check, EXTCHK_HAPROXY_SERVER_ADDR, check->argv[3], err);
+	EXTCHK_SETENV(check, EXTCHK_HAPROXY_SERVER_PORT, check->argv[4], err);
+	EXTCHK_SETENV(check, EXTCHK_HAPROXY_SERVER_MAXCONN, ultoa_r(s->maxconn, buf, sizeof(buf)), err);
+	EXTCHK_SETENV(check, EXTCHK_HAPROXY_SERVER_CURCONN, ultoa_r(s->cur_sess, buf, sizeof(buf)), err);
+
+	/* Ensure that we don't leave any hole in check->envp */
+	for (i = 0; i < EXTCHK_SIZE; i++)
+		if (!check->envp[i])
+			EXTCHK_SETENV(check, i, "", err);
 
 	return 1;
 err:
 	if (check->envp) {
-		free(check->envp[1]);
+		for (i = 0; i < EXTCHK_SIZE; i++)
+			free(check->envp[i]);
 		free(check->envp);
 		check->envp = NULL;
 	}
@@ -1651,7 +1747,6 @@ err:
 		free(check->argv);
 		check->argv = NULL;
 	}
-	Alert(err_fmt, px->id, s->id);
 	return 0;
 }
 
@@ -1671,6 +1766,7 @@ err:
  */
 static int connect_proc_chk(struct task *t)
 {
+	char buf[256];
 	struct check *check = t->context;
 	struct server *s = check->server;
 	struct proxy *px = s->proxy;
@@ -1692,6 +1788,7 @@ static int connect_proc_chk(struct task *t)
 		/* Child */
 		extern char **environ;
 		environ = check->envp;
+		extchk_setenv(check, EXTCHK_HAPROXY_SERVER_CURCONN, ultoa_r(s->cur_sess, buf, sizeof(buf)));
 		execvp(px->check_command, check->argv);
 		Alert("Failed to exec process for external health check: %s. Aborting.\n",
 		      strerror(errno));
@@ -2300,7 +2397,7 @@ static int tcpcheck_get_step_id(struct server *s)
 static void tcpcheck_main(struct connection *conn)
 {
 	char *contentptr;
-	struct tcpcheck_rule *cur = NULL;
+	struct tcpcheck_rule *cur, *next;
 	int done = 0, ret = 0;
 	struct check *check = conn->owner;
 	struct server *s = check->server;
@@ -2396,6 +2493,11 @@ static void tcpcheck_main(struct connection *conn)
 			break;
 		}
 
+		/* have 'next' point to the next rule or NULL if we're on the last one */
+		next = (struct tcpcheck_rule *)cur->list.n;
+		if (&next->list == head)
+			next = NULL;
+
 		if (check->current_step->action == TCPCHK_ACT_CONNECT) {
 			struct protocol *proto;
 			struct xprt_ops *xprt;
@@ -2445,7 +2547,9 @@ static void tcpcheck_main(struct connection *conn)
 
 			ret = SN_ERR_INTERNAL;
 			if (proto->connect)
-				ret = proto->connect(conn, check->type, (check->type) ? 0 : 2);
+				ret = proto->connect(conn,
+						     1 /* I/O polling is always needed */,
+						     (next && next->action == TCPCHK_ACT_EXPECT) ? 0 : 2);
 			conn->flags |= CO_FL_WAKE_DATA;
 			if (check->current_step->conn_opts & TCPCHK_OPT_SEND_PROXY) {
 				conn->send_proxy_ofs = 1;

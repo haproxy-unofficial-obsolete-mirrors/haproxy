@@ -26,6 +26,7 @@
 #include <common/hash.h>
 #include <common/ticks.h>
 #include <common/time.h>
+#include <common/namespace.h>
 
 #include <types/global.h>
 
@@ -73,6 +74,9 @@ static unsigned int gen_hash(const struct proxy* px, const char* key, unsigned l
 		break;
 	case BE_LB_HFCN_WT6:
 		hash = hash_wt6(key, len);
+		break;
+	case BE_LB_HFCN_CRC32:
+		hash = hash_crc32(key, len);
 		break;
 	case BE_LB_HFCN_SDBM:
 		/* this is the default hash function */
@@ -408,29 +412,33 @@ struct server *get_server_hh(struct session *s)
 		hash = gen_hash(px, p, len);
 	} else {
 		int dohash = 0;
-		p += len - 1;
-		start = end = p;
+		p += len;
 		/* special computation, use only main domain name, not tld/host
 		 * going back from the end of string, start hashing at first
 		 * dot stop at next.
 		 * This is designed to work with the 'Host' header, and requires
 		 * a special option to activate this.
 		 */
+		end = p;
 		while (len) {
-			if (*p == '.') {
-				if (!dohash) {
-					dohash = 1;
-					start = end = p - 1;
-				}
-				else
+			if (dohash) {
+				/* Rewind the pointer until the previous char
+				 * is a dot, this will allow to set the start
+				 * position of the domain. */
+				if (*(p - 1) == '.')
 					break;
-			} else {
-				if (dohash)
-					start--;
 			}
-			len--;
+			else if (*p == '.') {
+				/* The pointer is rewinded to the dot before the
+				 * tld, we memorize the end of the domain and
+				 * can enter the domain processing. */
+				end = p;
+				dohash = 1;
+			}
 			p--;
+			len--;
 		}
+		start = p;
 		hash = gen_hash(px, start, (end - start));
 	}
 	if ((px->lbprm.algo & BE_LB_HASH_MOD) == BE_LB_HMOD_AVAL)
@@ -552,7 +560,7 @@ int assign_server(struct session *s)
 	       (__objt_server(conn->target)->nbpend + 1) < s->be->max_ka_queue))) &&
 	    srv_is_usable(__objt_server(conn->target))) {
 		/* This session was relying on a server in a previous request
-		 * and the proxy has "option prefer-current-server" set, so
+		 * and the proxy has "option prefer-last-server" set, so
 		 * let's try to reuse the same server.
 		 */
 		srv = __objt_server(conn->target);
@@ -720,7 +728,6 @@ int assign_server(struct session *s)
 	return err;
 }
 
-
 /*
  * This function assigns a server address to a session, and sets SN_ADDR_SET.
  * The address is taken from the currently assigned server, or from the
@@ -803,10 +810,12 @@ int assign_server_address(struct session *s)
 		return SRV_STATUS_INTERNAL;
 	}
 
+	/* Copy network namespace from client connection */
+	srv_conn->proxy_netns = cli_conn ? cli_conn->proxy_netns : NULL;
+
 	s->flags |= SN_ADDR_SET;
 	return SRV_STATUS_OK;
 }
-
 
 /* This function assigns a server to session <s> if required, and can add the
  * connection to either the assigned server's queue or to the proxy's queue.

@@ -41,6 +41,7 @@
 #include <common/standard.h>
 #include <common/time.h>
 #include <common/uri_auth.h>
+#include <common/namespace.h>
 
 #include <types/capture.h>
 #include <types/compression.h>
@@ -695,6 +696,32 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		}
 	}
 #endif
+	else if (!strcmp(args[0], "tune.buffers.limit")) {
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		global.tune.buf_limit = atol(args[1]);
+		if (global.tune.buf_limit) {
+			if (global.tune.buf_limit < 3)
+				global.tune.buf_limit = 3;
+			if (global.tune.buf_limit <= global.tune.reserved_bufs)
+				global.tune.buf_limit = global.tune.reserved_bufs + 1;
+		}
+	}
+	else if (!strcmp(args[0], "tune.buffers.reserve")) {
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		global.tune.reserved_bufs = atol(args[1]);
+		if (global.tune.reserved_bufs < 2)
+			global.tune.reserved_bufs = 2;
+		if (global.tune.buf_limit && global.tune.buf_limit <= global.tune.reserved_bufs)
+			global.tune.buf_limit = global.tune.reserved_bufs + 1;
+	}
 	else if (!strcmp(args[0], "tune.bufsize")) {
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
@@ -2006,7 +2033,6 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		curproxy->no_options = defproxy.no_options;
 		curproxy->no_options2 = defproxy.no_options2;
 		curproxy->bind_proc = defproxy.bind_proc;
-		curproxy->lbprm.algo = defproxy.lbprm.algo;
 		curproxy->except_net = defproxy.except_net;
 		curproxy->except_mask = defproxy.except_mask;
 		curproxy->except_to = defproxy.except_to;
@@ -2040,6 +2066,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		}
 
 		if (curproxy->cap & PR_CAP_BE) {
+			curproxy->lbprm.algo = defproxy.lbprm.algo;
 			curproxy->fullconn = defproxy.fullconn;
 			curproxy->conn_retries = defproxy.conn_retries;
 			curproxy->max_ka_queue = defproxy.max_ka_queue;
@@ -2157,6 +2184,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		if (curproxy->conf.uniqueid_format_string)
 			curproxy->conf.uniqueid_format_string = strdup(curproxy->conf.uniqueid_format_string);
 
+		if (defproxy.log_tag)
+			curproxy->log_tag = strdup(defproxy.log_tag);
+
 		if (defproxy.conf.uif_file) {
 			curproxy->conf.uif_file = strdup(defproxy.conf.uif_file);
 			curproxy->conf.uif_line = defproxy.conf.uif_line;
@@ -2222,6 +2252,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		free(defproxy.conf.uniqueid_format_string);
 		free(defproxy.conf.lfs_file);
 		free(defproxy.conf.uif_file);
+		free(defproxy.log_tag);
 
 		for (rc = 0; rc < HTTP_ERR_SIZE; rc++)
 			chunk_destroy(&defproxy.errmsg[rc]);
@@ -4804,11 +4835,15 @@ stats_error_parsing:
 			}
 			else if (!strcmp(args[2], "djb2")) {
 				curproxy->lbprm.algo |= BE_LB_HFCN_DJB2;
-			} else if (!strcmp(args[2], "wt6")) {
+			}
+			else if (!strcmp(args[2], "wt6")) {
 				curproxy->lbprm.algo |= BE_LB_HFCN_WT6;
 			}
+			else if (!strcmp(args[2], "crc32")) {
+				curproxy->lbprm.algo |= BE_LB_HFCN_CRC32;
+			}
 			else {
-				Alert("parsing [%s:%d] : '%s' only supports 'sdbm', 'djb2' or 'wt6' hash functions.\n", file, linenum, args[0]);
+				Alert("parsing [%s:%d] : '%s' only supports 'sdbm', 'djb2', 'crc32', or 'wt6' hash functions.\n", file, linenum, args[0]);
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;
 			}
@@ -4884,7 +4919,15 @@ stats_error_parsing:
 			err_code |= ERR_WARN;
 		}
 	}
-
+	else if (!strcmp(args[0], "log-tag")) {  /* tag to report to syslog */
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d] : '%s' expects a tag for use in syslog.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		free(curproxy->log_tag);
+		curproxy->log_tag = strdup(args[1]);
+	}
 	else if (!strcmp(args[0], "log") && kwm == KWM_NO) {
 		/* delete previous herited or defined syslog servers */
 		struct logsrv *back;
@@ -5645,6 +5688,48 @@ stats_error_parsing:
 }
 
 int
+cfg_parse_netns(const char *file, int linenum, char **args, int kwm)
+{
+#ifdef CONFIG_HAP_NS
+	const char *err;
+	const char *item = args[0];
+
+	if (!strcmp(item, "namespace_list")) {
+		return 0;
+	}
+	else if (!strcmp(item, "namespace")) {
+		size_t idx = 1;
+		const char *current;
+		while (*(current = args[idx++])) {
+			err = invalid_char(current);
+			if (err) {
+				Alert("parsing [%s:%d]: character '%c' is not permitted in '%s' name '%s'.\n",
+				      file, linenum, *err, item, current);
+				return ERR_ALERT | ERR_FATAL;
+			}
+
+			if (netns_store_lookup(current, strlen(current))) {
+				Alert("parsing [%s:%d]: Namespace '%s' is already added.\n",
+				      file, linenum, current);
+				return ERR_ALERT | ERR_FATAL;
+			}
+			if (!netns_store_insert(current)) {
+				Alert("parsing [%s:%d]: Cannot open namespace '%s'.\n",
+				      file, linenum, current);
+				return ERR_ALERT | ERR_FATAL;
+			}
+		}
+	}
+
+	return 0;
+#else
+	Alert("parsing [%s:%d]: namespace support is not compiled in.",
+			file, linenum);
+	return ERR_ALERT | ERR_FATAL;
+#endif
+}
+
+int
 cfg_parse_users(const char *file, int linenum, char **args, int kwm)
 {
 
@@ -5856,7 +5941,8 @@ int readcfgfile(const char *file)
 	    !cfg_register_section("defaults", cfg_parse_listen) ||
 	    !cfg_register_section("global",   cfg_parse_global) ||
 	    !cfg_register_section("userlist", cfg_parse_users)  ||
-	    !cfg_register_section("peers",    cfg_parse_peers))
+	    !cfg_register_section("peers",    cfg_parse_peers)  ||
+	    !cfg_register_section("namespace_list",    cfg_parse_netns))
 		return -1;
 
 	if ((f=fopen(file,"r")) == NULL)
@@ -6058,7 +6144,10 @@ void propagate_processes(struct proxy *from, struct proxy *to)
 		from = to;
 	}
 
-	if (!from->cap & PR_CAP_FE)
+	if (!(from->cap & PR_CAP_FE))
+		return;
+
+	if (from->state == PR_STSTOPPED)
 		return;
 
 	/* default_backend */
@@ -6735,7 +6824,7 @@ out_uri_auth_compat:
 			curproxy->conf.args.file = curproxy->conf.uif_file;
 			curproxy->conf.args.line = curproxy->conf.uif_line;
 			parse_logformat_string(curproxy->conf.uniqueid_format_string, curproxy, &curproxy->format_unique_id, LOG_OPT_HTTP,
-					       (proxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR,
+					       (curproxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR,
 					       curproxy->conf.uif_file, curproxy->conf.uif_line);
 			curproxy->conf.args.file = NULL;
 			curproxy->conf.args.line = 0;
@@ -6982,7 +7071,6 @@ out_uri_auth_compat:
 					newsrv->admin |= SRV_ADMF_IMAINT;
 					newsrv->state = SRV_ST_STOPPED;
 					newsrv->check.health = 0;
-					newsrv->agent.health = 0;
 				}
 
 				newsrv->track = srv;

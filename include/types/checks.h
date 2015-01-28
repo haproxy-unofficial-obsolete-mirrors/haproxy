@@ -80,6 +80,32 @@ enum {
 	HCHK_STATUS_SIZE
 };
 
+/* environment variables memory requirement for different types of data */
+#define EXTCHK_SIZE_EVAL_INIT 0		/* size determined during the init phase,
+					 * such environment variables are not updatable. */
+#define EXTCHK_SIZE_ULONG     20	/* max string length for an unsigned long value */
+
+/* external checks environment variables */
+enum {
+	EXTCHK_PATH = 0,
+
+	/* Proxy specific environment variables */
+	EXTCHK_HAPROXY_PROXY_NAME,	/* the backend name */
+	EXTCHK_HAPROXY_PROXY_ID,	/* the backend id */
+	EXTCHK_HAPROXY_PROXY_ADDR,	/* the first bind address if available (or empty) */
+	EXTCHK_HAPROXY_PROXY_PORT,	/* the first bind port if available (or empty) */
+
+	/* Server specific environment variables */
+	EXTCHK_HAPROXY_SERVER_NAME,	/* the server name */
+	EXTCHK_HAPROXY_SERVER_ID,	/* the server id */
+	EXTCHK_HAPROXY_SERVER_ADDR,	/* the server address */
+	EXTCHK_HAPROXY_SERVER_PORT,	/* the server port if available (or empty) */
+	EXTCHK_HAPROXY_SERVER_MAXCONN,	/* the server max connections */
+	EXTCHK_HAPROXY_SERVER_CURCONN,	/* the current number of connections on the server */
+
+	EXTCHK_SIZE
+};
+
 
 /* health status for response tracking */
 enum {
@@ -129,6 +155,7 @@ enum {
 };
 
 struct check {
+	struct xprt_ops *xprt;			/* transport layer operations for health checks */
 	struct connection *conn;		/* connection state for health checks */
 	unsigned short port;			/* the port to use for the health checks */
 	struct buffer *bi, *bo;			/* input and output buffers to send/recv check */
@@ -136,7 +163,7 @@ struct check {
 	struct timeval start;			/* last health check start time */
 	long duration;				/* time in ms took to finish last health check */
 	short status, code;			/* check result, check code */
-	char desc[HCHK_DESC_LEN];		/* health check descritpion */
+	char desc[HCHK_DESC_LEN];		/* health check description */
 	int use_ssl;				/* use SSL for health checks */
 	int send_proxy;				/* send a PROXY protocol header with checks */
 	struct tcpcheck_rule *current_step;     /* current step when using tcpcheck */
@@ -158,6 +185,11 @@ struct check_status {
 	short result;			/* one of SRV_CHK_* */
 	char *info;			/* human readable short info */
 	char *desc;			/* long description */
+};
+
+struct extcheck_env {
+	char *name;	/* environment variable name */
+	int vmaxlen;	/* value maximum length, used to determine the required memory allocation */
 };
 
 struct analyze_status {

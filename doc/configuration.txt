@@ -629,7 +629,7 @@ log-tag <string>
   Sets the tag field in the syslog header to this string. It defaults to the
   program name as launched from the command line, which usually is "haproxy".
   Sometimes it can be useful to differentiate between multiple processes
-  running on the same host.
+  running on the same host. See also the per-proxy "log-tag" directive.
 
 nbproc <number>
   Creates <number> processes when going daemon. This requires the "daemon"
@@ -663,6 +663,15 @@ ssl-default-bind-ciphers <ciphers>
   as "AES:ALL:!aNULL:!eNULL:+RC4:@STRENGTH" (without quotes). Please check the
   "bind" keyword for more information.
 
+ssl-default-bind-options [<option>]...
+  This setting is only available when support for OpenSSL was built in. It sets
+  default ssl-options to force on all "bind" lines. Please check the "bind"
+  keyword to see available options.
+
+  Example:
+        global
+           ssl-default-bind-options no-sslv3 no-tls-tickets
+
 ssl-default-server-ciphers <ciphers>
   This setting is only available when support for OpenSSL was built in. It
   sets the default string describing the list of cipher algorithms that are
@@ -670,6 +679,11 @@ ssl-default-server-ciphers <ciphers>
   lines which do not explicitly define theirs. The format of the string is
   defined in "man 1 ciphers". Please check the "server" keyword for more
   information.
+
+ssl-default-server-options [<option>]...
+  This setting is only available when support for OpenSSL was built in. It sets
+  default ssl-options to force on all "server" lines. Please check the "server"
+  keyword to see available options.
 
 ssl-server-verify [none|required]
   The default behavior for SSL verify on servers side. If specified to 'none',
@@ -761,7 +775,11 @@ maxconn <number>
   the "select" poller cannot reliably use more than 1024 file descriptors on
   some platforms. If your platform only supports select and reports "select
   FAILED" on startup, you need to reduce maxconn until it works (slightly
-  below 500 in general).
+  below 500 in general). If this value is not set, it will default to the value
+  set in DEFAULT_MAXCONN at build time (reported in haproxy -vv) if no memory
+  limit is enforced, or will be computed based on the memory limit, the buffer
+  size, memory allocated to compression, SSL cache size, and use or not of SSL
+  and the associated maxsslconn (which can also be automatic).
 
 maxconnrate <number>
   Sets the maximum per-process number of connections per second to <number>.
@@ -818,6 +836,13 @@ maxsslconn <number>
   (since it unfortunately does not reliably check for such conditions). Note
   that the limit applies both to incoming and outgoing connections, so one
   connection which is deciphered then ciphered accounts for 2 SSL connections.
+  If this value is not set, but a memory limit is enforced, this value will be
+  automatically computed based on the memory limit, maxconn,  the buffer size,
+  memory allocated to compression, SSL cache size, and use of SSL in either
+  frontends, backends or both. If neither maxconn nor maxsslconn are specified
+  when there is a memory limit, haproxy will automatically adjust these values
+  so that 100% of the connections can be made over SSL with no risk, and will
+  consider the sides where it is enabled (frontend, backend, both).
 
 maxsslrate <number>
   Sets the maximum per-process number of SSL sessions per second to <number>.
@@ -876,6 +901,29 @@ spread-checks <0..50, in percent>
   becomes possible to add some randomness in the check interval between 0
   and +/- 50%. A value between 2 and 5 seems to show good results. The
   default value remains at 0.
+
+tune.buffers.limit <number>
+  Sets a hard limit on the number of buffers which may be allocated per process.
+  The default value is zero which means unlimited. The minimum non-zero value
+  will always be greater than "tune.buffers.reserve" and should ideally always
+  be about twice as large. Forcing this value can be particularly useful to
+  limit the amount of memory a process may take, while retaining a sane
+  behaviour. When this limit is reached, sessions which need a buffer wait for
+  another one to be released by another session. Since buffers are dynamically
+  allocated and released, the waiting time is very short and not perceptible
+  provided that limits remain reasonable. In fact sometimes reducing the limit
+  may even increase performance by increasing the CPU cache's efficiency. Tests
+  have shown good results on average HTTP traffic with a limit to 1/10 of the
+  expected global maxconn setting, which also significantly reduces memory
+  usage. The memory savings come from the fact that a number of connections
+  will not allocate 2*tune.bufsize. It is best not to touch this value unless
+  advised to do so by an haproxy core developer.
+
+tune.buffers.reserve <number>
+  Sets the number of buffers which are pre-allocated and reserved for use only
+  during memory shortage conditions resulting in failed memory allocations. The
+  minimum value is 2 and is also the default. There is no reason a user would
+  want to change this value, it's mostly aimed at haproxy core developers.
 
 tune.bufsize <number>
   Sets the buffer size to this size (in bytes). Lower values allow more
@@ -1315,6 +1363,8 @@ http-send-name-header                     -          -         X         X
 id                                        -          X         X         X
 ignore-persist                            -          X         X         X
 log                                  (*)  X          X         X         X
+log-format                                X          X         X         -
+log-tag                                   X          X         X         X
 max-keep-alive-queue                      X          -         X         X
 maxconn                                   X          X         X         -
 mode                                      X          X         X         X
@@ -2744,6 +2794,11 @@ hash-type <method> <function> <modifier>
               data such as a source IP address or a visitor identifier in a URL
               parameter.
 
+       crc32  this is the most common CRC32 implementation as used in Ethernet,
+              gzip, PNG, etc. It is slower than the other ones but may provide
+              a better distribution or less predictable results especially when
+              used on strings.
+
     <modifier> indicates an optional method applied after hashing the key :
 
        avalanche   This directive indicates that the result from the hash
@@ -2916,7 +2971,8 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
               del-header <name> | set-nice <nice> | set-log-level <level> |
               replace-header <name> <match-regex> <replace-fmt> |
               replace-value <name> <match-regex> <replace-fmt> |
-              set-tos <tos> | set-mark <mark> |
+              set-method <fmt> | set-path <fmt> | set-query <fmt> |
+              set-uri <fmt> | set-tos <tos> | set-mark <mark> |
               add-acl(<file name>) <key fmt> |
               del-acl(<file name>) <key fmt> |
               del-map(<file name>) <key fmt> |
@@ -2979,7 +3035,8 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
     - "set-header" does the same as "add-header" except that the header name
       is first removed if it existed. This is useful when passing security
       information to the server, where the header must not be manipulated by
-      external users.
+      external users. Note that the new value is computed before the removal so
+      it is possible to concatenate a value to an existing header.
 
     - "del-header" removes all HTTP header fields whose name is specified in
       <name>.
@@ -3024,6 +3081,42 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
       outputs:
 
         X-Forwarded-For: 172.16.10.1, 172.16.13.24, 10.0.0.37
+
+    - "set-method" rewrites the request method with the result of the
+      evaluation of format string <fmt>. There should be very few valid reasons
+      for having to do so as this is more likely to break something than to fix
+      it.
+
+    - "set-path" rewrites the request path with the result of the evaluation of
+      format string <fmt>. The query string, if any, is left intact. If a
+      scheme and authority is found before the path, they are left intact as
+      well. If the request doesn't have a path ("*"), this one is replaced with
+      the format. This can be used to prepend a directory component in front of
+      a path for example. See also "set-query" and "set-uri".
+
+      Example :
+          # prepend the host name before the path
+          http-request set-path /%[hdr(host)]%[path]
+
+    - "set-query" rewrites the request's query string which appears after the
+      first question mark ("?") with the result of the evaluation of format
+      string <fmt>. The part prior to the question mark is left intact. If the
+      request doesn't contain a question mark and the new value is not empty,
+      then one is added at the end of the URI, followed by the new value. If
+      a question mark was present, it will never be removed even if the value
+      is empty. This can be used to add or remove parameters from the query
+      string. See also "set-query" and "set-uri".
+
+      Example :
+          # replace "%3D" with "=" in the query string
+          http-request set-query %[query,regsub(%3D,=,g)]
+
+    - "set-uri" rewrites the request URI with the result of the evaluation of
+      format string <fmt>. The scheme, authority, path and query string are all
+      replaced at once. This can be used to rewrite hosts in front of proxies,
+      or to perform complex modifications to the URI such as moving parts
+      between the path and the query string. See also "set-path" and
+      "set-query".
 
     - "set-nice" sets the "nice" factor of the current request being processed.
       It only has effect against the other requests being processed at the same
@@ -3510,10 +3603,30 @@ no log
 
 
 log-format <string>
-   Allows you to custom a log line.
+  Specifies the log format string to use for traffic logs
+  May be used in sections:    defaults | frontend | listen | backend
+                                 yes   |    yes   |   yes  |    no
 
-   See also : Custom Log Format (8.2.4)
+  This directive specifies the log format string that will be used for all logs
+  resulting from traffic passing through the frontend using this line. If the
+  directive is used in a defaults section, all subsequent frontends will use
+  the same log format. Please see section 8.2.4 which covers the log format
+  string in depth.
 
+log-tag <string>
+  Specifies the log tag to use for all outgoing logs
+  May be used in sections:    defaults | frontend | listen | backend
+                                 yes   |    yes   |   yes  |   yes
+
+  Sets the tag field in the syslog header to this string. It defaults to the
+  log-tag set in the global section, otherwise the program name as launched
+  from the command line, which usually is "haproxy". Sometimes it can be useful
+  to differentiate between multiple processes running on the same host, or to
+  differentiate customer instances running in the same process. In the backend,
+  logs about servers up/down will use this tag. As a hint, it can be convenient
+  to set a log-tag related to a hosted customer in a defaults section then put
+  all the frontends and backends for that customer, then start another customer
+  in a new defaults section. See also the global "log-tag" directive.
 
 max-keep-alive-queue <value>
   Set the maximum server queue size for maintaining keep-alive connections
@@ -4461,10 +4574,8 @@ option httplog [ clf ]
 
   This option may be set either in the frontend or the backend.
 
-  If this option has been enabled in a "defaults" section, it can be disabled
-  in a specific instance by prepending the "no" keyword before it. Specifying
-  only "option httplog" will automatically clear the 'clf' mode if it was set
-  by default.
+  Specifying only "option httplog" will automatically clear the 'clf' mode
+  if it was set by default.
 
   See also :  section 8 about logging.
 
@@ -5319,18 +5430,46 @@ external-check command <command>
   Arguments :
     <command> is the external command to run
 
-  The PATH environment variable used when executing the
-  command may be set using "external-check path".
-
   The arguments passed to the to the command are:
 
-  proxy_address proxy_port server_address server_port
+  <proxy_address> <proxy_port> <server_address> <server_port>
 
-  The proxy_address and proxy_port are derived from the first listener
-  that is either IPv4, IPv6 or a UNIX socket. It is an error for no such
-  listeners to exist. In the case of a UNIX socket listener the
-  proxy_address will be the path of the socket and the proxy_port will
-  be the string "NOT_USED".
+  The <proxy_address> and <proxy_port> are derived from the first listener
+  that is either IPv4, IPv6 or a UNIX socket. In the case of a UNIX socket
+  listener the proxy_address will be the path of the socket and the
+  <proxy_port> will be the string "NOT_USED". In a backend section, it's not
+  possible to determine a listener, and both <proxy_address> and <proxy_port>
+  will have the string value "NOT_USED".
+
+  Some values are also provided through environment variables.
+
+  Environment variables :
+    HAPROXY_PROXY_ADDR      The first bind address if available (or empty if not
+                            applicable, for example in a "backend" section).
+
+    HAPROXY_PROXY_ID        The backend id.
+
+    HAPROXY_PROXY_NAME      The backend name.
+
+    HAPROXY_PROXY_PORT      The first bind port if available (or empty if not
+                            applicable, for example in a "backend" section or
+                            for a UNIX socket).
+
+    HAPROXY_SERVER_ADDR     The server address.
+
+    HAPROXY_SERVER_CURCONN  The current number of connections on the server.
+
+    HAPROXY_SERVER_ID       The server id.
+
+    HAPROXY_SERVER_MAXCONN  The server max connections.
+
+    HAPROXY_SERVER_NAME     The server name.
+
+    HAPROXY_SERVER_PORT     The server port if available (or empty for a UNIX
+                            socket).
+
+    PATH                    The PATH environment variable used when executing
+                            the command may be set using "external-check path".
 
   If the command executed and exits with a zero status then the check is
   considered to have passed, otherwise the check is considered to have
@@ -8414,20 +8553,21 @@ crt <cert>
   are loaded.
 
   If a directory name is used instead of a PEM file, then all files found in
-  that directory will be loaded unless their name ends with '.issuer' or
-  '.ocsp' (reserved extensions). This directive may be specified multiple times
-  in order to load certificates from multiple files or directories. The
-  certificates will be presented to clients who provide a valid TLS Server Name
-  Indication field matching one of their CN or alt subjects. Wildcards are
-  supported, where a wildcard character '*' is used instead of the first
-  hostname component (eg: *.example.org matches www.example.org but not
+  that directory will be loaded in alphabetic order unless their name ends with
+  '.issuer' or '.ocsp' (reserved extensions). This directive may be specified
+  multiple times in order to load certificates from multiple files or
+  directories. The certificates will be presented to clients who provide a valid
+  TLS Server Name Indication field matching one of their CN or alt subjects.
+  Wildcards are supported, where a wildcard character '*' is used instead of the
+  first hostname component (eg: *.example.org matches www.example.org but not
   www.sub.example.org).
 
   If no SNI is provided by the client or if the SSL library does not support
   TLS extensions, or if the client provides an SNI hostname which does not
   match any certificate, then the first loaded certificate will be presented.
   This means that when loading certificates from a directory, it is highly
-  recommended to load the default one first as a file.
+  recommended to load the default one first as a file or to ensure that it will
+  always be the first one in the directory.
 
   Note that the same cert may be loaded multiple times without side effects.
 
@@ -8490,19 +8630,23 @@ defer-accept
 force-sslv3
   This option enforces use of SSLv3 only on SSL connections instantiated from
   this listener. SSLv3 is generally less expensive than the TLS counterparts
-  for high connection rates. See also "force-tls*", "no-sslv3", and "no-tls*".
+  for high connection rates. This option is also available on global statement
+  "ssl-default-bind-options". See also "no-tlsv*" and "no-sslv3".
 
 force-tlsv10
   This option enforces use of TLSv1.0 only on SSL connections instantiated from
-  this listener. See also "force-tls*", "no-sslv3", and "no-tls*".
+  this listener. This option is also available on global statement
+  "ssl-default-bind-options". See also "no-tlsv*" and "no-sslv3".
 
 force-tlsv11
   This option enforces use of TLSv1.1 only on SSL connections instantiated from
-  this listener. See also "force-tls*", "no-sslv3", and "no-tls*".
+  this listener. This option is also available on global statement
+  "ssl-default-bind-options". See also "no-tlsv*", and "no-sslv3".
 
 force-tlsv12
   This option enforces use of TLSv1.2 only on SSL connections instantiated from
-  this listener. See also "force-tls*", "no-sslv3", and "no-tls*".
+  this listener. This option is also available on global statement
+  "ssl-default-bind-options". See also "no-tlsv*", and "no-sslv3".
 
 gid <gid>
   Sets the group of the UNIX sockets to the designated system gid. It can also
@@ -8595,35 +8739,40 @@ no-sslv3
   This setting is only available when support for OpenSSL was built in. It
   disables support for SSLv3 on any sockets instantiated from the listener when
   SSL is supported. Note that SSLv2 is forced disabled in the code and cannot
-  be enabled using any configuration option. See also "force-tls*",
+  be enabled using any configuration option. This option is also available on
+  global statement "ssl-default-bind-options". See also "force-tls*",
   and "force-sslv3".
 
 no-tls-tickets
   This setting is only available when support for OpenSSL was built in. It
   disables the stateless session resumption (RFC 5077 TLS Ticket
   extension) and force to use stateful session resumption. Stateless
-  session resumption is more expensive in CPU usage.
+  session resumption is more expensive in CPU usage. This option is also
+  available on global statement "ssl-default-bind-options".
 
 no-tlsv10
   This setting is only available when support for OpenSSL was built in. It
   disables support for TLSv1.0 on any sockets instantiated from the listener
   when SSL is supported. Note that SSLv2 is forced disabled in the code and
-  cannot be enabled using any configuration option. See also "force-tls*",
-  and "force-sslv3".
+  cannot be enabled using any configuration option. This option is also
+  available on global statement "ssl-default-bind-options". See also
+  "force-tlsv*", and "force-sslv3".
 
 no-tlsv11
   This setting is only available when support for OpenSSL was built in. It
   disables support for TLSv1.1 on any sockets instantiated from the listener
   when SSL is supported. Note that SSLv2 is forced disabled in the code and
-  cannot be enabled using any configuration option. See also "force-tls*",
-  and "force-sslv3".
+  cannot be enabled using any configuration option. This option is also
+  available on global statement "ssl-default-bind-options". See also
+  "force-tlsv*", and "force-sslv3".
 
 no-tlsv12
   This setting is only available when support for OpenSSL was built in. It
   disables support for TLSv1.2 on any sockets instantiated from the listener
   when SSL is supported. Note that SSLv2 is forced disabled in the code and
-  cannot be enabled using any configuration option. See also "force-tls*",
-  and "force-sslv3".
+  cannot be enabled using any configuration option. This option is also
+  available on global statement "ssl-default-bind-options". See also
+  "force-tlsv*", and "force-sslv3".
 
 npn <protocols>
   This enables the NPN TLS extension and advertises the specified protocol list
@@ -8956,25 +9105,29 @@ fall <count>
 force-sslv3
   This option enforces use of SSLv3 only when SSL is used to communicate with
   the server. SSLv3 is generally less expensive than the TLS counterparts for
-  high connection rates. See also "no-tlsv*", "no-sslv3".
+  high connection rates. This option is also available on global statement
+  "ssl-default-server-options". See also "no-tlsv*", "no-sslv3".
 
   Supported in default-server: No
 
 force-tlsv10
   This option enforces use of TLSv1.0 only when SSL is used to communicate with
-  the server. See also "no-tlsv*", "no-sslv3".
+  the server. This option is also available on global statement
+  "ssl-default-server-options". See also "no-tlsv*", "no-sslv3".
 
   Supported in default-server: No
 
 force-tlsv11
   This option enforces use of TLSv1.1 only when SSL is used to communicate with
-  the server. See also "no-tlsv*", "no-sslv3".
+  the server. This option is also available on global statement
+  "ssl-default-server-options". See also "no-tlsv*", "no-sslv3".
 
   Supported in default-server: No
 
 force-tlsv12
   This option enforces use of TLSv1.2 only when SSL is used to communicate with
-  the server. See also "no-tlsv*", "no-sslv3".
+  the server. This option is also available on global statement
+  "ssl-default-server-options". See also "no-tlsv*", "no-sslv3".
 
   Supported in default-server: No
 
@@ -9062,7 +9215,8 @@ no-tls-tickets
   This setting is only available when support for OpenSSL was built in. It
   disables the stateless session resumption (RFC 5077 TLS Ticket
   extension) and force to use stateful session resumption. Stateless
-  session resumption is more expensive in CPU usage for servers.
+  session resumption is more expensive in CPU usage for servers. This option
+  is also available on global statement "ssl-default-server-options".
 
   Supported in default-server: No
 
@@ -9070,8 +9224,9 @@ no-tlsv10
   This option disables support for TLSv1.0 when SSL is used to communicate with
   the server. Note that SSLv2 is disabled in the code and cannot be enabled
   using any configuration option. TLSv1 is more expensive than SSLv3 so it
-  often makes sense to disable it when communicating with local servers. See
-  also "force-sslv3", "force-tlsv*".
+  often makes sense to disable it when communicating with local servers. This
+  option is also available on global statement "ssl-default-server-options".
+  See also "force-sslv3", "force-tlsv*".
 
   Supported in default-server: No
 
@@ -9079,8 +9234,9 @@ no-tlsv11
   This option disables support for TLSv1.1 when SSL is used to communicate with
   the server. Note that SSLv2 is disabled in the code and cannot be enabled
   using any configuration option. TLSv1 is more expensive than SSLv3 so it
-  often makes sense to disable it when communicating with local servers. See
-  also "force-sslv3", "force-tlsv*".
+  often makes sense to disable it when communicating with local servers. This
+  option is also available on global statement "ssl-default-server-options".
+  See also "force-sslv3", "force-tlsv*".
 
   Supported in default-server: No
 
@@ -9088,8 +9244,9 @@ no-tlsv12
   This option disables support for TLSv1.2 when SSL is used to communicate with
   the server. Note that SSLv2 is disabled in the code and cannot be enabled
   using any configuration option. TLSv1 is more expensive than SSLv3 so it
-  often makes sense to disable it when communicating with local servers. See
-  also "force-sslv3", "force-tlsv*".
+  often makes sense to disable it when communicating with local servers. This
+  option is also available on global statement "ssl-default-server-options".
+  See also "force-sslv3", "force-tlsv*".
 
   Supported in default-server: No
 
@@ -9998,12 +10155,59 @@ sample fetch method. These keywords may equally be appended immediately after
 the fetch keyword's argument, delimited by a comma. These keywords can also
 support some arguments (eg: a netmask) which must be passed in parenthesis.
 
+A certain category of converters are bitwise and arithmetic operators which
+support performing basic operations on integers. Some bitwise operations are
+supported (and, or, xor, cpl) and some arithmetic operations are supported
+(add, sub, mul, div, mod, neg). Some comparators are provided (odd, even, not,
+bool) which make it possible to report a match without having to write an ACL.
+
 The currently available list of transformation keywords include :
+
+add(<value>)
+  Adds <value> to the input value of type unsigned integer, and returns the
+  result as an unsigned integer.
+
+and(<value>)
+  Performs a bitwise "AND" between <value> and the input value of type unsigned
+  integer, and returns the result as an unsigned integer.
 
 base64
   Converts a binary input sample to a base64 string. It is used to log or
   transfer binary content in a way that can be reliably transferred (eg:
   an SSL ID can be copied in a header).
+
+bool
+  Returns a boolean TRUE if the input value of type unsigned integer is
+  non-null, otherwise returns FALSE. Used in conjunction with and(), it can be
+  used to report true/false for bit testing on input values (eg: verify the
+  presence of a flag).
+
+bytes(<offset>[,<length>])
+  Extracts some bytes from an input binary sample. The result is a binary
+  sample starting at an offset (in bytes) of the original sample and
+  optionnaly truncated at the given length.
+
+cpl
+  Takes the input value of type unsigned integer, applies a twos-complement
+  (flips all bits) and returns the result as an unsigned integer.
+
+crc32([<avalanche>])
+  Hashes a binary input sample into an unsigned 32-bit quantity using the CRC32
+  hash function. Optionally, it is possible to apply a full avalanche hash
+  function to the output if the optional <avalanche> argument equals 1. This
+  converter uses the same functions as used by the various hash-based load
+  balancing algorithms, so it will provide exactly the same results. It is
+  provided for compatibility with other software which want a CRC32 to be
+  computed on some input keys, so it follows the most common implementation as
+  found in Ethernet, Gzip, PNG, etc... It is slower than the other algorithms
+  but may provide a better or at least less predictable distribution. It must
+  not be used for security purposes as a 32-bit hash is trivial to break. See
+  also "djb2", "sdbm", "wt6" and the "hash-type" directive.
+
+div(<value>)
+  Divides the input value of type unsigned integer by <value>, and returns the
+  result as an unsigned integer. If <value> is null, the largest unsigned
+  integer is returned (typically 2^32-1).
 
 djb2([<avalanche>])
   Hashes a binary input sample into an unsigned 32-bit quantity using the DJB2
@@ -10013,8 +10217,17 @@ djb2([<avalanche>])
   balancing algorithms, so it will provide exactly the same results. It is
   mostly intended for debugging, but can be used as a stick-table entry to
   collect rough statistics. It must not be used for security purposes as a
-  32-bit hash is trivial to break. See also "sdbm", "wt6" and the "hash-type"
-  directive.
+  32-bit hash is trivial to break. See also "crc32", "sdbm", "wt6" and the
+  "hash-type" directive.
+
+even
+  Returns a boolean TRUE if the input value of type unsigned integer is even
+  otherwise returns FALSE. It is functionally equivalent to "not,and(1),bool".
+
+field(<index>,<delimiters>)
+  Extracts the substring at the given index considering given delimiters from
+  an input string. Indexes start at 1 and delimiters are a string formatted
+  list of chars.
 
 hex
   Converts a binary input sample to an hex string containing two hex digits per
@@ -10042,6 +10255,46 @@ ipmask(<mask>)
   This can be used to make all hosts within a certain mask to share the same
   table entries and as such use the same server. The mask can be passed in
   dotted form (eg: 255.255.255.0) or in CIDR form (eg: 24).
+
+json([<input-code>])
+  Escapes the input string and produces an ASCII ouput string ready to use as a
+  JSON string. The converter tries to decode the input string according to the
+  <input-code> parameter. It can be "ascii", "utf8", "utf8s", "utf8"" or
+  "utf8ps". The "ascii" decoder never fails. The "utf8" decoder detects 3 types
+  of errors:
+   - bad UTF-8 sequence (lone continuation byte, bad number of continuation
+     bytes, ...)
+   - invalid range (the decoded value is within a UTF-8 prohibited range),
+   - code overlong (the value is encoded with more bytes than necessary).
+
+  The UTF-8 JSON encoding can produce a "too long value" error when the UTF-8
+  character is greater than 0xffff because the JSON string escape specification
+  only authorizes 4 hex digits for the value encoding. The UTF-8 decoder exists
+  in 4 variants designated by a combination of two suffix letters : "p" for
+  "permissive" and "s" for "silently ignore". The behaviors of the decoders
+  are :
+   - "ascii"  : never fails ;
+   - "utf8"   : fails on any detected errors ;
+   - "utf8s"  : never fails, but removes characters corresponding to errors ;
+   - "utf8p"  : accepts and fixes the overlong errors, but fails on any other
+                error ;
+   - "utf8ps" : never fails, accepts and fixes the overlong errors, but removes
+                characters corresponding to the other errors.
+
+  This converter is particularly useful for building properly escaped JSON for
+  logging to servers which consume JSON-formated traffic logs.
+
+  Example:
+     capture request header user-agent len 150
+     capture request header Host len 15
+     log-format {"ip":"%[src]","user-agent":"%[capture.req.hdr(1),json]"}
+
+  Input request from client 127.0.0.1:
+     GET / HTTP/1.0
+     User-Agent: Very "Ugly" UA 1/2
+
+  Output log:
+     {"ip":"127.0.0.1","user-agent":"Very \"Ugly\" UA 1\/2"}
 
 language(<value>[,<default>])
   Returns the value with the highest q-factor from a list as extracted from the
@@ -10146,6 +10399,57 @@ map_<match_type>_<output_type>(<map_file>[,<default_value>])
       |       `---------------------------- key
       `------------------------------------ leading spaces ignored
 
+mod(<value>)
+  Divides the input value of type unsigned integer by <value>, and returns the
+  remainder as an unsigned integer. If <value> is null, then zero is returned.
+
+mul(<value>)
+  Multiplies the input value of type unsigned integer by <value>, and returns
+  the product as an unsigned integer. In case of overflow, the higher bits are
+  lost, leading to seemingly strange values.
+
+neg
+  Takes the input value of type unsigned integer, computes the opposite value,
+  and returns the remainder as an unsigned integer. 0 is identity. This
+  operator is provided for reversed subtracts : in order to subtract the input
+  from a constant, simply perform a "neg,add(value)".
+
+not
+  Returns a boolean FALSE if the input value of type unsigned integer is
+  non-null, otherwise returns TRUE. Used in conjunction with and(), it can be
+  used to report true/false for bit testing on input values (eg: verify the
+  absence of a flag).
+
+odd
+  Returns a boolean TRUE if the input value of type unsigned integer is odd
+  otherwise returns FALSE. It is functionally equivalent to "and(1),bool".
+
+or(<value>)
+  Performs a bitwise "OR" between <value> and the input value of type unsigned
+  integer, and returns the result as an unsigned integer.
+
+regsub(<regex>,<subst>[,<flags>])
+  Applies a regex-based substitution to the input string. It does the same
+  operation as the well-known "sed" utility with "s/<regex>/<subst>/". By
+  default it will replace in the input string the first occurrence of the
+  largest part matching the regular expression <regex> with the substitution
+  string <subst>. It is possible to replace all occurrences instead by adding
+  the flag "g" in the third argument <flags>. It is also possible to make the
+  regex case insensitive by adding the flag "i" in <flags>. Since <flags> is a
+  string, it is made up from the concatenation of all desired flags. Thus if
+  both "i" and "g" are desired, using "gi" or "ig" will have the same effect.
+  It is important to note that due to the current limitations of the
+  configuration parser, some characters such as closing parenthesis or comma
+  are not possible to use in the arguments. The first use of this converter is
+  to replace certain characters or sequence of characters with other ones.
+
+  Example :
+
+     # de-duplicate "/" in header "x-path".
+     # input:  x-path: /////a///b/c/xzxyz/
+     # output: x-path: /a/b/c/xzxyz/
+     http-request set-header x-path %[hdr(x-path),regsub(/+,/,g)]
+
 sdbm([<avalanche>])
   Hashes a binary input sample into an unsigned 32-bit quantity using the SDBM
   hash function. Optionally, it is possible to apply a full avalanche hash
@@ -10154,8 +10458,13 @@ sdbm([<avalanche>])
   balancing algorithms, so it will provide exactly the same results. It is
   mostly intended for debugging, but can be used as a stick-table entry to
   collect rough statistics. It must not be used for security purposes as a
-  32-bit hash is trivial to break. See also "djb2", "wt6" and the "hash-type"
-  directive.
+  32-bit hash is trivial to break. See also "crc32", "djb2", "wt6" and the
+  "hash-type" directive.
+
+sub(<value>)
+  Subtracts <value> from the input value of type unsigned integer, and returns
+  the result as an unsigned integer. Note: in order to subtract the input from
+  a constant, simply perform a "neg,add(value)".
 
 table_bytes_in_rate(<table>)
   Uses the string representation of the input sample to perform a look up in
@@ -10315,6 +10624,10 @@ utime(<format>[,<offset>])
       # Eg:  20140710162350 127.0.0.1:57325
       log-format %[date,utime(%Y%m%d%H%M%S)]\ %ci:%cp
 
+word(<index>,<delimiters>)
+  Extracts the nth word considering given delimiters from an input string.
+  Indexes start at 1 and delimiters are a string formatted list of chars.
+
 wt6([<avalanche>])
   Hashes a binary input sample into an unsigned 32-bit quantity using the WT6
   hash function. Optionally, it is possible to apply a full avalanche hash
@@ -10323,8 +10636,12 @@ wt6([<avalanche>])
   balancing algorithms, so it will provide exactly the same results. It is
   mostly intended for debugging, but can be used as a stick-table entry to
   collect rough statistics. It must not be used for security purposes as a
-  32-bit hash is trivial to break. See also "djb2", "sdbm", and the "hash-type"
-  directive.
+  32-bit hash is trivial to break. See also "crc32", "djb2", "sdbm", and the
+  "hash-type" directive.
+
+xor(<value>)
+  Performs a bitwise "XOR" (exclusive OR) between <value> and the input value
+  of type unsigned integer, and returns the result as an unsigned integer.
 
 
 7.3.2. Fetching samples from internal states
@@ -10467,6 +10784,11 @@ fe_sess_rate([<frontend>]) : integer
             tcp-request content accept if ! too_fast
             tcp-request content accept if WAIT_END
 
+nbproc : integer
+  Returns an integer value corresponding to the number of processes that were
+  started (it equals the global "nbproc" setting). This is useful for logging
+  and debugging purposes.
+
 nbsrv([<backend>]) : integer
   Returns an integer value corresponding to the number of usable servers of
   either the current backend or the named backend. This is mostly used with
@@ -10474,6 +10796,11 @@ nbsrv([<backend>]) : integer
   switch to an alternate backend when the number of servers is too low to
   to handle some load. It is useful to report a failure when combined with
   "monitor fail".
+
+proc : integer
+  Returns an integer value corresponding to the position of the process calling
+  the function, between 1 and global.nbproc. This is useful for logging and
+  debugging purposes.
 
 queue([<backend>]) : integer
   Returns the total number of queued connections of the designated backend,
@@ -10524,6 +10851,11 @@ srv_sess_rate([<backend>/]<server>) : integer
         acl srv1_full srv_sess_rate(be1/srv1) gt 50
         acl srv2_full srv_sess_rate(be1/srv2) gt 50
         use_backend be2 if srv1_full or srv2_full
+
+stopping : boolean
+  Returns TRUE if the process calling the function is currently stopping. This
+  can be useful for logging, or for relaxing certain checks or helping close
+  certain connections upon graceful shutdown.
 
 table_avl([<table>]) : integer
   Returns the total number of available entries in the current proxy's
@@ -10999,6 +11331,11 @@ ssl_c_ca_err_depth : integer
   verification of the client certificate. If no error is encountered, 0 is
   returned.
 
+ssl_c_der : binary
+  Returns the DER formatted certificate presented by the client when the
+  incoming connection was made over an SSL/TLS transport layer. When used for
+  an ACL, the value(s) to match against can be passed in hexadecimal form.
+
 ssl_c_err : integer
   When the incoming connection was made over an SSL/TLS transport layer,
   returns the ID of the first error detected during verification at depth 0, or
@@ -11073,6 +11410,11 @@ ssl_c_verify : integer
 ssl_c_version : integer
   Returns the version of the certificate presented by the client when the
   incoming connection was made over an SSL/TLS transport layer.
+
+ssl_f_der : binary
+  Returns the DER formatted certificate presented by the frontend when the
+  incoming connection was made over an SSL/TLS transport layer. When used for
+  an ACL, the value(s) to match against can be passed in hexadecimal form.
 
 ssl_f_i_dn([<entry>[,<occ>]]) : string
   When the incoming connection was made over an SSL/TLS transport layer,
@@ -11714,6 +12056,14 @@ path : string
     path_len : length match
     path_reg : regex match
     path_sub : substring match
+
+query : string
+  This extracts the request's query string, which starts after the first
+  question mark. If no question mark is present, this fetch returns nothing. If
+  a question mark is present but nothing follows, it returns an empty string.
+  This means it's possible to easily know whether a query string is present
+  using the "found" matching method. This fetch is the completemnt of "path"
+  which stops before the question mark.
 
 req.ver : string
 req_ver : string (deprecated)

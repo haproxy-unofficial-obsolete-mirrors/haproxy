@@ -131,6 +131,7 @@ static int stats_dump_stat_to_buffer(struct stream_interface *si, struct uri_aut
 static int stats_pats_list(struct stream_interface *si);
 static int stats_pat_list(struct stream_interface *si);
 static int stats_map_lookup(struct stream_interface *si);
+static void cli_release_handler(struct stream_interface *si);
 
 /*
  * cli_io_handler()
@@ -568,7 +569,7 @@ static int dump_binary(struct chunk *out, const char *buf, int bsize)
 static int stats_dump_table_head_to_buffer(struct chunk *msg, struct stream_interface *si,
 					   struct proxy *proxy, struct proxy *target)
 {
-	struct session *s = session_from_task(si->owner);
+	struct session *s = si_sess(si);
 
 	chunk_appendf(msg, "# table: %s, type: %s, size:%d, used:%d\n",
 		     proxy->id, stktable_types[proxy->table.type].kw, proxy->table.size, proxy->table.current);
@@ -657,7 +658,7 @@ static int stats_dump_table_entry_to_buffer(struct chunk *msg, struct stream_int
 
 static void stats_sock_table_key_request(struct stream_interface *si, char **args, int action)
 {
-	struct session *s = session_from_task(si->owner);
+	struct session *s = si_sess(si);
 	struct appctx *appctx = __objt_appctx(si->end);
 	struct proxy *px = appctx->ctx.table.target;
 	struct stksess *ts;
@@ -1060,7 +1061,7 @@ struct pattern_expr *pat_expr_get_next(struct pattern_expr *getnext, struct list
  */
 static int stats_sock_parse_request(struct stream_interface *si, char *line)
 {
-	struct session *s = session_from_task(si->owner);
+	struct session *s = si_sess(si);
 	struct appctx *appctx = __objt_appctx(si->end);
 	char *args[MAX_STATS_ARGS + 1];
 	int arg;
@@ -1294,8 +1295,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			pat_ref_prune(appctx->ctx.map.ref);
 
 			/* return response */
-			appctx->ctx.cli.msg = "Done.\n";
-			appctx->st0 = STAT_CLI_PRINT;
+			appctx->st0 = STAT_CLI_PROMPT;
 			return 1;
 		}
 		else {
@@ -1787,14 +1787,13 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			}
 
 			/* The set is done, send message. */
-			appctx->ctx.cli.msg = "Done.\n";
-			appctx->st0 = STAT_CLI_PRINT;
+			appctx->st0 = STAT_CLI_PROMPT;
 			return 1;
 		}
 #ifdef USE_OPENSSL
 		else if (strcmp(args[1], "ssl") == 0) {
 			if (strcmp(args[2], "ocsp-response") == 0) {
-#if (defined SSL_CTRL_SET_TLSEXT_STATUS_REQ_CB && !defined OPENSSL_IS_BORINGSSL)
+#if (defined SSL_CTRL_SET_TLSEXT_STATUS_REQ_CB && !defined OPENSSL_NO_OCSP)
 				char *err = NULL;
 
 				/* Expect one parameter: the new response in base64 encoding */
@@ -2137,8 +2136,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			}
 
 			/* The deletion is done, send message. */
-			appctx->ctx.cli.msg = "Done.\n";
-			appctx->st0 = STAT_CLI_PRINT;
+			appctx->st0 = STAT_CLI_PROMPT;
 			return 1;
 		}
 		else { /* unknown "del" parameter */
@@ -2214,8 +2212,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			}
 
 			/* The add is done, send message. */
-			appctx->ctx.cli.msg = "Done.\n";
-			appctx->st0 = STAT_CLI_PRINT;
+			appctx->st0 = STAT_CLI_PROMPT;
 			return 1;
 		}
 		else { /* unknown "del" parameter */
@@ -2336,6 +2333,7 @@ static void cli_io_handler(struct stream_interface *si)
 		}
 		else {	/* output functions: first check if the output buffer is closed then abort */
 			if (res->flags & (CF_SHUTR_NOW|CF_SHUTR)) {
+				cli_release_handler(si);
 				appctx->st0 = STAT_CLI_END;
 				continue;
 			}
@@ -2389,6 +2387,7 @@ static void cli_io_handler(struct stream_interface *si)
 					appctx->st0 = STAT_CLI_PROMPT;
 				break;
 			default: /* abnormal state */
+				cli_release_handler(si);
 				appctx->st0 = STAT_CLI_PROMPT;
 				break;
 			}
@@ -3107,7 +3106,7 @@ static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, in
 			chunk_appendf(&trash, "%s ", human_time(now.tv_sec - sv->last_change, 1));
 			chunk_appendf(&trash, "MAINT");
 		}
-		else if ((ref->agent.state & CHK_ST_ENABLED) && (ref->state == SRV_ST_STOPPED)) {
+		else if ((ref->agent.state & CHK_ST_ENABLED) && !(sv->agent.health) && (ref->state == SRV_ST_STOPPED)) {
 			chunk_appendf(&trash, "%s ", human_time(now.tv_sec - ref->last_change, 1));
 			/* DOWN (agent) */
 			chunk_appendf(&trash, srv_hlt_st[1], "GCC: your -Werror=format-security is bogus, annoying, and hides real bugs, I don't thank you, really!");
@@ -3741,7 +3740,7 @@ static void stats_dump_html_px_end(struct stream_interface *si, struct proxy *px
 static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy *px, struct uri_auth *uri)
 {
 	struct appctx *appctx = __objt_appctx(si->end);
-	struct session *s = session_from_task(si->owner);
+	struct session *s = si_sess(si);
 	struct channel *rep = si->ib;
 	struct server *sv, *svs;	/* server and server-state, server-state=server or server->track */
 	struct listener *l;
@@ -4396,7 +4395,7 @@ static int stats_dump_stat_to_buffer(struct stream_interface *si, struct uri_aut
  */
 static int stats_process_http_post(struct stream_interface *si)
 {
-	struct session *s = session_from_task(si->owner);
+	struct session *s = si_sess(si);
 	struct appctx *appctx = objt_appctx(si->end);
 
 	struct proxy *px = NULL;
@@ -4715,7 +4714,7 @@ static int stats_process_http_post(struct stream_interface *si)
 
 static int stats_send_http_headers(struct stream_interface *si)
 {
-	struct session *s = session_from_task(si->owner);
+	struct session *s = si_sess(si);
 	struct uri_auth *uri = s->be->uri_auth;
 	struct appctx *appctx = objt_appctx(si->end);
 
@@ -4749,7 +4748,7 @@ static int stats_send_http_headers(struct stream_interface *si)
 static int stats_send_http_redirect(struct stream_interface *si)
 {
 	char scope_txt[STAT_SCOPE_TXT_MAXLEN + sizeof STAT_SCOPE_PATTERN];
-	struct session *s = session_from_task(si->owner);
+	struct session *s = si_sess(si);
 	struct uri_auth *uri = s->be->uri_auth;
 	struct appctx *appctx = objt_appctx(si->end);
 
@@ -4799,7 +4798,7 @@ static int stats_send_http_redirect(struct stream_interface *si)
 static void http_stats_io_handler(struct stream_interface *si)
 {
 	struct appctx *appctx = __objt_appctx(si->end);
-	struct session *s = session_from_task(si->owner);
+	struct session *s = si_sess(si);
 	struct channel *req = si->ob;
 	struct channel *res = si->ib;
 
@@ -5120,9 +5119,9 @@ static int stats_dump_full_sess_to_buffer(struct stream_interface *si, struct se
 			     human_time(now.tv_sec - sess->logs.accept_date.tv_sec, 1));
 
 		chunk_appendf(&trash,
-			     "  txn=%p flags=0x%x meth=%d status=%d req.st=%s rsp.st=%s\n",
+			     "  txn=%p flags=0x%x meth=%d status=%d req.st=%s rsp.st=%s waiting=%d\n",
 			     &sess->txn, sess->txn.flags, sess->txn.meth, sess->txn.status,
-			     http_msg_state_str(sess->txn.req.msg_state), http_msg_state_str(sess->txn.rsp.msg_state));
+			      http_msg_state_str(sess->txn.req.msg_state), http_msg_state_str(sess->txn.rsp.msg_state), !LIST_ISEMPTY(&sess->buffer_wait));
 
 		chunk_appendf(&trash,
 			     "  si[0]=%p (state=%s flags=0x%02x endp0=%s:%p exp=%s, et=0x%03x)\n",
@@ -5748,7 +5747,7 @@ static void cli_release_handler(struct stream_interface *si)
 static int stats_table_request(struct stream_interface *si, int action)
 {
 	struct appctx *appctx = __objt_appctx(si->end);
-	struct session *s = session_from_task(si->owner);
+	struct session *s = si_sess(si);
 	struct ebmb_node *eb;
 	int dt;
 	int skip_entry;

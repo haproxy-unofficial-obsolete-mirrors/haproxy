@@ -33,6 +33,7 @@
 #include <common/errors.h>
 #include <common/mini-clist.h>
 #include <common/standard.h>
+#include <common/namespace.h>
 
 #include <types/global.h>
 #include <types/capture.h>
@@ -247,6 +248,20 @@ int tcp_bind_socket(int fd, int flags, struct sockaddr_storage *local, struct so
 	return 0;
 }
 
+static int create_server_socket(struct connection *conn)
+{
+	const struct netns_entry *ns = NULL;
+
+#ifdef CONFIG_HAP_NS
+	if (objt_server(conn->target)) {
+		if (__objt_server(conn->target)->flags & SRV_F_USE_NS_FROM_PP)
+			ns = conn->proxy_netns;
+		else
+			ns = __objt_server(conn->target)->netns;
+	}
+#endif
+	return my_socketat(ns, conn->addr.to.ss_family, SOCK_STREAM, IPPROTO_TCP);
+}
 
 /*
  * This function initiates a TCP connection establishment to the target assigned
@@ -301,7 +316,9 @@ int tcp_connect_server(struct connection *conn, int data, int delack)
 		return SN_ERR_INTERNAL;
 	}
 
-	if ((fd = conn->t.sock.fd = socket(conn->addr.to.ss_family, SOCK_STREAM, IPPROTO_TCP)) == -1) {
+	fd = conn->t.sock.fd = create_server_socket(conn);
+
+	if (fd == -1) {
 		qfprintf(stderr, "Cannot get a server socket.\n");
 
 		if (errno == ENFILE) {
@@ -450,15 +467,12 @@ int tcp_connect_server(struct connection *conn, int data, int delack)
 		}
 	}
 
-	/* if a send_proxy is there, there are data */
-	data |= conn->send_proxy_ofs;
-
 #if defined(TCP_QUICKACK)
 	/* disabling tcp quick ack now allows the first request to leave the
 	 * machine with the first ACK. We only do this if there are pending
 	 * data in the buffer.
 	 */
-	if (delack == 2 || ((delack || data) && (be->options2 & PR_O2_SMARTCON)))
+	if (delack == 2 || ((delack || data || conn->send_proxy_ofs) && (be->options2 & PR_O2_SMARTCON)))
                 setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &zero, sizeof(zero));
 #endif
 
@@ -558,12 +572,24 @@ int tcp_get_dst(int fd, struct sockaddr *sa, socklen_t salen, int dir)
 {
 	if (dir)
 		return getpeername(fd, sa, &salen);
+	else {
+		int ret = getsockname(fd, sa, &salen);
+
+		if (ret < 0)
+			return ret;
+
 #if defined(TPROXY) && defined(SO_ORIGINAL_DST)
-	else if (getsockopt(fd, SOL_IP, SO_ORIGINAL_DST, sa, &salen) == 0)
-		return 0;
+		/* For TPROXY and Netfilter's NAT, we can retrieve the original
+		 * IPv4 address before DNAT/REDIRECT. We must not do that with
+		 * other families because v6-mapped IPv4 addresses are still
+		 * reported as v4.
+		 */
+		if (((struct sockaddr_storage *)sa)->ss_family == AF_INET
+		    && getsockopt(fd, SOL_IP, SO_ORIGINAL_DST, sa, &salen) == 0)
+			return 0;
 #endif
-	else
-		return getsockname(fd, sa, &salen);
+		return ret;
+	}
 }
 
 /* Tries to drain any pending incoming data from the socket to reach the
@@ -732,10 +758,14 @@ int tcp_bind_listener(struct listener *listener, char *errmsg, int errlen)
 	fd = listener->fd;
 	ext = (fd >= 0);
 
-	if (!ext && (fd = socket(listener->addr.ss_family, SOCK_STREAM, IPPROTO_TCP)) == -1) {
-		err |= ERR_RETRYABLE | ERR_ALERT;
-		msg = "cannot create listening socket";
-		goto tcp_return;
+	if (!ext) {
+		fd = my_socketat(listener->netns, listener->addr.ss_family, SOCK_STREAM, IPPROTO_TCP);
+
+		if (fd == -1) {
+			err |= ERR_RETRYABLE | ERR_ALERT;
+			msg = "cannot create listening socket";
+			goto tcp_return;
+		}
 	}
 
 	if (fd >= global.maxsock) {
@@ -1998,6 +2028,34 @@ static int bind_parse_interface(char **args, int cur_arg, struct proxy *px, stru
 }
 #endif
 
+#ifdef CONFIG_HAP_NS
+/* parse the "namespace" bind keyword */
+static int bind_parse_namespace(char **args, int cur_arg, struct proxy *px, struct bind_conf *conf, char **err)
+{
+	struct listener *l;
+	char *namespace = NULL;
+
+	if (!*args[cur_arg + 1]) {
+		memprintf(err, "'%s' : missing namespace id", args[cur_arg]);
+		return ERR_ALERT | ERR_FATAL;
+	}
+	namespace = args[cur_arg + 1];
+
+	list_for_each_entry(l, &conf->listeners, by_bind) {
+		l->netns = netns_store_lookup(namespace, strlen(namespace));
+
+		if (l->netns == NULL)
+			l->netns = netns_store_insert(namespace);
+
+		if (l->netns == NULL) {
+			Alert("Cannot open namespace '%s'.\n", args[cur_arg + 1]);
+			return ERR_ALERT | ERR_FATAL;
+		}
+	}
+	return 0;
+}
+#endif
+
 static struct cfg_kw_list cfg_kws = {ILH, {
 	{ CFG_LISTEN, "tcp-request",  tcp_parse_tcp_req },
 	{ CFG_LISTEN, "tcp-response", tcp_parse_tcp_rep },
@@ -2056,6 +2114,9 @@ static struct bind_kw_list bind_kws = { "TCP", { }, {
 #ifdef IPV6_V6ONLY
 	{ "v4v6",          bind_parse_v4v6,         0 }, /* force socket to bind to IPv4+IPv6 */
 	{ "v6only",        bind_parse_v6only,       0 }, /* force socket to bind to IPv6 only */
+#endif
+#ifdef CONFIG_HAP_NS
+	{ "namespace",     bind_parse_namespace,    1 },
 #endif
 	/* the versions with the NULL parse function*/
 	{ "defer-accept",  NULL,  0 },

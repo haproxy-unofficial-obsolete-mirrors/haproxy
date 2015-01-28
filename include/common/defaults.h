@@ -35,6 +35,20 @@
 #define BUFSIZE	        16384
 #endif
 
+/* certain buffers may only be allocated for responses in order to avoid
+ * deadlocks caused by request queuing. 2 buffers is the absolute minimum
+ * acceptable to ensure that a request gaining access to a server can get
+ * a response buffer even if it doesn't completely flush the request buffer.
+ * The worst case is an applet making use of a request buffer that cannot
+ * completely be sent while the server starts to respond, and all unreserved
+ * buffers are allocated by request buffers from pending connections in the
+ * queue waiting for this one to flush. Both buffers reserved buffers may
+ * thus be used at the same time.
+ */
+#ifndef RESERVED_BUFS
+#define RESERVED_BUFS   2
+#endif
+
 // reserved buffer space for header rewriting
 #ifndef MAXREWRITE
 #define MAXREWRITE      (BUFSIZE / 2)
@@ -196,8 +210,12 @@
 
 /* Maximum host name length */
 #ifndef MAX_HOSTNAME_LEN
-#define MAX_HOSTNAME_LEN	32
-#endif
+#if MAXHOSTNAMELEN
+#define MAX_HOSTNAME_LEN	MAXHOSTNAMELEN
+#else
+#define MAX_HOSTNAME_LEN	64
+#endif // MAXHOSTNAMELEN
+#endif // MAX_HOSTNAME_LEN
 
 /* Maximum health check description length */
 #ifndef HCHK_DESC_LEN
@@ -227,6 +245,30 @@
 /* ssl max dh param size */
 #ifndef SSL_DEFAULT_DH_PARAM
 #define SSL_DEFAULT_DH_PARAM 0
+#endif
+
+/* max memory cost per SSL session */
+#ifndef SSL_SESSION_MAX_COST
+#define SSL_SESSION_MAX_COST (16*1024)    // measured
+#endif
+
+/* max memory cost per SSL handshake (on top of session) */
+#ifndef SSL_HANDSHAKE_MAX_COST
+#define SSL_HANDSHAKE_MAX_COST (76*1024)  // measured
+#endif
+
+/* approximate session size (for maxconn estimate) */
+#ifndef SESSION_MAX_COST
+#define SESSION_MAX_COST (sizeof(struct session) + \
+                          2 * sizeof(struct channel) + \
+                          2 * sizeof(struct connection) + \
+                          REQURI_LEN + \
+                          2 * global.tune.cookie_len)
+#endif
+
+/* available memory estimate : count about 3% of overhead in various structures */
+#ifndef MEM_USABLE_RATIO
+#define MEM_USABLE_RATIO 0.97
 #endif
 
 /* Number of samples used to compute the times reported in stats. A power of

@@ -71,7 +71,7 @@
 
 /* indicate how we *want* the connection to behave, regardless of what is in
  * the headers. We have 4 possible values right now :
- * - WANT_KAL : try to maintain keep-alive (default hwen nothing configured)
+ * - WANT_KAL : try to maintain keep-alive (default when nothing configured)
  * - WANT_TUN : will be a tunnel (CONNECT).
  * - WANT_SCL : enforce close on the server side
  * - WANT_CLO : enforce close on both sides
@@ -438,6 +438,9 @@ struct http_req_rule {
 			struct list key;       /* pattern to retrieve MAP or ACL key */
 			struct list value;     /* pattern to retrieve MAP value */
 		} map;
+		struct {
+			void *p[4];
+		} act;                         /* generic pointers to be used by custom actions */
 	} arg;                                 /* arguments used by some actions */
 
 	union {

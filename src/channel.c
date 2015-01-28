@@ -121,7 +121,7 @@ int bi_putchr(struct channel *chn, char c)
 	if (unlikely(channel_input_closed(chn)))
 		return -2;
 
-	if (channel_full(chn)) {
+	if (!channel_may_recv(chn)) {
 		chn->flags |= CF_WAKE_WRITE;
 		return -1;
 	}
@@ -157,7 +157,7 @@ int bi_putblk(struct channel *chn, const char *blk, int len)
 	if (unlikely(channel_input_closed(chn)))
 		return -2;
 
-	max = buffer_max_len(chn);
+	max = channel_recv_limit(chn);
 	if (unlikely(len > max - buffer_len(chn->buf))) {
 		/* we can't write this chunk right now because the buffer is
 		 * almost full or because the block is too large. Return the
@@ -194,6 +194,51 @@ int bi_putblk(struct channel *chn, const char *blk, int len)
 	/* notify that some data was read from the SI into the buffer */
 	chn->flags |= CF_READ_PARTIAL;
 	return len;
+}
+
+/* Tries to copy the whole buffer <buf> into the channel's buffer after length
+ * controls. It will only succeed if the target buffer is empty, in which case
+ * it will simply swap the buffers. The buffer not attached to the channel is
+ * returned so that the caller can store it locally. The chn->buf->o and
+ * to_forward pointers are updated. If the output buffer is a dummy buffer or
+ * if it still contains data <buf> is returned, indicating that nothing could
+ * be done. Channel flag READ_PARTIAL is updated if some data can be transferred.
+ * The chunk's length is updated with the number of bytes sent. On errors, NULL
+ * is returned. Note that only buf->i is considered.
+ */
+struct buffer *bi_swpbuf(struct channel *chn, struct buffer *buf)
+{
+	struct buffer *old;
+
+	if (unlikely(channel_input_closed(chn)))
+		return NULL;
+
+	if (!chn->buf->size || !buffer_empty(chn->buf)) {
+		chn->flags |= CF_WAKE_WRITE;
+		return buf;
+	}
+
+	old = chn->buf;
+	chn->buf = buf;
+
+	if (!buf->i)
+		return old;
+
+	chn->total += buf->i;
+
+	if (chn->to_forward) {
+		unsigned long fwd = buf->i;
+		if (chn->to_forward != CHN_INFINITE_FORWARD) {
+			if (fwd > chn->to_forward)
+				fwd = chn->to_forward;
+			chn->to_forward -= fwd;
+		}
+		b_adv(chn->buf, fwd);
+	}
+
+	/* notify that some data was read from the SI into the buffer */
+	chn->flags |= CF_READ_PARTIAL;
+	return old;
 }
 
 /* Gets one text line out of a channel's buffer from a stream interface.
@@ -237,7 +282,7 @@ int bo_getline(struct channel *chn, char *str, int len)
 		p = buffer_wrap_add(chn->buf, p + 1);
 	}
 	if (ret > 0 && ret < len &&
-	    (ret < chn->buf->o || !channel_full(chn)) &&
+	    (ret < chn->buf->o || channel_may_recv(chn)) &&
 	    *(str-1) != '\n' &&
 	    !(chn->flags & (CF_SHUTW|CF_SHUTW_NOW)))
 		ret = 0;
