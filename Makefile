@@ -733,6 +733,7 @@ install-bin: haproxy haproxy-systemd-wrapper
 
 install: install-bin install-man install-doc
 
+<<<<<<< HEAD
 uninstall: 
 	rm -f "$(DESTDIR)$(MANDIR)"/man1/haproxy.1
 	for x in configuration architecture haproxy-en haproxy-fr; do \
@@ -742,6 +743,8 @@ uninstall:
 	rm -f "$(DESTDIR)$(SBINDIR)"/haproxy
 	rm -f "$(DESTDIR)$(SBINDIR)"/haproxy-systemd-wrapper
 	
+=======
+>>>>>>> parent of abf85d6... Create uninstall task for easy uninstallation
 clean:
 	rm -f *.[oas] src/*.[oas] ebtree/*.[oas] haproxy test
 	for dir in . src include/* doc ebtree; do rm -f $$dir/*~ $$dir/*.rej $$dir/core; done
