@@ -738,7 +738,7 @@ uninstall:
 	for x in configuration architecture haproxy-en haproxy-fr; do \
 		rm -f "$(DESTDIR)$(DOCDIR)"/$$x.txt ; \
 	done
-	rm -rf "$(DESTDIR)$(DOCDIR)"
+	-rmdir "$(DESTDIR)$(DOCDIR)"
 	rm -f "$(DESTDIR)$(SBINDIR)"/haproxy
 	rm -f "$(DESTDIR)$(SBINDIR)"/haproxy-systemd-wrapper
 	
