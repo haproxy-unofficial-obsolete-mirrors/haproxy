@@ -122,6 +122,7 @@ enum srv_admin {
 #define SRV_SSL_O_USE_TLSV12   0x0080 /* force TLSv1.2 */
 /* 0x00F0 reserved for 'force' protocol version options */
 #define SRV_SSL_O_NO_TLS_TICKETS 0x0100 /* disable session resumption tickets */
+#define SRV_SSL_O_NO_REUSE     0x200  /* disable session reuse */
 #endif
 
 struct pid_list {
@@ -201,11 +202,6 @@ struct server {
 	time_t last_change;			/* last time, when the state was changed */
 
 	int puid;				/* proxy-unique server ID, used for SNMP, and "first" LB algo */
-
-	struct {                                /* configuration  used by health-check and agent-check */
-		struct protocol *proto;	        /* server address protocol for health checks */
-		struct sockaddr_storage addr;   /* the address to check, if different from <addr> */
-	} check_common;
 
 	struct check check;                     /* health-check specific configuration */
 	struct check agent;                     /* agent specific configuration */

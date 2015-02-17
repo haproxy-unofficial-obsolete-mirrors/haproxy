@@ -664,7 +664,7 @@ OBJS = src/haproxy.o src/sessionhash.o src/base64.o src/protocol.o \
        src/session.o src/hdr_idx.o src/ev_select.o src/signal.o \
        src/acl.o src/sample.o src/memory.o src/freq_ctr.o src/auth.o \
        src/compression.o src/payload.o src/hash.o src/pattern.o src/map.o \
-       src/namespace.o
+       src/namespace.o src/mailers.o
 
 EBTREE_OBJS = $(EBTREE_DIR)/ebtree.o \
               $(EBTREE_DIR)/eb32tree.o $(EBTREE_DIR)/eb64tree.o \
@@ -732,6 +732,15 @@ install-bin: haproxy haproxy-systemd-wrapper
 	install haproxy-systemd-wrapper "$(DESTDIR)$(SBINDIR)"
 
 install: install-bin install-man install-doc
+
+uninstall:
+	rm -f "$(DESTDIR)$(MANDIR)"/man1/haproxy.1
+	for x in configuration architecture haproxy-en haproxy-fr; do \
+		rm -f "$(DESTDIR)$(DOCDIR)"/$$x.txt ; \
+	done
+	-rmdir "$(DESTDIR)$(DOCDIR)"
+	rm -f "$(DESTDIR)$(SBINDIR)"/haproxy
+	rm -f "$(DESTDIR)$(SBINDIR)"/haproxy-systemd-wrapper
 
 clean:
 	rm -f *.[oas] src/*.[oas] ebtree/*.[oas] haproxy test

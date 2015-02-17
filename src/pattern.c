@@ -989,8 +989,10 @@ int pat_idx_list_ptr(struct pattern_expr *expr, struct pattern *pat, char **err)
 
 	/* allocate pattern */
 	patl = calloc(1, sizeof(*patl));
-	if (!patl)
+	if (!patl) {
+		memprintf(err, "out of memory while indexing pattern");
 		return 0;
+	}
 
 	/* duplicate pattern */
 	memcpy(&patl->pat, pat, sizeof(*pat));
@@ -1305,6 +1307,10 @@ void pat_del_tree_str(struct pattern_expr *expr, struct pat_ref_elt *ref)
 {
 	struct ebmb_node *node, *next_node;
 	struct pattern_tree *elt;
+
+	/* If the flag PAT_F_IGNORE_CASE is set, we cannot use trees */
+	if (expr->mflags & PAT_MF_IGNORE_CASE)
+		return pat_del_list_ptr(expr, ref);
 
 	/* browse each node of the tree. */
 	for (node = ebmb_first(&expr->pattern_tree), next_node = node ? ebmb_next(node) : NULL;

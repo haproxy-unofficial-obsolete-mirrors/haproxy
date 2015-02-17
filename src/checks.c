@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +37,7 @@
 #include <common/time.h>
 
 #include <types/global.h>
+#include <types/mailers.h>
 
 #ifdef USE_OPENSSL
 #include <types/ssl_sock.h>
@@ -60,7 +62,7 @@
 #include <proto/task.h>
 
 static int httpchk_expect(struct server *s, int done);
-static int tcpcheck_get_step_id(struct server *);
+static int tcpcheck_get_step_id(struct check *);
 static void tcpcheck_main(struct connection *);
 
 static const struct check_status check_statuses[HCHK_STATUS_SIZE] = {
@@ -315,6 +317,7 @@ static void set_server_check_status(struct check *check, short status, const cha
 
 		Warning("%s.\n", trash.str);
 		send_log(s->proxy, LOG_NOTICE, "%s.\n", trash.str);
+		send_email_alert(s, LOG_NOTICE, "%s", trash.str);
 	}
 }
 
@@ -620,7 +623,7 @@ static void chk_report_conn_err(struct connection *conn, int errno_bck, int expi
 	chk = get_trash_chunk();
 
 	if (check->type == PR_O2_TCPCHK_CHK) {
-		step = tcpcheck_get_step_id(check->server);
+		step = tcpcheck_get_step_id(check);
 		if (!step)
 			chunk_printf(chk, " at initial connection step of tcp-check");
 		else {
@@ -1427,6 +1430,9 @@ static int connect_conn_chk(struct task *t)
 		else if ((check->type) == PR_O2_HTTP_CHK) {
 			if (s->proxy->options2 & PR_O2_CHK_SNDST)
 				bo_putblk(check->bo, trash.str, httpchk_build_status_header(s, trash.str, trash.size));
+			/* prevent HTTP keep-alive when "http-check expect" is used */
+			if (s->proxy->options2 & PR_O2_EXP_TYPE)
+				bo_putstr(check->bo, "Connection: close\r\n");
 			bo_putstr(check->bo, "\r\n");
 			*check->bo->p = '\0'; /* to make gdb output easier to read */
 		}
@@ -1434,18 +1440,18 @@ static int connect_conn_chk(struct task *t)
 
 	/* prepare a new connection */
 	conn_init(conn);
-	conn_prepare(conn, s->check_common.proto, check->xprt);
+	conn_prepare(conn, check->proto, check->xprt);
 	conn_attach(conn, check, &check_conn_cb);
 	conn->target = &s->obj_type;
 
 	/* no client address */
 	clear_addr(&conn->addr.from);
 
-	if (is_addr(&s->check_common.addr)) {
+	if (is_addr(&check->addr)) {
 
 		/* we'll connect to the check addr specified on the server */
-		conn->addr.to = s->check_common.addr;
-		proto = s->check_common.proto;
+		conn->addr.to = check->addr;
+		proto = check->proto;
 	}
 	else {
 		/* we'll connect to the addr on the server */
@@ -1460,8 +1466,8 @@ static int connect_conn_chk(struct task *t)
 	/* only plain tcp-check supports quick ACK */
 	quickack = check->type == 0 || check->type == PR_O2_TCPCHK_CHK;
 
-	if (check->type == PR_O2_TCPCHK_CHK && !LIST_ISEMPTY(&s->proxy->tcpcheck_rules)) {
-		struct tcpcheck_rule *r = (struct tcpcheck_rule *) s->proxy->tcpcheck_rules.n;
+	if (check->type == PR_O2_TCPCHK_CHK && !LIST_ISEMPTY(check->tcpcheck_rules)) {
+		struct tcpcheck_rule *r = (struct tcpcheck_rule *) check->tcpcheck_rules->n;
 		/* if first step is a 'connect', then tcpcheck_main must run it */
 		if (r->action == TCPCHK_ACT_CONNECT) {
 			tcpcheck_main(conn);
@@ -1821,27 +1827,6 @@ out:
 }
 
 /*
- * establish a server health-check.
- *
- * It can return one of :
- *  - SN_ERR_NONE if everything's OK
- *  - SN_ERR_SRVTO if there are no more servers
- *  - SN_ERR_SRVCL if the connection was refused by the server
- *  - SN_ERR_PRXCOND if the connection has been limited by the proxy (maxconn)
- *  - SN_ERR_RESOURCE if a system resource is lacking (eg: fd limits, ports, ...)
- *  - SN_ERR_INTERNAL for any other purely internal errors
- * Additionnally, in the case of SN_ERR_RESOURCE, an emergency log will be emitted.
- */
-static int connect_chk(struct task *t)
-{
-	struct check *check = t->context;
-
-	if (check->type == PR_O2_EXT_CHK)
-		return connect_proc_chk(t);
-	return connect_conn_chk(t);
-}
-
-/*
  * manages a server health-check that uses a process. Returns
  * the time the task accepts to wait, or TIME_ETERNITY for infinity.
  */
@@ -1872,7 +1857,7 @@ static struct task *process_chk_proc(struct task *t)
 
 		check->state |= CHK_ST_INPROGRESS;
 
-		ret = connect_chk(t);
+		ret = connect_proc_chk(t);
 		switch (ret) {
 		case SN_ERR_UP:
 			return t;
@@ -2015,7 +2000,7 @@ static struct task *process_chk_conn(struct task *t)
 		check->bo->p = check->bo->data;
 		check->bo->o = 0;
 
-		ret = connect_chk(t);
+		ret = connect_conn_chk(t);
 		switch (ret) {
 		case SN_ERR_UP:
 			return t;
@@ -2369,23 +2354,23 @@ static int httpchk_expect(struct server *s, int done)
 /*
  * return the id of a step in a send/expect session
  */
-static int tcpcheck_get_step_id(struct server *s)
+static int tcpcheck_get_step_id(struct check *check)
 {
 	struct tcpcheck_rule *cur = NULL, *next = NULL;
 	int i = 0;
 
 	/* not even started anything yet => step 0 = initial connect */
-	if (!s->check.current_step)
+	if (check->current_step)
 		return 0;
 
-	cur = s->check.last_started_step;
+	cur = check->last_started_step;
 
 	/* no step => first step */
 	if (cur == NULL)
 		return 1;
 
 	/* increment i until current step */
-	list_for_each_entry(next, &s->proxy->tcpcheck_rules, list) {
+	list_for_each_entry(next, check->tcpcheck_rules, list) {
 		if (next->list.p == &cur->list)
 			break;
 		++i;
@@ -2402,7 +2387,7 @@ static void tcpcheck_main(struct connection *conn)
 	struct check *check = conn->owner;
 	struct server *s = check->server;
 	struct task *t = check->task;
-	struct list *head = &s->proxy->tcpcheck_rules;
+	struct list *head = check->tcpcheck_rules;
 
 	/* here, we know that the check is complete or that it failed */
 	if (check->result != CHK_RES_UNKNOWN)
@@ -2516,10 +2501,10 @@ static void tcpcheck_main(struct connection *conn)
 			/* no client address */
 			clear_addr(&conn->addr.from);
 
-			if (is_addr(&s->check_common.addr)) {
+			if (is_addr(&check->addr)) {
 				/* we'll connect to the check addr specified on the server */
-				conn->addr.to = s->check_common.addr;
-				proto = s->check_common.proto;
+				conn->addr.to = check->addr;
+				proto = check->proto;
 			}
 			else {
 				/* we'll connect to the addr on the server */
@@ -2583,14 +2568,14 @@ static void tcpcheck_main(struct connection *conn)
 			case SN_ERR_SRVTO: /* ETIMEDOUT */
 			case SN_ERR_SRVCL: /* ECONNREFUSED, ENETUNREACH, ... */
 				chunk_printf(&trash, "TCPCHK error establishing connection at step %d: %s",
-						tcpcheck_get_step_id(s), strerror(errno));
+						tcpcheck_get_step_id(check), strerror(errno));
 				set_server_check_status(check, HCHK_STATUS_L4CON, trash.str);
 				goto out_end_tcpcheck;
 			case SN_ERR_PRXCOND:
 			case SN_ERR_RESOURCE:
 			case SN_ERR_INTERNAL:
 				chunk_printf(&trash, "TCPCHK error establishing connection at step %d",
-						tcpcheck_get_step_id(s));
+						tcpcheck_get_step_id(check));
 				set_server_check_status(check, HCHK_STATUS_SOCKERR, trash.str);
 				goto out_end_tcpcheck;
 			}
@@ -2638,7 +2623,7 @@ static void tcpcheck_main(struct connection *conn)
 			if (check->current_step->string_len >= check->bo->size) {
 				chunk_printf(&trash, "tcp-check send : string too large (%d) for buffer size (%d) at step %d",
 					     check->current_step->string_len, check->bo->size,
-					     tcpcheck_get_step_id(s));
+					     tcpcheck_get_step_id(check));
 				set_server_check_status(check, HCHK_STATUS_L7RSP, trash.str);
 				goto out_end_tcpcheck;
 			}
@@ -2699,7 +2684,7 @@ static void tcpcheck_main(struct connection *conn)
 
 				/* empty response */
 				chunk_printf(&trash, "TCPCHK got an empty response at step %d",
-						tcpcheck_get_step_id(s));
+						tcpcheck_get_step_id(check));
 				set_server_check_status(check, HCHK_STATUS_L7RSP, trash.str);
 
 				goto out_end_tcpcheck;
@@ -2724,12 +2709,12 @@ static void tcpcheck_main(struct connection *conn)
 					/* we were looking for a string */
 					if (cur->string != NULL) {
 						chunk_printf(&trash, "TCPCHK matched unwanted content '%s' at step %d",
-								cur->string, tcpcheck_get_step_id(s));
+								cur->string, tcpcheck_get_step_id(check));
 					}
 					else {
 					/* we were looking for a regex */
 						chunk_printf(&trash, "TCPCHK matched unwanted content (regex) at step %d",
-								tcpcheck_get_step_id(s));
+								tcpcheck_get_step_id(check));
 					}
 					set_server_check_status(check, HCHK_STATUS_L7RSP, trash.str);
 					goto out_end_tcpcheck;
@@ -2758,12 +2743,12 @@ static void tcpcheck_main(struct connection *conn)
 					/* we were looking for a string */
 					if (cur->string != NULL) {
 						chunk_printf(&trash, "TCPCHK did not match content '%s' at step %d",
-								cur->string, tcpcheck_get_step_id(s));
+								cur->string, tcpcheck_get_step_id(check));
 					}
 					else {
 					/* we were looking for a regex */
 						chunk_printf(&trash, "TCPCHK did not match content (regex) at step %d",
-								tcpcheck_get_step_id(s));
+								tcpcheck_get_step_id(check));
 					}
 					set_server_check_status(check, HCHK_STATUS_L7RSP, trash.str);
 					goto out_end_tcpcheck;
@@ -2797,6 +2782,358 @@ static void tcpcheck_main(struct connection *conn)
 	__conn_data_stop_both(conn);
 
 	return;
+}
+
+const char *init_check(struct check *check, int type)
+{
+	check->type = type;
+
+	/* Allocate buffer for requests... */
+	if ((check->bi = calloc(sizeof(struct buffer) + global.tune.chksize, sizeof(char))) == NULL) {
+		return "out of memory while allocating check buffer";
+	}
+	check->bi->size = global.tune.chksize;
+
+	/* Allocate buffer for responses... */
+	if ((check->bo = calloc(sizeof(struct buffer) + global.tune.chksize, sizeof(char))) == NULL) {
+		return "out of memory while allocating check buffer";
+	}
+	check->bo->size = global.tune.chksize;
+
+	/* Allocate buffer for partial results... */
+	if ((check->conn = calloc(1, sizeof(struct connection))) == NULL) {
+		return "out of memory while allocating check connection";
+	}
+
+	check->conn->t.sock.fd = -1; /* no agent in progress yet */
+
+	return NULL;
+}
+
+void free_check(struct check *check)
+{
+	free(check->bi);
+	free(check->bo);
+	free(check->conn);
+}
+
+void email_alert_free(struct email_alert *alert)
+{
+	struct tcpcheck_rule *rule, *back;
+
+	if (!alert)
+		return;
+
+	list_for_each_entry_safe(rule, back, &alert->tcpcheck_rules, list)
+		free(rule);
+	free(alert);
+}
+
+static struct task *process_email_alert(struct task *t)
+{
+	struct check *check = t->context;
+	struct email_alertq *q;
+
+	q = container_of(check, typeof(*q), check);
+
+	if (!(check->state & CHK_ST_ENABLED)) {
+		if (LIST_ISEMPTY(&q->email_alerts)) {
+			/* All alerts processed, delete check */
+			task_delete(t);
+			task_free(t);
+			check->task = NULL;
+			return NULL;
+		} else {
+			struct email_alert *alert;
+
+			alert = LIST_NEXT(&q->email_alerts, typeof(alert), list);
+			check->tcpcheck_rules = &alert->tcpcheck_rules;
+			LIST_DEL(&alert->list);
+
+			check->state |= CHK_ST_ENABLED;
+		}
+
+	}
+
+	process_chk(t);
+
+	if (!(check->state & CHK_ST_INPROGRESS) && check->tcpcheck_rules) {
+		struct email_alert *alert;
+
+		alert = container_of(check->tcpcheck_rules, typeof(*alert), tcpcheck_rules);
+		email_alert_free(alert);
+
+		check->tcpcheck_rules = NULL;
+		check->state &= ~CHK_ST_ENABLED;
+	}
+	return t;
+}
+
+static int init_email_alert_checks(struct server *s)
+{
+	int i;
+	struct mailer *mailer;
+	const char *err_str;
+	struct proxy *p = s->proxy;
+
+	if (p->email_alert.queues)
+		/* Already initialised, nothing to do */
+		return 1;
+
+	p->email_alert.queues = calloc(p->email_alert.mailers.m->count, sizeof *p->email_alert.queues);
+	if (!p->email_alert.queues) {
+		err_str = "out of memory while allocating checks array";
+		goto error_alert;
+	}
+
+	for (i = 0, mailer = p->email_alert.mailers.m->mailer_list;
+	     i < p->email_alert.mailers.m->count; i++, mailer = mailer->next) {
+		struct email_alertq *q = &p->email_alert.queues[i];
+		struct check *check = &q->check;
+
+
+		LIST_INIT(&q->email_alerts);
+
+		check->inter = DEF_CHKINTR; /* XXX: Would like to Skip to the next alert, if any, ASAP.
+					     * But need enough time so that timeouts don't occur
+					     * during tcp check procssing. For now just us an arbitrary default. */
+		check->rise = DEF_AGENT_RISETIME;
+		check->fall = DEF_AGENT_FALLTIME;
+		err_str = init_check(check, PR_O2_TCPCHK_CHK);
+		if (err_str) {
+			goto error_free;
+		}
+
+		check->xprt = mailer->xprt;
+		if (!get_host_port(&mailer->addr))
+			/* Default to submission port */
+			check->port = 587;
+		check->proto = mailer->proto;
+		check->addr = mailer->addr;
+		check->server = s;
+	}
+
+	return 1;
+
+error_free:
+	while (i-- > 1)
+		task_free(p->email_alert.queues[i].check.task);
+	free(p->email_alert.queues);
+	p->email_alert.queues = NULL;
+error_alert:
+	Alert("Email alert [%s] could not be initialised: %s\n", p->id, err_str);
+	return 0;
+}
+
+
+static int add_tcpcheck_expect_str(struct list *list, const char *str)
+{
+	struct tcpcheck_rule *tcpcheck;
+
+	tcpcheck = calloc(1, sizeof *tcpcheck);
+	if (!tcpcheck)
+		return 0;
+
+	tcpcheck->action = TCPCHK_ACT_EXPECT;
+	tcpcheck->string = strdup(str);
+	if (!tcpcheck->string) {
+		free(tcpcheck);
+		return 0;
+	}
+
+	LIST_ADDQ(list, &tcpcheck->list);
+	return 1;
+}
+
+static int add_tcpcheck_send_strs(struct list *list, const char * const *strs)
+{
+	struct tcpcheck_rule *tcpcheck;
+	int i;
+
+	tcpcheck = calloc(1, sizeof *tcpcheck);
+	if (!tcpcheck)
+		return 0;
+
+	tcpcheck->action = TCPCHK_ACT_SEND;
+
+	tcpcheck->string_len = 0;
+	for (i = 0; strs[i]; i++)
+		tcpcheck->string_len += strlen(strs[i]);
+
+	tcpcheck->string = malloc(tcpcheck->string_len + 1);
+	if (!tcpcheck->string) {
+		free(tcpcheck);
+		return 0;
+	}
+	tcpcheck->string[0] = '\0';
+
+	for (i = 0; strs[i]; i++)
+		strcat(tcpcheck->string, strs[i]);
+
+	LIST_ADDQ(list, &tcpcheck->list);
+	return 1;
+}
+
+static int enqueue_one_email_alert(struct email_alertq *q, const char *msg)
+{
+	struct email_alert *alert = NULL;
+	struct tcpcheck_rule *tcpcheck;
+	struct check *check = &q->check;
+	struct proxy *p = check->server->proxy;
+
+	alert = calloc(1, sizeof *alert);
+	if (!alert) {
+		goto error;
+	}
+	LIST_INIT(&alert->tcpcheck_rules);
+
+	tcpcheck = calloc(1, sizeof *tcpcheck);
+	if (!tcpcheck)
+		goto error;
+	tcpcheck->action = TCPCHK_ACT_CONNECT;
+	LIST_ADDQ(&alert->tcpcheck_rules, &tcpcheck->list);
+
+	if (!add_tcpcheck_expect_str(&alert->tcpcheck_rules, "220 "))
+		goto error;
+
+	{
+		const char * const strs[4] = { "EHLO ", p->email_alert.myhostname, "\r\n" };
+		if (!add_tcpcheck_send_strs(&alert->tcpcheck_rules, strs))
+			goto error;
+	}
+
+	if (!add_tcpcheck_expect_str(&alert->tcpcheck_rules, "250 "))
+		goto error;
+
+	{
+		const char * const strs[4] = { "MAIL FROM:<", p->email_alert.from, ">\r\n" };
+		if (!add_tcpcheck_send_strs(&alert->tcpcheck_rules, strs))
+			goto error;
+	}
+
+	if (!add_tcpcheck_expect_str(&alert->tcpcheck_rules, "250 "))
+		goto error;
+
+	{
+		const char * const strs[4] = { "RCPT TO:<", p->email_alert.to, ">\r\n" };
+		if (!add_tcpcheck_send_strs(&alert->tcpcheck_rules, strs))
+			goto error;
+	}
+
+	if (!add_tcpcheck_expect_str(&alert->tcpcheck_rules, "250 "))
+		goto error;
+
+	{
+		const char * const strs[2] = { "DATA\r\n" };
+		if (!add_tcpcheck_send_strs(&alert->tcpcheck_rules, strs))
+			goto error;
+	}
+
+	if (!add_tcpcheck_expect_str(&alert->tcpcheck_rules, "354 "))
+		goto error;
+
+	{
+		struct tm tm;
+		char datestr[48];
+		const char * const strs[18] = {
+			"From: ", p->email_alert.from, "\n",
+			"To: ", p->email_alert.to, "\n",
+			"Date: ", datestr, "\n",
+			"Subject: [HAproxy Alert] ", msg, "\n",
+			"\n",
+			msg, "\n",
+			".\r\n",
+			"\r\n",
+			NULL
+		};
+
+		get_localtime(date.tv_sec, &tm);
+
+		if (strftime(datestr, sizeof(datestr), "%a, %d %b %Y %T %z (%Z)", &tm) == 0) {
+			goto error;
+		}
+
+		if (!add_tcpcheck_send_strs(&alert->tcpcheck_rules, strs))
+			goto error;
+	}
+
+	if (!add_tcpcheck_expect_str(&alert->tcpcheck_rules, "250 "))
+		goto error;
+
+	{
+		const char * const strs[2] = { "QUIT\r\n" };
+		if (!add_tcpcheck_send_strs(&alert->tcpcheck_rules, strs))
+			goto error;
+	}
+
+	if (!add_tcpcheck_expect_str(&alert->tcpcheck_rules, "221 "))
+		goto error;
+
+	if (!check->task) {
+		struct task *t;
+
+		if ((t = task_new()) == NULL)
+			goto error;
+
+		check->task = t;
+		t->process = process_email_alert;
+		t->context = check;
+
+		/* check this in one ms */
+		t->expire = tick_add(now_ms, MS_TO_TICKS(1));
+		check->start = now;
+		task_queue(t);
+	}
+
+	LIST_ADDQ(&q->email_alerts, &alert->list);
+
+	return 1;
+
+error:
+	email_alert_free(alert);
+	return 0;
+}
+
+static void enqueue_email_alert(struct proxy *p, const char *msg)
+{
+	int i;
+	struct mailer *mailer;
+
+	for (i = 0, mailer = p->email_alert.mailers.m->mailer_list;
+	     i < p->email_alert.mailers.m->count; i++, mailer = mailer->next) {
+		if (!enqueue_one_email_alert(&p->email_alert.queues[i], msg)) {
+			Alert("Email alert [%s] could not be enqueued: out of memory\n", p->id);
+			return;
+		}
+	}
+
+	return;
+}
+
+/*
+ * Send email alert if configured.
+ */
+void send_email_alert(struct server *s, int level, const char *format, ...)
+{
+	va_list argp;
+	char buf[1024];
+	int len;
+	struct proxy *p = s->proxy;
+
+	if (!p->email_alert.mailers.m || level > p->email_alert.level ||
+	    format == NULL || !init_email_alert_checks(s))
+		return;
+
+	va_start(argp, format);
+	len = vsnprintf(buf, sizeof(buf), format, argp);
+	va_end(argp);
+
+	if (len < 0) {
+		Alert("Email alert [%s] could format message\n", p->id);
+		return;
+	}
+
+	enqueue_email_alert(p, buf);
 }
 
 

@@ -21,6 +21,7 @@
 
 #include <types/global.h>
 
+#include <proto/checks.h>
 #include <proto/port_range.h>
 #include <proto/protocol.h>
 #include <proto/queue.h>
@@ -231,6 +232,7 @@ void srv_set_stopped(struct server *s, const char *reason)
 	struct server *srv;
 	int prev_srv_count = s->proxy->srv_bck + s->proxy->srv_act;
 	int srv_was_stopping = (s->state == SRV_ST_STOPPING);
+	int log_level;
 	int xferred;
 
 	if ((s->admin & SRV_ADMF_MAINT) || s->state == SRV_ST_STOPPED)
@@ -258,7 +260,9 @@ void srv_set_stopped(struct server *s, const char *reason)
 	Warning("%s.\n", trash.str);
 
 	/* we don't send an alert if the server was previously paused */
-	send_log(s->proxy, srv_was_stopping ? LOG_NOTICE : LOG_ALERT, "%s.\n", trash.str);
+	log_level = srv_was_stopping ? LOG_NOTICE : LOG_ALERT;
+	send_log(s->proxy, log_level, "%s.\n", trash.str);
+	send_email_alert(s, log_level, "%s", trash.str);
 
 	if (prev_srv_count && s->proxy->srv_bck == 0 && s->proxy->srv_act == 0)
 		set_backend_down(s->proxy);
@@ -796,35 +800,6 @@ const char *server_parse_weight_change_request(struct server *sv,
 	return NULL;
 }
 
-static int init_check(struct check *check, int type, const char * file, int linenum)
-{
-	check->type = type;
-
-	/* Allocate buffer for requests... */
-	if ((check->bi = calloc(sizeof(struct buffer) + global.tune.chksize, sizeof(char))) == NULL) {
-		Alert("parsing [%s:%d] : out of memory while allocating check buffer.\n", file, linenum);
-		return ERR_ALERT | ERR_ABORT;
-	}
-	check->bi->size = global.tune.chksize;
-
-	/* Allocate buffer for responses... */
-	if ((check->bo = calloc(sizeof(struct buffer) + global.tune.chksize, sizeof(char))) == NULL) {
-		Alert("parsing [%s:%d] : out of memory while allocating check buffer.\n", file, linenum);
-		return ERR_ALERT | ERR_ABORT;
-	}
-	check->bo->size = global.tune.chksize;
-
-	/* Allocate buffer for partial results... */
-	if ((check->conn = calloc(1, sizeof(struct connection))) == NULL) {
-		Alert("parsing [%s:%d] : out of memory while allocating check connection.\n", file, linenum);
-		return ERR_ALERT | ERR_ABORT;
-	}
-
-	check->conn->t.sock.fd = -1; /* no agent in progress yet */
-
-	return 0;
-}
-
 int parse_server(const char *file, int linenum, char **args, struct proxy *curproxy, struct proxy *defproxy)
 {
 	struct server *newsrv = NULL;
@@ -929,7 +904,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			}
 
 			newsrv->addr = *sk;
-			newsrv->proto = newsrv->check_common.proto = protocol_by_family(newsrv->addr.ss_family);
+			newsrv->proto = newsrv->check.proto = newsrv->agent.proto = protocol_by_family(newsrv->addr.ss_family);
 			newsrv->xprt  = newsrv->check.xprt = newsrv->agent.xprt = &raw_sock;
 
 			if (!newsrv->proto) {
@@ -969,6 +944,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			newsrv->check.fall	= curproxy->defsrv.check.fall;
 			newsrv->check.health	= newsrv->check.rise;	/* up, but will fall down at first failure */
 			newsrv->check.server	= newsrv;
+			newsrv->check.tcpcheck_rules	= &curproxy->tcpcheck_rules;
 
 			newsrv->agent.status	= HCHK_STATUS_INI;
 			newsrv->agent.rise	= curproxy->defsrv.agent.rise;
@@ -1137,8 +1113,8 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 					goto out;
 				}
 
-				newsrv->check_common.addr = *sk;
-				newsrv->check_common.proto = protocol_by_family(sk->ss_family);
+				newsrv->check.addr = newsrv->agent.addr = *sk;
+				newsrv->check.proto = newsrv->agent.proto = protocol_by_family(sk->ss_family);
 				cur_arg += 2;
 			}
 			else if (!strcmp(args[cur_arg], "port")) {
@@ -1592,7 +1568,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 		}
 
 		if (do_check) {
-			int ret;
+			const char *ret;
 
 			if (newsrv->trackit) {
 				Alert("parsing [%s:%d]: unable to enable checks and tracking at the same time!\n",
@@ -1606,7 +1582,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			 * same as for the production traffic. Otherwise we use raw_sock by
 			 * default, unless one is specified.
 			 */
-			if (!newsrv->check.port && !is_addr(&newsrv->check_common.addr)) {
+			if (!newsrv->check.port && !is_addr(&newsrv->check.addr)) {
 #ifdef USE_OPENSSL
 				newsrv->check.use_ssl |= (newsrv->use_ssl || (newsrv->proxy->options & PR_O_TCPCHK_SSL));
 #endif
@@ -1614,7 +1590,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			}
 			/* try to get the port from check_core.addr if check.port not set */
 			if (!newsrv->check.port)
-				newsrv->check.port = get_host_port(&newsrv->check_common.addr);
+				newsrv->check.port = get_host_port(&newsrv->check.addr);
 
 			if (!newsrv->check.port)
 				newsrv->check.port = realport; /* by default */
@@ -1637,8 +1613,8 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			 * be a 'connect' one when checking an IPv4/IPv6 server.
 			 */
 			if (!newsrv->check.port &&
-			    (is_inet_addr(&newsrv->check_common.addr) ||
-			     (!is_addr(&newsrv->check_common.addr) && is_inet_addr(&newsrv->addr)))) {
+			    (is_inet_addr(&newsrv->check.addr) ||
+			     (!is_addr(&newsrv->check.addr) && is_inet_addr(&newsrv->addr)))) {
 				struct tcpcheck_rule *n = NULL, *r = NULL;
 				struct list *l;
 
@@ -1671,9 +1647,10 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			}
 
 			/* note: check type will be set during the config review phase */
-			ret = init_check(&newsrv->check, 0, file, linenum);
+			ret = init_check(&newsrv->check, 0);
 			if (ret) {
-				err_code |= ret;
+				Alert("parsing [%s:%d] : %s.\n", file, linenum, ret);
+				err_code |= ERR_ALERT | ERR_ABORT;
 				goto out;
 			}
 
@@ -1681,7 +1658,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 		}
 
 		if (do_agent) {
-			int ret;
+			const char *ret;
 
 			if (!newsrv->agent.port) {
 				Alert("parsing [%s:%d] : server %s does not have agent port. Agent check has been disabled.\n",
@@ -1693,9 +1670,10 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			if (!newsrv->agent.inter)
 				newsrv->agent.inter = newsrv->check.inter;
 
-			ret = init_check(&newsrv->agent, PR_O2_LB_AGENT_CHK, file, linenum);
+			ret = init_check(&newsrv->agent, PR_O2_LB_AGENT_CHK);
 			if (ret) {
-				err_code |= ret;
+				Alert("parsing [%s:%d] : %s.\n", file, linenum, ret);
+				err_code |= ERR_ALERT | ERR_ABORT;
 				goto out;
 			}
 

@@ -3250,7 +3250,7 @@ static int http_transform_header(struct session* s, struct http_msg *msg, const 
 	while (http_find_full_header2(name, name_len, buf, idx, ctx)) {
 		struct hdr_idx_elem *hdr = idx->v + ctx->idx;
 		int delta;
-		char* val = (char*)ctx->line + name_len + 2;
+		char* val = (char*)ctx->line + ctx->val;
 		char* val_end = (char*)ctx->line + hdr->len;
 		char* reg_dst_buf;
 		uint reg_dst_buf_size;
@@ -7092,7 +7092,8 @@ int apply_filters_to_request(struct session *s, struct channel *req, struct prox
 			/* The filter did not match the request, it can be
 			 * iterated through all headers.
 			 */
-			apply_filter_to_req_headers(s, req, exp);
+			if (unlikely(apply_filter_to_req_headers(s, req, exp) < 0))
+				return -1;
 		}
 	}
 	return 0;
