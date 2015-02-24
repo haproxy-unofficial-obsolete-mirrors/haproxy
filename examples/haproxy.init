@@ -32,22 +32,28 @@ if [ -L $0 ]; then
   BASENAME=`basename $BASENAME`
 fi
 
-[ -f /etc/$BASENAME/$BASENAME.cfg ] || exit 1
+BIN=/usr/sbin/$BASENAME
+
+CFG=/etc/$BASENAME/$BASENAME.cfg
+[ -f $CFG ] || exit 1
+
+PIDFILE=/var/run/$BASENAME.pid
+LOCKFILE=/var/lock/subsys/$BASENAME
 
 RETVAL=0
 
 start() {
-  /usr/sbin/$BASENAME -c -q -f /etc/$BASENAME/$BASENAME.cfg
+  quiet_check
   if [ $? -ne 0 ]; then
     echo "Errors found in configuration file, check it with '$BASENAME check'."
     return 1
   fi
 
   echo -n "Starting $BASENAME: "
-  daemon /usr/sbin/$BASENAME -D -f /etc/$BASENAME/$BASENAME.cfg -p /var/run/$BASENAME.pid
+  daemon $BIN -D -f $CFG -p $PIDFILE
   RETVAL=$?
   echo
-  [ $RETVAL -eq 0 ] && touch /var/lock/subsys/$BASENAME
+  [ $RETVAL -eq 0 ] && touch $LOCKFILE
   return $RETVAL
 }
 
@@ -56,13 +62,13 @@ stop() {
   killproc $BASENAME -USR1
   RETVAL=$?
   echo
-  [ $RETVAL -eq 0 ] && rm -f /var/lock/subsys/$BASENAME
-  [ $RETVAL -eq 0 ] && rm -f /var/run/$BASENAME.pid
+  [ $RETVAL -eq 0 ] && rm -f $LOCKFILE
+  [ $RETVAL -eq 0 ] && rm -f $PIDFILE
   return $RETVAL
 }
 
 restart() {
-  /usr/sbin/$BASENAME -c -q -f /etc/$BASENAME/$BASENAME.cfg
+  quiet_check
   if [ $? -ne 0 ]; then
     echo "Errors found in configuration file, check it with '$BASENAME check'."
     return 1
@@ -72,16 +78,24 @@ restart() {
 }
 
 reload() {
-  /usr/sbin/$BASENAME -c -q -f /etc/$BASENAME/$BASENAME.cfg
+  if ! [ -s $PIDFILE ]; then
+    return 0
+  fi
+
+  quiet_check
   if [ $? -ne 0 ]; then
     echo "Errors found in configuration file, check it with '$BASENAME check'."
     return 1
   fi
-  /usr/sbin/$BASENAME -D -f /etc/$BASENAME/$BASENAME.cfg -p /var/run/$BASENAME.pid -sf $(cat /var/run/$BASENAME.pid)
+  $BIN -D -f $CFG -p $PIDFILE -sf $(cat $PIDFILE)
 }
 
 check() {
-  /usr/sbin/$BASENAME -c -q -V -f /etc/$BASENAME/$BASENAME.cfg
+  $BIN -c -q -V -f $CFG
+}
+
+quiet_check()
+  $BIN -c -q -f $CFG
 }
 
 rhstatus() {
@@ -89,7 +103,7 @@ rhstatus() {
 }
 
 condrestart() {
-  [ -e /var/lock/subsys/$BASENAME ] && restart || :
+  [ -e $LOCKFILE ] && restart || :
 }
 
 # See how we were called.
