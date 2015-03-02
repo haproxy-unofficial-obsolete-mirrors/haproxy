@@ -260,8 +260,10 @@ struct sample_storage {
 /* Descriptor for a sample conversion */
 struct sample_conv {
 	const char *kw;                           /* configuration keyword  */
-	int (*process)(const struct arg *arg_p,
-		       struct sample *smp);       /* process function */
+	int (*process)(struct session *session,
+	               const struct arg *arg_p,
+	               struct sample *smp,
+	               void *private);            /* process function */
 	unsigned int arg_mask;                    /* arguments (ARG*()) */
 	int (*val_args)(struct arg *arg_p,
 	                struct sample_conv *smp_conv,
@@ -269,7 +271,7 @@ struct sample_conv {
 			char **err_msg);          /* argument validation function */
 	unsigned int in_type;                     /* expected input sample type */
 	unsigned int out_type;                    /* output sample type */
-	unsigned int private;                     /* private values. only used by maps */
+	void *private;                            /* private values. only used by maps and Lua */
 };
 
 /* sample conversion expression */
@@ -288,13 +290,15 @@ struct sample_fetch {
 		       unsigned int opt,          /* fetch options (SMP_OPT_*) */
 		       const struct arg *arg_p,
 	               struct sample *smp,
-	               const char *kw);           /* fetch processing function */
+	               const char *kw,            /* fetch processing function */
+	               void *private);            /* private value. */
 	unsigned int arg_mask;                    /* arguments (ARG*()) */
 	int (*val_args)(struct arg *arg_p,
 			char **err_msg);          /* argument validation function */
 	unsigned long out_type;                   /* output sample type */
 	unsigned int use;                         /* fetch source (SMP_USE_*) */
 	unsigned int val;                         /* fetch validity (SMP_VAL_*) */
+	void *private;                            /* private values. only used by Lua */
 };
 
 /* sample expression */

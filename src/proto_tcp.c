@@ -63,6 +63,11 @@
 static int tcp_bind_listeners(struct protocol *proto, char *errmsg, int errlen);
 static int tcp_bind_listener(struct listener *listener, char *errmsg, int errlen);
 
+/* List head of all known action keywords for "tcp-request connection" */
+struct list tcp_req_conn_keywords = LIST_HEAD_INIT(tcp_req_conn_keywords);
+struct list tcp_req_cont_keywords = LIST_HEAD_INIT(tcp_req_cont_keywords);
+struct list tcp_res_cont_keywords = LIST_HEAD_INIT(tcp_res_cont_keywords);
+
 /* Note: must not be declared <const> as its list will be overwritten */
 static struct protocol proto_tcpv4 = {
 	.name = "tcpv4",
@@ -109,6 +114,77 @@ static struct protocol proto_tcpv6 = {
 	.nb_listeners = 0,
 };
 
+/*
+ * Register keywords.
+ */
+void tcp_req_conn_keywords_register(struct tcp_action_kw_list *kw_list)
+{
+	LIST_ADDQ(&tcp_req_conn_keywords, &kw_list->list);
+}
+
+void tcp_req_cont_keywords_register(struct tcp_action_kw_list *kw_list)
+{
+	LIST_ADDQ(&tcp_req_cont_keywords, &kw_list->list);
+}
+
+void tcp_res_cont_keywords_register(struct tcp_action_kw_list *kw_list)
+{
+	LIST_ADDQ(&tcp_res_cont_keywords, &kw_list->list);
+}
+
+/*
+ * Return the struct http_req_action_kw associated to a keyword.
+ */
+static struct tcp_action_kw *tcp_req_conn_action(const char *kw)
+{
+	struct tcp_action_kw_list *kw_list;
+	int i;
+
+	if (LIST_ISEMPTY(&tcp_req_conn_keywords))
+		return NULL;
+
+	list_for_each_entry(kw_list, &tcp_req_conn_keywords, list) {
+		for (i = 0; kw_list->kw[i].kw != NULL; i++) {
+			if (!strcmp(kw, kw_list->kw[i].kw))
+				return &kw_list->kw[i];
+		}
+	}
+	return NULL;
+}
+
+static struct tcp_action_kw *tcp_req_cont_action(const char *kw)
+{
+	struct tcp_action_kw_list *kw_list;
+	int i;
+
+	if (LIST_ISEMPTY(&tcp_req_cont_keywords))
+		return NULL;
+
+	list_for_each_entry(kw_list, &tcp_req_cont_keywords, list) {
+		for (i = 0; kw_list->kw[i].kw != NULL; i++) {
+			if (!strcmp(kw, kw_list->kw[i].kw))
+				return &kw_list->kw[i];
+		}
+	}
+	return NULL;
+}
+
+static struct tcp_action_kw *tcp_res_cont_action(const char *kw)
+{
+	struct tcp_action_kw_list *kw_list;
+	int i;
+
+	if (LIST_ISEMPTY(&tcp_res_cont_keywords))
+		return NULL;
+
+	list_for_each_entry(kw_list, &tcp_res_cont_keywords, list) {
+		for (i = 0; kw_list->kw[i].kw != NULL; i++) {
+			if (!strcmp(kw, kw_list->kw[i].kw))
+				return &kw_list->kw[i];
+		}
+	}
+	return NULL;
+}
 
 /* Binds ipv4/ipv6 address <local> to socket <fd>, unless <flags> is set, in which
  * case we try to bind <remote>. <flags> is a 2-bit field consisting of :
@@ -1043,6 +1119,16 @@ int tcp_inspect_request(struct session *s, struct channel *req, int an_bit)
 	else
 		partial = 0;
 
+	/* If "the current_rule_list" match the executed rule list, we are in
+	 * resume condition. If a resume is needed it is always in the action
+	 * and never in the ACL or converters. In this case, we initialise the
+	 * current rule, and go to the action execution point.
+	 */
+	if (s->current_rule_list == &s->be->tcp_req.inspect_rules) {
+		rule = LIST_ELEM(s->current_rule, typeof(rule), list);
+		goto resume_execution;
+	}
+	s->current_rule_list = &s->be->tcp_req.inspect_rules;
 	list_for_each_entry(rule, &s->be->tcp_req.inspect_rules, list) {
 		enum acl_test_res ret = ACL_TEST_PASS;
 
@@ -1057,6 +1143,9 @@ int tcp_inspect_request(struct session *s, struct channel *req, int an_bit)
 		}
 
 		if (ret) {
+
+resume_execution:
+
 			/* we have a matching rule. */
 			if (rule->action == TCP_ACT_REJECT) {
 				channel_abort(req);
@@ -1124,6 +1213,12 @@ int tcp_inspect_request(struct session *s, struct channel *req, int an_bit)
 				cap[h->index][len] = 0;
 			}
 			else {
+				/* Custom keywords. */
+				if (rule->action_ptr(rule, s->be, s) == 0) {
+					s->current_rule = &rule->list;
+					goto missing_data;
+				}
+
 				/* otherwise accept */
 				break;
 			}
@@ -1181,6 +1276,16 @@ int tcp_inspect_response(struct session *s, struct channel *rep, int an_bit)
 	else
 		partial = 0;
 
+	/* If "the current_rule_list" match the executed rule list, we are in
+	 * resume condition. If a resume is needed it is always in the action
+	 * and never in the ACL or converters. In this case, we initialise the
+	 * current rule, and go to the action execution point.
+	 */
+	if (s->current_rule_list == &s->be->tcp_rep.inspect_rules) {
+		rule = LIST_ELEM(s->current_rule, typeof(rule), list);
+		goto resume_execution;
+	}
+	s->current_rule_list = &s->be->tcp_rep.inspect_rules;
 	list_for_each_entry(rule, &s->be->tcp_rep.inspect_rules, list) {
 		enum acl_test_res ret = ACL_TEST_PASS;
 
@@ -1199,6 +1304,9 @@ int tcp_inspect_response(struct session *s, struct channel *rep, int an_bit)
 		}
 
 		if (ret) {
+
+resume_execution:
+
 			/* we have a matching rule. */
 			if (rule->action == TCP_ACT_REJECT) {
 				channel_abort(rep);
@@ -1223,6 +1331,13 @@ int tcp_inspect_response(struct session *s, struct channel *rep, int an_bit)
 				break;
 			}
 			else {
+				/* Custom keywords. */
+				if (!rule->action_ptr(rule, s->be, s)) {
+					channel_dont_close(rep);
+					s->current_rule = &rule->list;
+					return 0;
+				}
+
 				/* otherwise accept */
 				break;
 			}
@@ -1299,6 +1414,9 @@ int tcp_exec_req_rules(struct session *s)
 				conn_sock_want_recv(conn);
 			}
 			else {
+				/* Custom keywords. */
+				rule->action_ptr(rule, s->fe, s);
+
 				/* otherwise it's an accept */
 				break;
 			}
@@ -1333,10 +1451,18 @@ static int tcp_parse_response_rule(char **args, int arg, int section_type,
 		rule->action = TCP_ACT_CLOSE;
 	}
 	else {
-		memprintf(err,
-		          "'%s %s' expects 'accept', 'close' or 'reject' in %s '%s' (got '%s')",
-		          args[0], args[1], proxy_type_str(curpx), curpx->id, args[arg]);
-		return -1;
+		struct tcp_action_kw *kw;
+		kw = tcp_res_cont_action(args[arg]);
+		if (kw) {
+			arg++;
+			if (!kw->parse((const char **)args, &arg, curpx, rule, err))
+				return -1;
+		} else {
+			memprintf(err,
+			          "'%s %s' expects 'accept', 'close' or 'reject' in %s '%s' (got '%s')",
+			          args[0], args[1], proxy_type_str(curpx), curpx->id, args[arg]);
+			return -1;
+		}
 	}
 
 	if (strcmp(args[arg], "if") == 0 || strcmp(args[arg], "unless") == 0) {
@@ -1527,11 +1653,23 @@ static int tcp_parse_request_rule(char **args, int arg, int section_type,
 		rule->action = TCP_ACT_EXPECT_PX;
 	}
 	else {
-		memprintf(err,
-		          "'%s %s' expects 'accept', 'reject', 'track-sc0' ... 'track-sc%d' "
-		          " in %s '%s' (got '%s')",
-		          args[0], args[1], MAX_SESS_STKCTR-1, proxy_type_str(curpx), curpx->id, args[arg]);
-		return -1;
+		struct tcp_action_kw *kw;
+		if (where & SMP_VAL_FE_CON_ACC)
+			kw = tcp_req_conn_action(args[arg]);
+		else
+			kw = tcp_req_cont_action(args[arg]);
+		if (kw) {
+			arg++;
+			if (!kw->parse((const char **)args, &arg, curpx, rule, err))
+				return -1;
+		} else {
+			memprintf(err,
+			          "'%s %s' expects 'accept', 'reject', 'track-sc0' ... 'track-sc%d' "
+			          " in %s '%s' (got '%s')",
+			          args[0], args[1], MAX_SESS_STKCTR-1, proxy_type_str(curpx),
+			          curpx->id, args[arg]);
+			return -1;
+		}
 	}
 
 	if (strcmp(args[arg], "if") == 0 || strcmp(args[arg], "unless") == 0) {
@@ -1825,7 +1963,7 @@ static int tcp_parse_tcp_req(char **args, int section_type, struct proxy *curpx,
 /* fetch the connection's source IPv4/IPv6 address */
 static int
 smp_fetch_src(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-              const struct arg *args, struct sample *smp, const char *kw)
+              const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	struct connection *cli_conn = objt_conn(l4->si[0].end);
 
@@ -1852,7 +1990,7 @@ smp_fetch_src(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
 /* set temp integer to the connection's source port */
 static int
 smp_fetch_sport(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                const struct arg *args, struct sample *smp, const char *kw)
+                const struct arg *args, struct sample *smp, const char *k, void *private)
 {
 	struct connection *cli_conn = objt_conn(l4->si[0].end);
 
@@ -1870,7 +2008,7 @@ smp_fetch_sport(struct proxy *px, struct session *l4, void *l7, unsigned int opt
 /* fetch the connection's destination IPv4/IPv6 address */
 static int
 smp_fetch_dst(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-              const struct arg *args, struct sample *smp, const char *kw)
+              const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	struct connection *cli_conn = objt_conn(l4->si[0].end);
 
@@ -1899,7 +2037,7 @@ smp_fetch_dst(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
 /* set temp integer to the frontend connexion's destination port */
 static int
 smp_fetch_dport(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                const struct arg *args, struct sample *smp, const char *kw)
+                const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	struct connection *cli_conn = objt_conn(l4->si[0].end);
 

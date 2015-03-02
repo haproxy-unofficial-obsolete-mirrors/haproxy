@@ -88,6 +88,9 @@
 #include <proto/connection.h>
 #include <proto/fd.h>
 #include <proto/hdr_idx.h>
+#ifdef USE_LUA
+#include <proto/hlua.h>
+#endif
 #include <proto/listener.h>
 #include <proto/log.h>
 #include <proto/pattern.h>
@@ -331,6 +334,12 @@ void display_build_opts()
 	printf("Built without PCRE support (using libc's regex instead)\n");
 #endif
 
+#ifdef USE_LUA
+	printf("Built with Lua version : %s\n", LUA_RELEASE);
+#else
+	printf("Built without Lua support\n");
+#endif
+
 #if defined(CONFIG_HAP_TRANSPARENT) || defined(CONFIG_HAP_CTTPROXY)
 	printf("Built with transparent proxy support using:"
 #if defined(CONFIG_HAP_CTTPROXY)
@@ -557,6 +566,11 @@ void init(int argc, char **argv)
 	/* warning, we init buffers later */
 	init_pendconn();
 	init_proto_http();
+
+#ifdef USE_LUA
+	/* Initialise lua. */
+	hlua_init();
+#endif
 
 	global.tune.options |= GTUNE_USE_SELECT;  /* select() is always available */
 #if defined(ENABLE_POLL)
@@ -1050,6 +1064,10 @@ void init(int argc, char **argv)
 	if (!global.node)
 		global.node = strdup(hostname);
 
+#ifdef USE_LUA
+	if (!hlua_post_init())
+		exit(1);
+#endif
 }
 
 static void deinit_acl_cond(struct acl_cond *cond)
@@ -1459,14 +1477,14 @@ void run_poll_loop()
 
 	tv_update_date(0,1);
 	while (1) {
+		/* Process a few tasks */
+		process_runnable_tasks();
+
 		/* check if we caught some signals and process them */
 		signal_process_queue();
 
 		/* Check if we can expire some tasks */
-		wake_expired_tasks(&next);
-
-		/* Process a few tasks */
-		process_runnable_tasks(&next);
+		next = wake_expired_tasks();
 
 		/* stop when there's nothing left to do */
 		if (jobs == 0)
