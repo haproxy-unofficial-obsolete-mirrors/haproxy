@@ -48,6 +48,7 @@
 #include <types/global.h>
 #include <types/obj_type.h>
 #include <types/peers.h>
+#include <types/mailers.h>
 
 #include <proto/acl.h>
 #include <proto/auth.h>
@@ -1617,6 +1618,8 @@ void init_default_instance()
 	defproxy.defsrv.onerror = DEF_HANA_ONERR;
 	defproxy.defsrv.consecutive_errors_limit = DEF_HANA_ERRLIMIT;
 	defproxy.defsrv.uweight = defproxy.defsrv.iweight = 1;
+
+	defproxy.email_alert.level = LOG_ALERT;
 }
 
 
@@ -1916,6 +1919,157 @@ out:
 	return err_code;
 }
 
+
+/*
+ * Parse a line in a <listen>, <frontend>, <backend> or <ruleset> section.
+ * Returns the error code, 0 if OK, or any combination of :
+ *  - ERR_ABORT: must abort ASAP
+ *  - ERR_FATAL: we can continue parsing but not start the service
+ *  - ERR_WARN: a warning has been emitted
+ *  - ERR_ALERT: an alert has been emitted
+ * Only the two first ones can stop processing, the two others are just
+ * indicators.
+ */
+int cfg_parse_mailers(const char *file, int linenum, char **args, int kwm)
+{
+	static struct mailers *curmailers = NULL;
+	struct mailer *newmailer = NULL;
+	const char *err;
+	int err_code = 0;
+	char *errmsg = NULL;
+
+	if (strcmp(args[0], "mailers") == 0) { /* new mailers section */
+		if (!*args[1]) {
+			Alert("parsing [%s:%d] : missing name for mailers section.\n", file, linenum);
+			err_code |= ERR_ALERT | ERR_ABORT;
+			goto out;
+		}
+
+		err = invalid_char(args[1]);
+		if (err) {
+			Alert("parsing [%s:%d] : character '%c' is not permitted in '%s' name '%s'.\n",
+			      file, linenum, *err, args[0], args[1]);
+			err_code |= ERR_ALERT | ERR_ABORT;
+			goto out;
+		}
+
+		for (curmailers = mailers; curmailers != NULL; curmailers = curmailers->next) {
+			/*
+			 * If there are two proxies with the same name only following
+			 * combinations are allowed:
+			 */
+			if (strcmp(curmailers->id, args[1]) == 0) {
+				Warning("Parsing [%s:%d]: mailers '%s' has same name as another mailers (declared at %s:%d).\n",
+					file, linenum, args[1], curmailers->conf.file, curmailers->conf.line);
+				err_code |= ERR_WARN;
+			}
+		}
+
+		if ((curmailers = (struct mailers *)calloc(1, sizeof(struct mailers))) == NULL) {
+			Alert("parsing [%s:%d] : out of memory.\n", file, linenum);
+			err_code |= ERR_ALERT | ERR_ABORT;
+			goto out;
+		}
+
+		curmailers->next = mailers;
+		mailers = curmailers;
+		curmailers->conf.file = strdup(file);
+		curmailers->conf.line = linenum;
+		curmailers->id = strdup(args[1]);
+	}
+	else if (strcmp(args[0], "mailer") == 0) { /* mailer definition */
+		struct sockaddr_storage *sk;
+		int port1, port2;
+		struct protocol *proto;
+
+		if (!*args[2]) {
+			Alert("parsing [%s:%d] : '%s' expects <name> and <addr>[:<port>] as arguments.\n",
+			      file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
+		err = invalid_char(args[1]);
+		if (err) {
+			Alert("parsing [%s:%d] : character '%c' is not permitted in server name '%s'.\n",
+			      file, linenum, *err, args[1]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
+		if ((newmailer = (struct mailer *)calloc(1, sizeof(struct mailer))) == NULL) {
+			Alert("parsing [%s:%d] : out of memory.\n", file, linenum);
+			err_code |= ERR_ALERT | ERR_ABORT;
+			goto out;
+		}
+
+		/* the mailers are linked backwards first */
+		curmailers->count++;
+		newmailer->next = curmailers->mailer_list;
+		curmailers->mailer_list = newmailer;
+		newmailer->mailers = curmailers;
+		newmailer->conf.file = strdup(file);
+		newmailer->conf.line = linenum;
+
+		newmailer->id = strdup(args[1]);
+
+		sk = str2sa_range(args[2], &port1, &port2, &errmsg, NULL);
+		if (!sk) {
+			Alert("parsing [%s:%d] : '%s %s' : %s\n", file, linenum, args[0], args[1], errmsg);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
+		proto = protocol_by_family(sk->ss_family);
+		if (!proto || !proto->connect || proto->sock_prot != IPPROTO_TCP) {
+			Alert("parsing [%s:%d] : '%s %s' : TCP not supported for this address family.\n",
+			      file, linenum, args[0], args[1]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
+		if (port1 != port2) {
+			Alert("parsing [%s:%d] : '%s %s' : port ranges and offsets are not allowed in '%s'\n",
+			      file, linenum, args[0], args[1], args[2]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
+		if (!port1) {
+			Alert("parsing [%s:%d] : '%s %s' : missing or invalid port in '%s'\n",
+			      file, linenum, args[0], args[1], args[2]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
+		newmailer->addr = *sk;
+		newmailer->proto = proto;
+		newmailer->xprt  = &raw_sock;
+		newmailer->sock_init_arg = NULL;
+	} /* neither "mailer" nor "mailers" */
+	else if (*args[0] != 0) {
+		Alert("parsing [%s:%d] : unknown keyword '%s' in '%s' section\n", file, linenum, args[0], cursection);
+		err_code |= ERR_ALERT | ERR_FATAL;
+		goto out;
+	}
+
+out:
+	free(errmsg);
+	return err_code;
+}
+
+static void free_email_alert(struct proxy *p)
+{
+	free(p->email_alert.mailers.name);
+	p->email_alert.mailers.name = NULL;
+	free(p->email_alert.from);
+	p->email_alert.from = NULL;
+	free(p->email_alert.to);
+	p->email_alert.to = NULL;
+	free(p->email_alert.myhostname);
+	p->email_alert.myhostname = NULL;
+}
+
 int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 {
 	static struct proxy *curproxy = NULL;
@@ -2212,6 +2366,16 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		if (defproxy.check_command)
 			curproxy->check_command = strdup(defproxy.check_command);
 
+		if (defproxy.email_alert.mailers.name)
+			curproxy->email_alert.mailers.name = strdup(defproxy.email_alert.mailers.name);
+		if (defproxy.email_alert.from)
+			curproxy->email_alert.from = strdup(defproxy.email_alert.from);
+		if (defproxy.email_alert.to)
+			curproxy->email_alert.to = strdup(defproxy.email_alert.to);
+		if (defproxy.email_alert.myhostname)
+			curproxy->email_alert.myhostname = strdup(defproxy.email_alert.myhostname);
+		curproxy->email_alert.level = defproxy.email_alert.level;
+
 		goto out;
 	}
 	else if (!strcmp(args[0], "defaults")) {  /* use this one to assign default values */
@@ -2253,6 +2417,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		free(defproxy.conf.lfs_file);
 		free(defproxy.conf.uif_file);
 		free(defproxy.log_tag);
+		free_email_alert(&defproxy);
 
 		for (rc = 0; rc < HTTP_ERR_SIZE; rc++)
 			chunk_destroy(&defproxy.errmsg[rc]);
@@ -2730,6 +2895,72 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 		}
 	}/* end else if (!strcmp(args[0], "cookie"))  */
+	else if (!strcmp(args[0], "email-alert")) {
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d] : missing argument after '%s'.\n",
+			      file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+                }
+
+		if (!strcmp(args[1], "from")) {
+			if (*(args[1]) == 0) {
+				Alert("parsing [%s:%d] : missing argument after '%s'.\n",
+				      file, linenum, args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			free(curproxy->email_alert.from);
+			curproxy->email_alert.from = strdup(args[2]);
+		}
+		else if (!strcmp(args[1], "mailers")) {
+			if (*(args[1]) == 0) {
+				Alert("parsing [%s:%d] : missing argument after '%s'.\n",
+				      file, linenum, args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			free(curproxy->email_alert.mailers.name);
+			curproxy->email_alert.mailers.name = strdup(args[2]);
+		}
+		else if (!strcmp(args[1], "myhostname")) {
+			if (*(args[1]) == 0) {
+				Alert("parsing [%s:%d] : missing argument after '%s'.\n",
+				      file, linenum, args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			free(curproxy->email_alert.myhostname);
+			curproxy->email_alert.myhostname = strdup(args[2]);
+		}
+		else if (!strcmp(args[1], "level")) {
+			curproxy->email_alert.level = get_log_level(args[2]);
+			if (curproxy->email_alert.level < 0) {
+				Alert("parsing [%s:%d] : unknown log level '%s' after '%s'\n",
+				      file, linenum, args[1], args[2]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+		}
+		else if (!strcmp(args[1], "to")) {
+			if (*(args[1]) == 0) {
+				Alert("parsing [%s:%d] : missing argument after '%s'.\n",
+				      file, linenum, args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			free(curproxy->email_alert.to);
+			curproxy->email_alert.to = strdup(args[2]);
+		}
+		else {
+			Alert("parsing [%s:%d] : email-alert: unknown argument '%s'.\n",
+			      file, linenum, args[1]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		/* Indicate that the email_alert is at least partially configured */
+		curproxy->email_alert.set = 1;
+	}/* end else if (!strcmp(args[0], "email-alert"))  */
 	else if (!strcmp(args[0], "external-check")) {
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : missing argument after '%s'.\n",
@@ -4567,14 +4798,15 @@ stats_error_parsing:
 			 * exclamation mark, and cur_arg is the argument which holds this word.
 			 */
 			if (strcmp(ptr_arg, "binary") == 0) {
+				struct tcpcheck_rule *tcpcheck;
+				char *err = NULL;
+
 				if (!*(args[cur_arg + 1])) {
 					Alert("parsing [%s:%d] : '%s %s %s' expects <binary string> as an argument.\n",
 					      file, linenum, args[0], args[1], ptr_arg);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
-				struct tcpcheck_rule *tcpcheck;
-				char *err = NULL;
 
 				tcpcheck = (struct tcpcheck_rule *)calloc(1, sizeof(*tcpcheck));
 
@@ -4591,13 +4823,14 @@ stats_error_parsing:
 				LIST_ADDQ(&curproxy->tcpcheck_rules, &tcpcheck->list);
 			}
 			else if (strcmp(ptr_arg, "string") == 0) {
+				struct tcpcheck_rule *tcpcheck;
+
 				if (!*(args[cur_arg + 1])) {
 					Alert("parsing [%s:%d] : '%s %s %s' expects <string> as an argument.\n",
 					      file, linenum, args[0], args[1], ptr_arg);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
-				struct tcpcheck_rule *tcpcheck;
 
 				tcpcheck = (struct tcpcheck_rule *)calloc(1, sizeof(*tcpcheck));
 
@@ -4610,13 +4843,14 @@ stats_error_parsing:
 				LIST_ADDQ(&curproxy->tcpcheck_rules, &tcpcheck->list);
 			}
 			else if (strcmp(ptr_arg, "rstring") == 0) {
+				struct tcpcheck_rule *tcpcheck;
+
 				if (!*(args[cur_arg + 1])) {
 					Alert("parsing [%s:%d] : '%s %s %s' expects <regex> as an argument.\n",
 					      file, linenum, args[0], args[1], ptr_arg);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
-				struct tcpcheck_rule *tcpcheck;
 
 				tcpcheck = (struct tcpcheck_rule *)calloc(1, sizeof(*tcpcheck));
 
@@ -5942,6 +6176,7 @@ int readcfgfile(const char *file)
 	    !cfg_register_section("global",   cfg_parse_global) ||
 	    !cfg_register_section("userlist", cfg_parse_users)  ||
 	    !cfg_register_section("peers",    cfg_parse_peers)  ||
+	    !cfg_register_section("mailers",  cfg_parse_mailers) ||
 	    !cfg_register_section("namespace_list",    cfg_parse_netns))
 		return -1;
 
@@ -6389,6 +6624,21 @@ int check_config_validity()
 			}
 		}
 
+		if (curproxy->email_alert.set) {
+		    if (!(curproxy->email_alert.mailers.name && curproxy->email_alert.from && curproxy->email_alert.to)) {
+			    Warning("config : 'email-alert' will be ignored for %s '%s' (the presence any of "
+				    "'email-alert from', 'email-alert level' 'email-alert mailer', "
+				    "'email-alert hostname', or 'email-alert to' "
+				    "requrires each of 'email-alert from', 'email-alert mailer' and 'email-alert' "
+				    "to be present).\n",
+				    proxy_type_str(curproxy), curproxy->id);
+			    err_code |= ERR_WARN;
+			    free_email_alert(curproxy);
+		    }
+		    if (!curproxy->email_alert.myhostname)
+			    curproxy->email_alert.myhostname = hostname;
+		}
+
 		if (curproxy->check_command) {
 			int clear = 0;
 			if ((curproxy->options2 & PR_O2_CHK_ANY) != PR_O2_EXT_CHK) {
@@ -6748,6 +6998,27 @@ int check_config_validity()
 				Alert("Proxy '%s': unable to find local peer '%s' in peers section '%s'.\n",
 				      curproxy->id, localpeer, curpeers->id);
 				curproxy->table.peers.p = NULL;
+				cfgerr++;
+			}
+		}
+
+
+		if (curproxy->email_alert.mailers.name) {
+			struct mailers *curmailers = mailers;
+
+			for (curmailers = mailers; curmailers; curmailers = curmailers->next) {
+				if (strcmp(curmailers->id, curproxy->email_alert.mailers.name) == 0) {
+					free(curproxy->email_alert.mailers.name);
+					curproxy->email_alert.mailers.m = curmailers;
+					curmailers->users++;
+					break;
+				}
+			}
+
+			if (!curmailers) {
+				Alert("Proxy '%s': unable to find mailers '%s'.\n",
+				      curproxy->id, curproxy->email_alert.mailers.name);
+				free_email_alert(curproxy);
 				cfgerr++;
 			}
 		}
@@ -7472,6 +7743,7 @@ out_uri_auth_compat:
 			free(bind_conf->ciphers);
 			free(bind_conf->ecdhe);
 			free(bind_conf->crl_file);
+			free(bind_conf->tls_ticket_keys);
 #endif /* USE_OPENSSL */
 		}
 
@@ -7650,6 +7922,42 @@ out_uri_auth_compat:
 			curpeers = curpeers->next;
 			free(*last);
 			*last = curpeers;
+		}
+	}
+
+	if (mailers) {
+		struct mailers *curmailers = mailers, **last;
+		struct mailer *m, *mb;
+
+		/* Remove all mailers sections which don't have a valid listener.
+		 * This can happen when a mailers section is never referenced.
+		 */
+		last = &mailers;
+		while (*last) {
+			curmailers = *last;
+			if (curmailers->users) {
+				last = &curmailers->next;
+				continue;
+			}
+
+			Warning("Removing incomplete section 'mailers %s'.\n",
+				curmailers->id);
+
+			m = curmailers->mailer_list;
+			while (m) {
+				mb = m->next;
+				free(m->id);
+				free(m);
+				m = mb;
+			}
+
+			/* Destroy and unlink this curmailers section.
+			 * Note: curmailers is backed up into *last.
+			 */
+			free(curmailers->id);
+			curmailers = curmailers->next;
+			free(*last);
+			*last = curmailers;
 		}
 	}
 

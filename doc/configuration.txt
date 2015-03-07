@@ -1224,6 +1224,36 @@ peer <peername> <ip>:<port>
         server srv2 192.168.0.31:80
 
 
+3.6. Mailers
+------------
+It is possible to send email alerts when the state of servers changes.
+If configured email alerts are sent to each mailer that is configured
+in a mailers section. Email is sent to mailers using SMTP.
+
+mailer <mailersect>
+  Creates a new mailer list with the name <mailersect>. It is an
+  independent section which is referenced by one or more proxies.
+
+mailer <mailername> <ip>:<port>
+  Defines a mailer inside a mailers section.
+
+  Example:
+    mailers mymailers
+        mailer smtp1 192.168.0.1:587
+        mailer smtp2 192.168.0.2:587
+
+    backend mybackend
+        mode tcp
+        balance roundrobin
+
+        email-alert mailers mymailers
+        email-alert from test1@horms.org
+        email-alert to test2@horms.org
+
+        server srv1 192.168.0.30:80
+        server srv2 192.168.0.31:80
+
+
 4. Proxies
 ----------
 
@@ -1344,6 +1374,11 @@ default_backend                           X          X         X         -
 description                               -          X         X         X
 disabled                                  X          X         X         X
 dispatch                                  -          -         X         X
+email-alert from                          X          X         X         X
+email-alert level                         X          X         X         X
+email-alert mailers                       X          X         X         X
+email-alert myhostname                    X          X         X         X
+email-alert to                            X          X         X         X
 enabled                                   X          X         X         X
 errorfile                                 X          X         X         X
 errorloc                                  X          X         X         X
@@ -2650,6 +2685,99 @@ errorloc303 <code> <url>
   See also : "errorfile", "errorloc", "errorloc302"
 
 
+email-alert from <emailaddr>
+  Declare the from email address to be used in both the envelope and header
+  of email alerts.  This is the address that email alerts are sent from.
+  May be used in sections:    defaults | frontend | listen | backend
+                                 yes   |    yes   |   yes  |   yes
+
+  Arguments :
+
+    <emailaddr> is the from email address to use when sending email alerts
+
+  Also requires "email-alert mailers" and "email-alert to" to be set
+  and if so sending email alerts is enabled for the proxy.
+
+  See also : "email-alert level", "email-alert mailers",
+             "email-alert myhostname", "email-alert to", section 3.6 about mailers.
+
+
+email-alert level <level>
+  Declare the maximum log level of messages for which email alerts will be
+  sent. This acts as a filter on the sending of email alerts.
+  May be used in sections:    defaults | frontend | listen | backend
+                                 yes   |    yes   |   yes  |   yes
+
+  Arguments :
+
+    <level> One of the 8 syslog levels:
+              emerg alert crit err warning notice info  debug
+            The above syslog levels are ordered from lowest to highest.
+
+  By default level is alert
+
+  Also requires "email-alert from", "email-alert mailers" and
+  "email-alert to" to be set and if so sending email alerts is enabled
+  for the proxy.
+
+  See also : "email-alert from", "email-alert mailers",
+             "email-alert myhostname", "email-alert to",
+             section 3.6 about mailers.
+
+
+email-alert mailers <mailersect>
+  Declare the mailers to be used when sending email alerts
+  May be used in sections:    defaults | frontend | listen | backend
+                                 yes   |    yes   |   yes  |   yes
+
+  Arguments :
+
+    <mailersect> is the name of the mailers section to send email alerts.
+
+  Also requires "email-alert from" and "email-alert to" to be set
+  and if so sending email alerts is enabled for the proxy.
+
+  See also : "email-alert from", "email-alert level", "email-alert myhostname",
+             "email-alert to", section 3.6 about mailers.
+
+
+email-alert myhostname <hostname>
+  Declare the to hostname address to be used when communicating with
+  mailers.
+  May be used in sections:    defaults | frontend | listen | backend
+                                 yes   |    yes   |   yes  |   yes
+
+  Arguments :
+
+    <emailaddr> is the to email address to use when sending email alerts
+
+  By default the systems hostname is used.
+
+  Also requires "email-alert from", "email-alert mailers" and
+  "email-alert to" to be set and if so sending email alerts is enabled
+  for the proxy.
+
+  See also : "email-alert from", "email-alert level", "email-alert mailers",
+             "email-alert to", section 3.6 about mailers.
+
+
+email-alert to <emailaddr>
+  Declare both the recipent address in the envelope and to address in the
+  header of email alerts. This is the address that email alerts are sent to.
+  May be used in sections:    defaults | frontend | listen | backend
+                                 yes   |    yes   |   yes  |   yes
+
+  Arguments :
+
+    <emailaddr> is the to email address to use when sending email alerts
+
+  Also requires "email-alert mailers" and "email-alert to" to be set
+  and if so sending email alerts is enabled for the proxy.
+
+  See also : "email-alert from", "email-alert level", "email-alert mailers",
+             "email-alert myhostname", section 3.6 about mailers.
+
+
 force-persist { if | unless } <condition>
   Declare a condition to force persistence on down servers
   May be used in sections:    defaults | frontend | listen | backend
@@ -2904,6 +3032,10 @@ http-check expect [!] <match> <pattern>
   However, it is worth keeping in mind that parsing very large responses can
   waste some CPU cycles, especially when regular expressions are used, and that
   it is always better to focus the checks on smaller resources.
+
+  Also "http-check expect" doesn't support HTTP keep-alive. Keep in mind that it
+  will automatically append a "Connection: close" header, meaning that this
+  header should not be present in the request provided by "option httpchk".
 
   Last, if "http-check expect" is combined with "http-check disable-on-404",
   then this last one has precedence when the server responds with 404.
@@ -8811,6 +8943,19 @@ strict-sni
   a certificate. The default certificate is not used.
   See the "crt" option for more information.
 
+tcp-ut <delay>
+  Sets the TCP User Timeout for all incoming connections instanciated from this
+  listening socket. This option is available on Linux since version 2.6.37. It
+  allows haproxy to configure a timeout for sockets which contain data not
+  receiving an acknoledgement for the configured delay. This is especially
+  useful on long-lived connections experiencing long idle periods such as
+  remote terminals or database connection pools, where the client and server
+  timeouts must remain high to allow a long period of idle, but where it is
+  important to detect that the client has disappeared in order to release all
+  resources associated with its connection (and the server's session). The
+  argument is a delay expressed in milliseconds by default. This only works
+  for regular TCP connections, and is ignored for other protocols.
+
 tfo
   Is an optional keyword which is supported only on Linux kernels >= 3.7. It
   enables TCP Fast Open on the listening socket, which means that clients which
@@ -8823,6 +8968,18 @@ tfo
   is only supported on TCPv4/TCPv6 sockets and ignored by other ones. You may
   need to build HAProxy with USE_TFO=1 if your libc doesn't define
   TCP_FASTOPEN.
+
+tls-ticket-keys <keyfile>
+  Sets the TLS ticket keys file to load the keys from. The keys need to be 48
+  bytes long, encoded with base64 (ex. openssl rand -base64 48). Number of keys
+  is specified by the TLS_TICKETS_NO build option (default 3) and at least as
+  many keys need to be present in the file. Last TLS_TICKETS_NO keys will be
+  used for decryption and the penultimate one for encryption. This enables easy
+  key rotation by just appending new key to the file and reloading the process.
+  Keys must be periodically rotated (ex. every 12h) or Perfect Forward Secrecy
+  is compromised. It is also a good idea to keep the keys off any permanent
+  storage such as hard drives (hint: use tmpfs and don't swap those files).
+  Lifetime hint can be changed using tune.ssl.timeout.
 
 transparent
   Is an optional keyword which is supported only on certain Linux kernels. It
@@ -9203,6 +9360,14 @@ minconn <minconn>
   and "maxqueue" parameters, as well as the "fullconn" backend keyword.
 
   Supported in default-server: Yes
+
+no-ssl-reuse
+  This option disables SSL session reuse when SSL is used to communicate with
+  the server. It will force the server to perform a full handshake for every
+  new connection. It's probably only useful for benchmarking, troubleshooting,
+  and for paranoid users.
+
+  Supported in default-server: No
 
 no-sslv3
   This option disables support for SSLv3 when SSL is used to communicate with
@@ -12065,6 +12230,12 @@ query : string
   using the "found" matching method. This fetch is the completemnt of "path"
   which stops before the question mark.
 
+req.hdr_names([<delim>]) : string
+  This builds a string made from the concatenation of all header names as they
+  appear in the request when the rule is evaluated. The default delimiter is
+  the comma (',') but it may be overridden as an optional argument <delim>. In
+  this case, only the first character of <delim> is considered.
+
 req.ver : string
 req_ver : string (deprecated)
   Returns the version string from the HTTP request, for example "1.1". This can
@@ -12160,6 +12331,12 @@ shdr_ip([<name>[,<occ>]]) : ip (deprecated)
   indicate a position from the first occurrence, with 1 being the first one.
   Negative values indicate positions relative to the last one, with -1 being
   the last one. This can be useful to learn some data into a stick table.
+
+res.hdr_names([<delim>]) : string
+  This builds a string made from the concatenation of all header names as they
+  appear in the response when the rule is evaluated. The default delimiter is
+  the comma (',') but it may be overridden as an optional argument <delim>. In
+  this case, only the first character of <delim> is considered.
 
 res.hdr_val([<name>[,<occ>]]) : integer
 shdr_val([<name>[,<occ>]]) : integer (deprecated)

@@ -31,6 +31,7 @@ unsigned int run_queue_cur = 0;    /* copy of the run queue size */
 unsigned int nb_tasks_cur = 0;     /* copy of the tasks count */
 unsigned int niced_tasks = 0;      /* number of niced tasks in the run queue */
 struct eb32_node *last_timer = NULL;  /* optimization: last queued timer */
+struct eb32_node *rq_next    = NULL;  /* optimization: next task except if delete/insert */
 
 static struct eb_root timers;      /* sorted timers tree */
 static struct eb_root rqueue;      /* tree constituting the run queue */
@@ -64,6 +65,7 @@ struct task *__task_wakeup(struct task *t)
 	t->state &= ~TASK_WOKEN_ANY;
 
 	eb32_insert(&rqueue, &t->rq);
+	rq_next = NULL;
 	return t;
 }
 
@@ -117,9 +119,9 @@ void __task_queue(struct task *task)
 
 /*
  * Extract all expired timers from the timer queue, and wakes up all
- * associated tasks. Returns the date of next event (or eternity) in <next>.
+ * associated tasks. Returns the date of next event (or eternity).
  */
-void wake_expired_tasks(int *next)
+int wake_expired_tasks()
 {
 	struct task *task;
 	struct eb32_node *eb;
@@ -138,8 +140,7 @@ void wake_expired_tasks(int *next)
 
 		if (likely(tick_is_lt(now_ms, eb->key))) {
 			/* timer not expired yet, revisit it later */
-			*next = eb->key;
-			return;
+			return eb->key;
 		}
 
 		/* timer looks expired, detach it from the queue */
@@ -171,9 +172,8 @@ void wake_expired_tasks(int *next)
 		task_wakeup(task, TASK_WOKEN_TIMER);
 	}
 
-	/* We have found no task to expire in any tree */
-	*next = TICK_ETERNITY;
-	return;
+	/* No task is expired */
+	return TICK_ETERNITY;
 }
 
 /* The run queue is chronologically sorted in a tree. An insertion counter is
@@ -186,12 +186,10 @@ void wake_expired_tasks(int *next)
  *
  * The function adjusts <next> if a new event is closer.
  */
-void process_runnable_tasks(int *next)
+void process_runnable_tasks()
 {
 	struct task *t;
-	struct eb32_node *eb;
 	unsigned int max_processed;
-	int expire;
 
 	run_queue_cur = run_queue; /* keep a copy for reporting */
 	nb_tasks_cur = nb_tasks;
@@ -206,27 +204,29 @@ void process_runnable_tasks(int *next)
 	if (likely(niced_tasks))
 		max_processed = (max_processed + 3) / 4;
 
-	expire = *next;
-	eb = eb32_lookup_ge(&rqueue, rqueue_ticks - TIMER_LOOK_BACK);
 	while (max_processed--) {
 		/* Note: this loop is one of the fastest code path in
 		 * the whole program. It should not be re-arranged
 		 * without a good reason.
 		 */
-
-		if (unlikely(!eb)) {
-			/* we might have reached the end of the tree, typically because
-			* <rqueue_ticks> is in the first half and we're first scanning
-			* the last half. Let's loop back to the beginning of the tree now.
-			*/
-			eb = eb32_first(&rqueue);
-			if (likely(!eb))
-				break;
+		if (unlikely(!rq_next)) {
+			rq_next = eb32_lookup_ge(&rqueue, rqueue_ticks - TIMER_LOOK_BACK);
+			if (!rq_next) {
+				/* we might have reached the end of the tree, typically because
+				 * <rqueue_ticks> is in the first half and we're first scanning
+				 * the last half. Let's loop back to the beginning of the tree now.
+				 */
+				rq_next = eb32_first(&rqueue);
+				if (!rq_next)
+					break;
+			}
 		}
 
-		/* detach the task from the queue */
-		t = eb32_entry(eb, struct task, rq);
-		eb = eb32_next(eb);
+		/* detach the task from the queue after updating the pointer to
+		 * the next entry.
+		 */
+		t = eb32_entry(rq_next, struct task, rq);
+		rq_next = eb32_next(rq_next);
 		__task_unlink_rq(t);
 
 		t->state |= TASK_RUNNING;
@@ -241,20 +241,10 @@ void process_runnable_tasks(int *next)
 
 		if (likely(t != NULL)) {
 			t->state &= ~TASK_RUNNING;
-			if (t->expire) {
+			if (t->expire)
 				task_queue(t);
-				expire = tick_first_2nz(expire, t->expire);
-			}
-
-			/* if the task has put itself back into the run queue, we want to ensure
-			 * it will be served at the proper time, especially if it's reniced.
-			 */
-			if (unlikely(task_in_rq(t)) && (!eb || tick_is_lt(t->rq.key, eb->key))) {
-				eb = eb32_lookup_ge(&rqueue, rqueue_ticks - TIMER_LOOK_BACK);
-			}
 		}
 	}
-	*next = expire;
 }
 
 /* perform minimal intializations, report 0 in case of error, 1 if OK. */

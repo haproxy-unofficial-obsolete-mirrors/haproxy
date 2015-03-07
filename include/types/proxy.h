@@ -46,7 +46,6 @@
 #include <types/obj_type.h>
 #include <types/proto_http.h>
 #include <types/sample.h>
-#include <types/session.h>
 #include <types/server.h>
 #include <types/stick_table.h>
 
@@ -186,6 +185,8 @@ enum pr_mode {
 #define STK_IS_STORE	0x00000002	/* store on request fetch */
 #define STK_ON_RSP	0x00000004	/* store on response fetch */
 
+struct session;
+
 struct error_snapshot {
 	struct timeval when;		/* date of this event, (tv_sec == 0) means "never" */
 	unsigned int len;		/* original length of the last invalid request/response */
@@ -206,6 +207,19 @@ struct error_snapshot {
 	struct proxy *oe;		/* other end = frontend or backend involved */
 	struct sockaddr_storage src;	/* client's address */
 	char buf[BUFSIZE];		/* copy of the beginning of the message */
+};
+
+struct email_alert {
+	struct list list;
+	struct list tcpcheck_rules;
+};
+
+struct email_alertq {
+	struct list email_alerts;
+	struct check check;		/* Email alerts are implemented using existing check
+					 * code even though they are not checks. This structure
+					 * is as a parameter to the check code.
+					 * Each check corresponds to a mailer */
 };
 
 struct proxy {
@@ -380,6 +394,20 @@ struct proxy {
 	} conf;					/* config information */
 	void *parent;				/* parent of the proxy when applicable */
 	struct comp *comp;			/* http compression */
+
+	struct {
+		union {
+			struct mailers *m;	/* Mailer to send email alerts via */
+			char *name;
+		} mailers;
+		char *from;			/* Address to send email alerts from */
+		char *to;			/* Address(es) to send email alerts to */
+		char *myhostname;		/* Identity to use in HELO command sent to mailer */
+		int level;			/* Maximum syslog level of messages to send
+						 * email alerts for */
+		int set;			/* True if email_alert settings are present */
+		struct email_alertq *queues;	/* per-mailer alerts queues */
+	} email_alert;
 };
 
 struct switching_rule {

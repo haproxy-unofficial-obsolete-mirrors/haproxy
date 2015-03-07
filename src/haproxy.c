@@ -88,6 +88,7 @@
 #include <proto/connection.h>
 #include <proto/fd.h>
 #include <proto/hdr_idx.h>
+#include <proto/hlua.h>
 #include <proto/listener.h>
 #include <proto/log.h>
 #include <proto/pattern.h>
@@ -331,6 +332,12 @@ void display_build_opts()
 	printf("Built without PCRE support (using libc's regex instead)\n");
 #endif
 
+#ifdef USE_LUA
+	printf("Built with Lua version : %s\n", LUA_RELEASE);
+#else
+	printf("Built without Lua support\n");
+#endif
+
 #if defined(CONFIG_HAP_TRANSPARENT) || defined(CONFIG_HAP_CTTPROXY)
 	printf("Built with transparent proxy support using:"
 #if defined(CONFIG_HAP_CTTPROXY)
@@ -557,6 +564,9 @@ void init(int argc, char **argv)
 	/* warning, we init buffers later */
 	init_pendconn();
 	init_proto_http();
+
+	/* Initialise lua. */
+	hlua_init();
 
 	global.tune.options |= GTUNE_USE_SELECT;  /* select() is always available */
 #if defined(ENABLE_POLL)
@@ -801,7 +811,9 @@ void init(int argc, char **argv)
 	 * handshake once since it is not performed on the two sides at the
 	 * same time (frontend-side is terminated before backend-side begins).
 	 * The SSL stack is supposed to have filled ssl_session_cost and
-	 * ssl_handshake_cost during its initialization.
+	 * ssl_handshake_cost during its initialization. In any case, if
+	 * SYSTEM_MAXCONN is set, we still enforce it as an upper limit for
+	 * maxconn in order to protect the system.
 	 */
 	if (!global.rlimit_memmax) {
 		if (global.maxconn == 0) {
@@ -834,6 +846,10 @@ void init(int argc, char **argv)
 			 global.ssl_handshake_max_cost);       // 1 handshake per connection max
 
 		global.maxconn = round_2dig(global.maxconn);
+#ifdef SYSTEM_MAXCONN
+		if (global.maxconn > DEFAULT_MAXCONN)
+			global.maxconn = DEFAULT_MAXCONN;
+#endif /* SYSTEM_MAXCONN */
 		global.maxsslconn = sides * global.maxconn;
 		if (global.mode & (MODE_VERBOSE|MODE_DEBUG))
 			fprintf(stderr, "Note: setting global.maxconn to %d and global.maxsslconn to %d.\n",
@@ -894,6 +910,10 @@ void init(int argc, char **argv)
 
 		global.maxconn = clearmem / (SESSION_MAX_COST + 2 * global.tune.bufsize);
 		global.maxconn = round_2dig(global.maxconn);
+#ifdef SYSTEM_MAXCONN
+		if (global.maxconn > DEFAULT_MAXCONN)
+			global.maxconn = DEFAULT_MAXCONN;
+#endif /* SYSTEM_MAXCONN */
 
 		if (clearmem <= 0 || !global.maxconn) {
 			Alert("Cannot compute the automatic maxconn because global.maxsslconn is already too "
@@ -1040,6 +1060,8 @@ void init(int argc, char **argv)
 	if (!global.node)
 		global.node = strdup(hostname);
 
+	if (!hlua_post_init())
+		exit(1);
 }
 
 static void deinit_acl_cond(struct acl_cond *cond)
@@ -1449,14 +1471,14 @@ void run_poll_loop()
 
 	tv_update_date(0,1);
 	while (1) {
+		/* Process a few tasks */
+		process_runnable_tasks();
+
 		/* check if we caught some signals and process them */
 		signal_process_queue();
 
 		/* Check if we can expire some tasks */
-		wake_expired_tasks(&next);
-
-		/* Process a few tasks */
-		process_runnable_tasks(&next);
+		next = wake_expired_tasks();
 
 		/* stop when there's nothing left to do */
 		if (jobs == 0)

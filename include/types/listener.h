@@ -132,6 +132,8 @@ struct bind_conf {
 	int strict_sni;            /* refuse negotiation if sni doesn't match a certificate */
 	struct eb_root sni_ctx;    /* sni_ctx tree of all known certs full-names sorted by name */
 	struct eb_root sni_w_ctx;  /* sni_ctx tree of all known certs wildcards sorted by name */
+	struct tls_sess_key *tls_ticket_keys; /* TLS ticket keys */
+	int tls_ticket_enc_index;  /* array index of the key to use for encryption */
 #endif
 	int is_ssl;                /* SSL is required for these listeners */
 	unsigned long bind_proc;   /* bitmask of processes allowed to use these listeners */
@@ -175,6 +177,7 @@ struct listener {
 	struct list wait_queue;		/* link element to make the listener wait for something (LI_LIMITED)  */
 	unsigned int analysers;		/* bitmap of required protocol analysers */
 	int maxseg;			/* for TCP, advertised MSS */
+	int tcp_ut;                     /* for TCP, user timeout */
 	char *interface;		/* interface name or NULL */
 
 	const struct netns_entry *netns; /* network namespace of the listener*/

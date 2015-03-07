@@ -28,6 +28,7 @@
 #   USE_VSYSCALL         : enable vsyscall on Linux x86, bypassing libc
 #   USE_GETADDRINFO      : use getaddrinfo() to resolve IPv6 host names.
 #   USE_OPENSSL          : enable use of OpenSSL. Recommended, but see below.
+#   USE_LUA              : enable Lua support.
 #   USE_FUTEX            : enable use of futex on kernel 2.6. Automatic.
 #   USE_ACCEPT4          : enable use of accept4() on linux. Automatic.
 #   USE_MY_ACCEPT4       : use own implemention of accept4() if glibc < 2.10.
@@ -74,6 +75,10 @@
 #   PCRE_INC       : force the include path to libpcre ($PCREDIR/inc)
 #   SSL_LIB        : force the lib path to libssl/libcrypto
 #   SSL_INC        : force the include path to libssl/libcrypto
+#   LUA_LIB        : force the lib path to lua
+#   LUA_INC        : force the include path to lua
+#   LUA_LIB_NAME   : force the lib name (or automatically evaluated, by order of
+#                                        priority : lua5.2, lua52, lua).
 #   IGNOREGIT      : ignore GIT commit versions if set.
 #   VERSION        : force haproxy version reporting.
 #   SUBVERS        : add a sub-version (eg: platform, model, ...).
@@ -118,7 +123,7 @@ DEBUG_CFLAGS = -g
 #### Compiler-specific flags that may be used to disable some negative over-
 # optimization or to silence some warnings. -fno-strict-aliasing is needed with
 # gcc >= 4.4.
-SPEC_CFLAGS = -fno-strict-aliasing
+SPEC_CFLAGS = -fno-strict-aliasing -Wdeclaration-after-statement
 
 #### Memory usage tuning
 # If small memory footprint is required, you can reduce the buffer size. There
@@ -557,6 +562,23 @@ endif
 endif
 endif
 
+ifneq ($(USE_LUA),)
+check_lua_lib = $(shell echo "int main(){}" | $(CC) -o /dev/null -x c - $(2) -l$(1) 2>/dev/null && echo $(1))
+
+OPTIONS_CFLAGS  += -DUSE_LUA $(if $(LUA_INC),-I$(LUA_INC))
+LUA_LD_FLAGS := $(if $(LUA_LIB),-L$(LUA_LIB))
+ifeq ($(LUA_LIB_NAME),)
+# Try to automatically detect the Lua library
+LUA_LIB_NAME := $(firstword $(foreach lib,lua5.2 lua52 lua,$(call check_lua_lib,$(lib),$(LUA_LD_FLAGS))))
+ifeq ($(LUA_LIB_NAME),)
+$(error unable to automatically detect the Lua library name, you can enforce its name with LUA_LIB_NAME=<name> (where <name> can be lua5.2, lua52, lua, ...))
+endif
+endif
+
+OPTIONS_LDFLAGS += $(LUA_LD_FLAGS) -l$(LUA_LIB_NAME) -lm
+OPTIONS_OBJS    += src/hlua.o
+endif
+
 ifneq ($(USE_PCRE)$(USE_STATIC_PCRE)$(USE_PCRE_JIT),)
 # PCREDIR is used to automatically construct the PCRE_INC and PCRE_LIB paths,
 # by appending /include and /lib respectively. If your system does not use the
@@ -664,7 +686,7 @@ OBJS = src/haproxy.o src/sessionhash.o src/base64.o src/protocol.o \
        src/session.o src/hdr_idx.o src/ev_select.o src/signal.o \
        src/acl.o src/sample.o src/memory.o src/freq_ctr.o src/auth.o \
        src/compression.o src/payload.o src/hash.o src/pattern.o src/map.o \
-       src/namespace.o
+       src/namespace.o src/mailers.o
 
 EBTREE_OBJS = $(EBTREE_DIR)/ebtree.o \
               $(EBTREE_DIR)/eb32tree.o $(EBTREE_DIR)/eb64tree.o \
@@ -732,6 +754,15 @@ install-bin: haproxy haproxy-systemd-wrapper
 	install haproxy-systemd-wrapper "$(DESTDIR)$(SBINDIR)"
 
 install: install-bin install-man install-doc
+
+uninstall:
+	rm -f "$(DESTDIR)$(MANDIR)"/man1/haproxy.1
+	for x in configuration architecture haproxy-en haproxy-fr; do \
+		rm -f "$(DESTDIR)$(DOCDIR)"/$$x.txt ; \
+	done
+	-rmdir "$(DESTDIR)$(DOCDIR)"
+	rm -f "$(DESTDIR)$(SBINDIR)"/haproxy
+	rm -f "$(DESTDIR)$(SBINDIR)"/haproxy-systemd-wrapper
 
 clean:
 	rm -f *.[oas] src/*.[oas] ebtree/*.[oas] haproxy test

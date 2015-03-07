@@ -33,7 +33,7 @@
 
 #include <types/channel.h>
 #include <types/compression.h>
-
+#include <types/hlua.h>
 #include <types/obj_type.h>
 #include <types/proto_http.h>
 #include <types/proxy.h>
@@ -156,6 +156,12 @@ struct session {
 	struct comp_ctx *comp_ctx;		/* HTTP compression context */
 	struct comp_algo *comp_algo;		/* HTTP compression algorithm if not NULL */
 	char *unique_id;			/* custom unique ID */
+
+	/* These two pointers are used to resume the execution of the rule lists. */
+	struct list *current_rule_list;		/* this is used to store the current executed rule list. */
+	struct list *current_rule;		/* this is used to store the current rule to be resumed. */
+
+	struct hlua hlua;			/* lua runtime context */
 };
 
 #endif /* _TYPES_SESSION_H */
