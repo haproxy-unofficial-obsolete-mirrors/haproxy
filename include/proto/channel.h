@@ -2,7 +2,7 @@
  * include/proto/channel.h
  * Channel management definitions, macros and inline functions.
  *
- * Copyright (C) 2000-2012 Willy Tarreau - w@1wt.eu
+ * Copyright (C) 2000-2014 Willy Tarreau - w@1wt.eu
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -28,14 +28,13 @@
 
 #include <common/config.h>
 #include <common/chunk.h>
-#include <common/memory.h>
 #include <common/ticks.h>
 #include <common/time.h>
 
 #include <types/channel.h>
 #include <types/global.h>
-
-extern struct pool_head *pool2_channel;
+#include <types/session.h>
+#include <types/stream_interface.h>
 
 /* perform minimal intializations, report 0 in case of error, 1 if OK. */
 int init_channel();
@@ -55,6 +54,33 @@ int bo_getline_nc(struct channel *chn, char **blk1, int *len1, char **blk2, int 
 int bo_getblk_nc(struct channel *chn, char **blk1, int *len1, char **blk2, int *len2);
 
 
+/* returns a pointer to the session the channel belongs to */
+static inline struct session *chn_sess(const struct channel *chn)
+{
+	if (chn->flags & CF_ISRESP)
+		return LIST_ELEM(chn, struct session *, res);
+	else
+		return LIST_ELEM(chn, struct session *, req);
+}
+
+/* returns a pointer to the stream interface feeding the channel (producer) */
+static inline struct stream_interface *chn_prod(const struct channel *chn)
+{
+	if (chn->flags & CF_ISRESP)
+		return &LIST_ELEM(chn, struct session *, res)->si[1];
+	else
+		return &LIST_ELEM(chn, struct session *, req)->si[0];
+}
+
+/* returns a pointer to the stream interface consuming the channel (producer) */
+static inline struct stream_interface *chn_cons(const struct channel *chn)
+{
+	if (chn->flags & CF_ISRESP)
+		return &LIST_ELEM(chn, struct session *, res)->si[0];
+	else
+		return &LIST_ELEM(chn, struct session *, req)->si[1];
+}
+
 /* Initialize all fields in the channel. */
 static inline void channel_init(struct channel *chn)
 {
@@ -65,7 +91,6 @@ static inline void channel_init(struct channel *chn)
 	chn->total = 0;
 	chn->pipe = NULL;
 	chn->analysers = 0;
-	chn->cons = NULL;
 	chn->flags = 0;
 }
 
@@ -130,7 +155,7 @@ static inline int channel_is_rewritable(const struct channel *chn)
  */
 static inline int channel_may_send(const struct channel *chn)
 {
-	return chn->cons->state == SI_ST_EST;
+	return chn_cons(chn)->state == SI_ST_EST;
 }
 
 /* Returns the amount of bytes from the channel that are already scheduled for

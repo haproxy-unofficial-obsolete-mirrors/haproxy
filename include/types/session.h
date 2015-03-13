@@ -33,10 +33,7 @@
 
 #include <types/channel.h>
 #include <types/compression.h>
-
-#ifdef USE_LUA
 #include <types/hlua.h>
-#endif
 #include <types/obj_type.h>
 #include <types/proto_http.h>
 #include <types/proxy.h>
@@ -110,8 +107,8 @@ struct session {
 	unsigned int uniq_id;			/* unique ID used for the traces */
 	enum obj_type *target;			/* target to use for this session ; for mini-sess: incoming connection */
 
-	struct channel *req;			/* request buffer */
-	struct channel *rep;			/* response buffer */
+	struct channel req;			/* request channel */
+	struct channel res;			/* response channel */
 
 	struct proxy *fe;			/* the proxy this session depends on for the client side */
 	struct proxy *be;			/* the proxy this session depends on for the server side */
@@ -164,9 +161,7 @@ struct session {
 	struct list *current_rule_list;		/* this is used to store the current executed rule list. */
 	struct list *current_rule;		/* this is used to store the current rule to be resumed. */
 
-#ifdef USE_LUA
 	struct hlua hlua;			/* lua runtime context */
-#endif
 };
 
 #endif /* _TYPES_SESSION_H */

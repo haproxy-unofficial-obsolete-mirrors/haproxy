@@ -2,7 +2,7 @@
  * include/types/stream_interface.h
  * This file describes the stream_interface struct and associated constants.
  *
- * Copyright (C) 2000-2011 Willy Tarreau - w@1wt.eu
+ * Copyright (C) 2000-2014 Willy Tarreau - w@1wt.eu
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -25,11 +25,7 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 
-#include <types/channel.h>
-#include <types/connection.h>
-#ifdef USE_LUA
 #include <types/hlua.h>
-#endif
 #include <types/obj_type.h>
 #include <common/config.h>
 
@@ -74,7 +70,7 @@ enum {
 	SI_FL_ERR        = 0x0002,  /* a non-recoverable error has occurred */
 	SI_FL_WAIT_ROOM  = 0x0004,  /* waiting for space to store incoming data */
 	SI_FL_WAIT_DATA  = 0x0008,  /* waiting for more data to send */
-	/* unused          0x0010 */
+	SI_FL_ISBACK     = 0x0010,  /* 0 for front-side SI, 1 for back-side */
 	SI_FL_DONT_WAKE  = 0x0020,  /* resync in progress, don't wake up */
 	SI_FL_INDEP_STR  = 0x0040,  /* independent streams = don't update rex on write */
 	SI_FL_NOLINGER   = 0x0080,  /* may close without lingering. One-shot. */
@@ -153,14 +149,12 @@ struct appctx {
 			struct pattern_expr *expr;
 			struct chunk chunk;
 		} map;
-#ifdef USE_LUA
 		struct {
 			int connected;
 			struct hlua_socket *socket;
 			struct list wake_on_read;
 			struct list wake_on_write;
 		} hlua;
-#endif
 	} ctx;					/* used by stats I/O handlers to dump the stats */
 };
 
@@ -181,8 +175,6 @@ struct stream_interface {
 	enum si_state prev_state;/* SI_ST*, copy of previous state */
 	unsigned short flags;    /* SI_FL_* */
 	unsigned int exp;       /* wake up time for connect, queue, turn-around, ... */
-	struct channel *ib, *ob; /* input and output buffers */
-	void *owner;            /* generally a (struct task*) */
 	enum obj_type *end;     /* points to the end point (connection or appctx) */
 	struct si_ops *ops;     /* general operations at the stream interface layer */
 

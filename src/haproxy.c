@@ -88,9 +88,7 @@
 #include <proto/connection.h>
 #include <proto/fd.h>
 #include <proto/hdr_idx.h>
-#ifdef USE_LUA
 #include <proto/hlua.h>
-#endif
 #include <proto/listener.h>
 #include <proto/log.h>
 #include <proto/pattern.h>
@@ -221,7 +219,7 @@ unsigned int warned = 0;
 void display_version()
 {
 	printf("HA-Proxy version " HAPROXY_VERSION " " HAPROXY_DATE"\n");
-	printf("Copyright 2000-2014 Willy Tarreau <w@1wt.eu>\n\n");
+	printf("Copyright 2000-2015 Willy Tarreau <w@1wt.eu>\n\n");
 }
 
 void display_build_opts()
@@ -567,10 +565,8 @@ void init(int argc, char **argv)
 	init_pendconn();
 	init_proto_http();
 
-#ifdef USE_LUA
 	/* Initialise lua. */
 	hlua_init();
-#endif
 
 	global.tune.options |= GTUNE_USE_SELECT;  /* select() is always available */
 #if defined(ENABLE_POLL)
@@ -781,7 +777,6 @@ void init(int argc, char **argv)
 	global_listener_queue_task->expire = TICK_ETERNITY;
 
 	/* now we know the buffer size, we can initialize the channels and buffers */
-	init_channel();
 	init_buffer();
 
 	if (have_appsession)
@@ -1064,10 +1059,8 @@ void init(int argc, char **argv)
 	if (!global.node)
 		global.node = strdup(hostname);
 
-#ifdef USE_LUA
 	if (!hlua_post_init())
 		exit(1);
-#endif
 }
 
 static void deinit_acl_cond(struct acl_cond *cond)
@@ -1440,7 +1433,6 @@ void deinit(void)
 	pool_destroy2(pool2_session);
 	pool_destroy2(pool2_connection);
 	pool_destroy2(pool2_buffer);
-	pool_destroy2(pool2_channel);
 	pool_destroy2(pool2_requri);
 	pool_destroy2(pool2_task);
 	pool_destroy2(pool2_capture);

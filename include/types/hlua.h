@@ -1,6 +1,8 @@
 #ifndef _TYPES_HLUA_H
 #define _TYPES_HLUA_H
 
+#ifdef USE_LUA
+
 #include <lua.h>
 #include <lauxlib.h>
 
@@ -9,15 +11,17 @@
 
 #define CLASS_CORE     "Core"
 #define CLASS_TXN      "TXN"
+#define CLASS_FETCHES  "Fetches"
+#define CLASS_CONVERTERS "Converters"
 #define CLASS_SOCKET   "Socket"
 #define CLASS_CHANNEL  "Channel"
 
 struct session;
 
-enum hlua_state {
-	HLUA_STOP = 0,
-	HLUA_RUN,
-};
+#define HLUA_RUN       0x00000001
+#define HLUA_CTRLYIELD 0x00000002
+#define HLUA_WAKERESWR 0x00000004
+#define HLUA_WAKEREQWR 0x00000008
 
 enum hlua_exec {
 	HLUA_E_OK = 0,
@@ -35,7 +39,9 @@ struct hlua {
 	int Mref; /* The reference of the memory context in coroutine case.
 	             -1 if the memory context is not used. */
 	int nargs; /* The number of arguments in the stack at the start of execution. */
-	enum hlua_state state; /* The current execution state. */
+	unsigned int flags; /* The current execution flags. */
+	int wake_time; /* The lua wants to be waked at this time, or before. */
+	int expire; /* Lua execution must be stopped over this time. */
 	struct task *task; /* The task associated with the lua stack execution.
 	                      We must wake this task to continue the task execution */
 	struct list com; /* The list head of the signals attached to this task. */
@@ -89,14 +95,12 @@ struct hlua_txn {
 	void *l7;
 };
 
-/* This struct is used as a closure argument associated
- * with dynamic sample-fetch created fucntions. This contains
- * a pointer to the original sample_fetch struct. It is used
- * to identify the function to execute with the sample fetch
- * wrapper.
- */
-struct hlua_sample_fetch {
-	struct sample_fetch *f;
+/* This struc is used with sample fetches and sample converters. */
+struct hlua_smp {
+	struct session *s;
+	struct proxy *p;
+	void *l7;
+	int stringsafe;
 };
 
 /* This struct contains data used with sleep functions. */
@@ -114,11 +118,12 @@ struct hlua_socket {
 	luaL_Buffer b; /* buffer used to prepare strings. */
 };
 
-/* This struct is used join to the class "channel". It
- * just contains a pointer to the manipulated channel.
- */
-struct hlua_channel {
-	struct channel *chn;
-};
+#else /* USE_LUA */
+
+/* Empty struct for compilation compatibility */
+struct hlua { };
+struct hlua_socket { };
+
+#endif /* USE_LUA */
 
 #endif /* _TYPES_HLUA_H */

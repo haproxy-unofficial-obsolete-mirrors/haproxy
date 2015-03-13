@@ -246,11 +246,11 @@ static int stats_accept(struct session *s)
 	s->logs.prx_queue_size = 0;  /* we get the number of pending conns before us */
 	s->logs.srv_queue_size = 0; /* we will get this number soon */
 
-	s->req->flags |= CF_READ_DONTWAIT; /* we plan to read small requests */
+	s->req.flags |= CF_READ_DONTWAIT; /* we plan to read small requests */
 
 	if (s->listener->timeout) {
-		s->req->rto = *s->listener->timeout;
-		s->rep->wto = *s->listener->timeout;
+		s->req.rto = *s->listener->timeout;
+		s->res.wto = *s->listener->timeout;
 	}
 	return 1;
 }
@@ -579,8 +579,10 @@ static int stats_dump_table_head_to_buffer(struct chunk *msg, struct stream_inte
 	if (target && s->listener->bind_conf->level < ACCESS_LVL_OPER)
 		chunk_appendf(msg, "# contents not dumped due to insufficient privileges\n");
 
-	if (bi_putchk(si->ib, msg) == -1)
+	if (bi_putchk(si_ic(si), msg) == -1) {
+		si->flags |= SI_FL_WAIT_ROOM;
 		return 0;
+	}
 
 	return 1;
 }
@@ -650,8 +652,10 @@ static int stats_dump_table_entry_to_buffer(struct chunk *msg, struct stream_int
 	}
 	chunk_appendf(msg, "\n");
 
-	if (bi_putchk(si->ib, msg) == -1)
+	if (bi_putchk(si_ic(si), msg) == -1) {
+		si->flags |= SI_FL_WAIT_ROOM;
 		return 0;
+	}
 
 	return 1;
 }
@@ -1329,7 +1333,9 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 
 			/* return server's effective weight at the moment */
 			snprintf(trash.str, trash.size, "%d (initial %d)\n", sv->uweight, sv->iweight);
-			bi_putstr(si->ib, trash.str);
+			if (bi_putstr(si_ic(si), trash.str) == -1)
+				si->flags |= SI_FL_WAIT_ROOM;
+
 			return 1;
 		}
 		else if (strcmp(args[1], "map") == 0 || strcmp(args[1], "acl") == 0) {
@@ -1488,7 +1494,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 					return 1;
 				}
 
-				s->req->rto = s->rep->wto = 1 + MS_TO_TICKS(timeout*1000);
+				s->req.rto = s->res.wto = 1 + MS_TO_TICKS(timeout*1000);
 				return 1;
 			}
 			else {
@@ -2238,8 +2244,8 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 static void cli_io_handler(struct stream_interface *si)
 {
 	struct appctx *appctx = __objt_appctx(si->end);
-	struct channel *req = si->ob;
-	struct channel *res = si->ib;
+	struct channel *req = si_oc(si);
+	struct channel *res = si_ic(si);
 	int reql;
 	int len;
 
@@ -2263,12 +2269,12 @@ static void cli_io_handler(struct stream_interface *si)
 			/* ensure we have some output room left in the event we
 			 * would want to return some info right after parsing.
 			 */
-			if (buffer_almost_full(si->ib->buf)) {
-				si->ib->flags |= CF_WAKE_WRITE;
+			if (buffer_almost_full(si_ib(si))) {
+				si->flags |= SI_FL_WAIT_ROOM;
 				break;
 			}
 
-			reql = bo_getline(si->ob, trash.str, trash.size);
+			reql = bo_getline(si_oc(si), trash.str, trash.size);
 			if (reql <= 0) { /* closed or EOL not found */
 				if (reql == 0)
 					break;
@@ -2328,7 +2334,7 @@ static void cli_io_handler(struct stream_interface *si)
 			}
 
 			/* re-adjust req buffer */
-			bo_skip(si->ob, reql);
+			bo_skip(si_oc(si), reql);
 			req->flags |= CF_READ_DONTWAIT; /* we plan to read small requests */
 		}
 		else {	/* output functions: first check if the output buffer is closed then abort */
@@ -2340,14 +2346,18 @@ static void cli_io_handler(struct stream_interface *si)
 
 			switch (appctx->st0) {
 			case STAT_CLI_PRINT:
-				if (bi_putstr(si->ib, appctx->ctx.cli.msg) != -1)
+				if (bi_putstr(si_ic(si), appctx->ctx.cli.msg) != -1)
 					appctx->st0 = STAT_CLI_PROMPT;
+				else
+					si->flags |= SI_FL_WAIT_ROOM;
 				break;
 			case STAT_CLI_PRINT_FREE:
-				if (bi_putstr(si->ib, appctx->ctx.cli.err) != -1) {
+				if (bi_putstr(si_ic(si), appctx->ctx.cli.err) != -1) {
 					free(appctx->ctx.cli.err);
 					appctx->st0 = STAT_CLI_PROMPT;
 				}
+				else
+					si->flags |= SI_FL_WAIT_ROOM;
 				break;
 			case STAT_CLI_O_INFO:
 				if (stats_dump_info_to_buffer(si))
@@ -2394,8 +2404,10 @@ static void cli_io_handler(struct stream_interface *si)
 
 			/* The post-command prompt is either LF alone or LF + '> ' in interactive mode */
 			if (appctx->st0 == STAT_CLI_PROMPT) {
-				if (bi_putstr(si->ib, appctx->st1 ? "\n> " : "\n") != -1)
+				if (bi_putstr(si_ic(si), appctx->st1 ? "\n> " : "\n") != -1)
 					appctx->st0 = STAT_CLI_GETREQ;
+				else
+					si->flags |= SI_FL_WAIT_ROOM;
 			}
 
 			/* If the output functions are still there, it means they require more room. */
@@ -2443,8 +2455,8 @@ static void cli_io_handler(struct stream_interface *si)
 	si_update(si);
 
 	/* we don't want to expire timeouts while we're processing requests */
-	si->ib->rex = TICK_ETERNITY;
-	si->ob->wex = TICK_ETERNITY;
+	si_ic(si)->rex = TICK_ETERNITY;
+	si_oc(si)->wex = TICK_ETERNITY;
 
  out:
 	DPRINTF(stderr, "%s@%d: st=%d, rqf=%x, rpf=%x, rqh=%d, rqs=%d, rh=%d, rs=%d\n",
@@ -2563,8 +2575,10 @@ static int stats_dump_info_to_buffer(struct stream_interface *si)
 	             global.node, global.desc ? global.desc : ""
 	             );
 
-	if (bi_putchk(si->ib, &trash) == -1)
+	if (bi_putchk(si_ic(si), &trash) == -1) {
+		si->flags |= SI_FL_WAIT_ROOM;
 		return 0;
+	}
 
 	return 1;
 }
@@ -2576,8 +2590,10 @@ static int stats_dump_info_to_buffer(struct stream_interface *si)
 static int stats_dump_pools_to_buffer(struct stream_interface *si)
 {
 	dump_pools_to_trash();
-	if (bi_putchk(si->ib, &trash) == -1)
+	if (bi_putchk(si_ic(si), &trash) == -1) {
+		si->flags |= SI_FL_WAIT_ROOM;
 		return 0;
+	}
 	return 1;
 }
 
@@ -3625,16 +3641,12 @@ static void stats_dump_html_px_hdr(struct stream_interface *si, struct proxy *px
 		scope_txt[0] = 0;
 		if (appctx->ctx.stats.scope_len) {
 			strcpy(scope_txt, STAT_SCOPE_PATTERN);
-			memcpy(scope_txt + strlen(STAT_SCOPE_PATTERN), bo_ptr(si->ob->buf) + appctx->ctx.stats.scope_str, appctx->ctx.stats.scope_len);
+			memcpy(scope_txt + strlen(STAT_SCOPE_PATTERN), bo_ptr(si_ob(si)) + appctx->ctx.stats.scope_str, appctx->ctx.stats.scope_len);
 			scope_txt[strlen(STAT_SCOPE_PATTERN) + appctx->ctx.stats.scope_len] = 0;
 		}
 
 		chunk_appendf(&trash,
-			      "<form action=\"%s%s%s%s\" method=\"post\">",
-			      uri->uri_prefix,
-			      (appctx->ctx.stats.flags & STAT_HIDE_DOWN) ? ";up" : "",
-			      (appctx->ctx.stats.flags & STAT_NO_REFRESH) ? ";norefresh" : "",
-			      scope_txt);
+			      "<form method=\"post\">");
 	}
 
 	/* print a new table */
@@ -3741,7 +3753,7 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 {
 	struct appctx *appctx = __objt_appctx(si->end);
 	struct session *s = si_sess(si);
-	struct channel *rep = si->ib;
+	struct channel *rep = si_ic(si);
 	struct server *sv, *svs;	/* server and server-state, server-state=server or server->track */
 	struct listener *l;
 
@@ -3778,7 +3790,7 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 		 * name does not match, skip it.
 		 */
 		if (appctx->ctx.stats.scope_len &&
-		    strnistr(px->id, strlen(px->id), bo_ptr(si->ob->buf) + appctx->ctx.stats.scope_str, appctx->ctx.stats.scope_len) == NULL)
+		    strnistr(px->id, strlen(px->id), bo_ptr(si_ob(si)) + appctx->ctx.stats.scope_str, appctx->ctx.stats.scope_len) == NULL)
 			return 1;
 
 		if ((appctx->ctx.stats.flags & STAT_BOUND) &&
@@ -3792,8 +3804,10 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 	case STAT_PX_ST_TH:
 		if (appctx->ctx.stats.flags & STAT_FMT_HTML) {
 			stats_dump_html_px_hdr(si, px, uri);
-			if (bi_putchk(rep, &trash) == -1)
+			if (bi_putchk(rep, &trash) == -1) {
+				si->flags |= SI_FL_WAIT_ROOM;
 				return 0;
+			}
 		}
 
 		appctx->ctx.stats.px_st = STAT_PX_ST_FE;
@@ -3801,9 +3815,12 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 
 	case STAT_PX_ST_FE:
 		/* print the frontend */
-		if (stats_dump_fe_stats(si, px))
-			if (bi_putchk(rep, &trash) == -1)
+		if (stats_dump_fe_stats(si, px)) {
+			if (bi_putchk(rep, &trash) == -1) {
+				si->flags |= SI_FL_WAIT_ROOM;
 				return 0;
+			}
+		}
 
 		appctx->ctx.stats.l = px->conf.listeners.n;
 		appctx->ctx.stats.px_st = STAT_PX_ST_LI;
@@ -3813,7 +3830,7 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 		/* stats.l has been initialized above */
 		for (; appctx->ctx.stats.l != &px->conf.listeners; appctx->ctx.stats.l = l->by_fe.n) {
 			if (buffer_almost_full(rep->buf)) {
-				rep->flags |= CF_WAKE_WRITE;
+				si->flags |= SI_FL_WAIT_ROOM;
 				return 0;
 			}
 
@@ -3830,9 +3847,12 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 			}
 
 			/* print the frontend */
-			if (stats_dump_li_stats(si, px, l, uri ? uri->flags : 0))
-				if (bi_putchk(rep, &trash) == -1)
+			if (stats_dump_li_stats(si, px, l, uri ? uri->flags : 0)) {
+				if (bi_putchk(rep, &trash) == -1) {
+					si->flags |= SI_FL_WAIT_ROOM;
 					return 0;
+				}
+			}
 		}
 
 		appctx->ctx.stats.sv = px->srv; /* may be NULL */
@@ -3845,7 +3865,7 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 			int sv_state;
 
 			if (buffer_almost_full(rep->buf)) {
-				rep->flags |= CF_WAKE_WRITE;
+				si->flags |= SI_FL_WAIT_ROOM;
 				return 0;
 			}
 
@@ -3908,9 +3928,12 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 				continue;
 			}
 
-			if (stats_dump_sv_stats(si, px, uri ? uri->flags : 0, sv, sv_state))
-				if (bi_putchk(rep, &trash) == -1)
+			if (stats_dump_sv_stats(si, px, uri ? uri->flags : 0, sv, sv_state)) {
+				if (bi_putchk(rep, &trash) == -1) {
+					si->flags |= SI_FL_WAIT_ROOM;
 					return 0;
+				}
+			}
 		} /* for sv */
 
 		appctx->ctx.stats.px_st = STAT_PX_ST_BE;
@@ -3918,9 +3941,12 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 
 	case STAT_PX_ST_BE:
 		/* print the backend */
-		if (stats_dump_be_stats(si, px, uri ? uri->flags : 0))
-			if (bi_putchk(rep, &trash) == -1)
+		if (stats_dump_be_stats(si, px, uri ? uri->flags : 0)) {
+			if (bi_putchk(rep, &trash) == -1) {
+				si->flags |= SI_FL_WAIT_ROOM;
 				return 0;
+			}
+		}
 
 		appctx->ctx.stats.px_st = STAT_PX_ST_END;
 		/* fall through */
@@ -3928,8 +3954,10 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 	case STAT_PX_ST_END:
 		if (appctx->ctx.stats.flags & STAT_FMT_HTML) {
 			stats_dump_html_px_end(si, px);
-			if (bi_putchk(rep, &trash) == -1)
+			if (bi_putchk(rep, &trash) == -1) {
+				si->flags |= SI_FL_WAIT_ROOM;
 				return 0;
+			}
 		}
 
 		appctx->ctx.stats.px_st = STAT_PX_ST_FIN;
@@ -4134,14 +4162,11 @@ static void stats_dump_html_info(struct stream_interface *si, struct uri_auth *u
 	              );
 
 	/* scope_txt = search query, appctx->ctx.stats.scope_len is always <= STAT_SCOPE_TXT_MAXLEN */
-	memcpy(scope_txt, bo_ptr(si->ob->buf) + appctx->ctx.stats.scope_str, appctx->ctx.stats.scope_len);
+	memcpy(scope_txt, bo_ptr(si_ob(si)) + appctx->ctx.stats.scope_str, appctx->ctx.stats.scope_len);
 	scope_txt[appctx->ctx.stats.scope_len] = '\0';
 
 	chunk_appendf(&trash,
-		      "<li><form method=\"GET\" action=\"%s%s%s\">Scope : <input value=\"%s\" name=\"" STAT_SCOPE_INPUT_NAME "\" size=\"8\" maxlength=\"%d\" tabindex=\"1\"/></form>\n",
-		      uri->uri_prefix,
-		      (appctx->ctx.stats.flags & STAT_HIDE_DOWN) ? ";up" : "",
-		      (appctx->ctx.stats.flags & STAT_NO_REFRESH) ? ";norefresh" : "",
+		      "<li><form method=\"GET\">Scope : <input value=\"%s\" name=\"" STAT_SCOPE_INPUT_NAME "\" size=\"8\" maxlength=\"%d\" tabindex=\"1\"/></form>\n",
 		      (appctx->ctx.stats.scope_len > 0) ? scope_txt : "",
 		      STAT_SCOPE_TXT_MAXLEN);
 
@@ -4149,7 +4174,7 @@ static void stats_dump_html_info(struct stream_interface *si, struct uri_auth *u
 	scope_txt[0] = 0;
 	if (appctx->ctx.stats.scope_len) {
 		strcpy(scope_txt, STAT_SCOPE_PATTERN);
-		memcpy(scope_txt + strlen(STAT_SCOPE_PATTERN), bo_ptr(si->ob->buf) + appctx->ctx.stats.scope_str, appctx->ctx.stats.scope_len);
+		memcpy(scope_txt + strlen(STAT_SCOPE_PATTERN), bo_ptr(si_ob(si)) + appctx->ctx.stats.scope_str, appctx->ctx.stats.scope_len);
 		scope_txt[strlen(STAT_SCOPE_PATTERN) + appctx->ctx.stats.scope_len] = 0;
 	}
 
@@ -4312,7 +4337,7 @@ static void stats_dump_html_end()
 static int stats_dump_stat_to_buffer(struct stream_interface *si, struct uri_auth *uri)
 {
 	struct appctx *appctx = __objt_appctx(si->end);
-	struct channel *rep = si->ib;
+	struct channel *rep = si_ic(si);
 	struct proxy *px;
 
 	chunk_reset(&trash);
@@ -4328,8 +4353,10 @@ static int stats_dump_stat_to_buffer(struct stream_interface *si, struct uri_aut
 		else
 			stats_dump_csv_header();
 
-		if (bi_putchk(rep, &trash) == -1)
+		if (bi_putchk(rep, &trash) == -1) {
+			si->flags |= SI_FL_WAIT_ROOM;
 			return 0;
+		}
 
 		appctx->st2 = STAT_ST_INFO;
 		/* fall through */
@@ -4337,8 +4364,10 @@ static int stats_dump_stat_to_buffer(struct stream_interface *si, struct uri_aut
 	case STAT_ST_INFO:
 		if (appctx->ctx.stats.flags & STAT_FMT_HTML) {
 			stats_dump_html_info(si, uri);
-			if (bi_putchk(rep, &trash) == -1)
+			if (bi_putchk(rep, &trash) == -1) {
+				si->flags |= SI_FL_WAIT_ROOM;
 				return 0;
+			}
 		}
 
 		appctx->ctx.stats.px = proxy;
@@ -4350,7 +4379,7 @@ static int stats_dump_stat_to_buffer(struct stream_interface *si, struct uri_aut
 		/* dump proxies */
 		while (appctx->ctx.stats.px) {
 			if (buffer_almost_full(rep->buf)) {
-				rep->flags |= CF_WAKE_WRITE;
+				si->flags |= SI_FL_WAIT_ROOM;
 				return 0;
 			}
 
@@ -4371,8 +4400,10 @@ static int stats_dump_stat_to_buffer(struct stream_interface *si, struct uri_aut
 	case STAT_ST_END:
 		if (appctx->ctx.stats.flags & STAT_FMT_HTML) {
 			stats_dump_html_end();
-			if (bi_putchk(rep, &trash) == -1)
+			if (bi_putchk(rep, &trash) == -1) {
+				si->flags |= SI_FL_WAIT_ROOM;
 				return 0;
+			}
 		}
 
 		appctx->st2 = STAT_ST_FIN;
@@ -4422,7 +4453,7 @@ static int stats_process_http_post(struct stream_interface *si)
 		goto out;
 	}
 
-	reql = bo_getblk(si->ob, temp->str, s->txn.req.body_len, s->txn.req.eoh + 2);
+	reql = bo_getblk(si_oc(si), temp->str, s->txn.req.body_len, s->txn.req.eoh + 2);
 	if (reql <= 0) {
 		/* we need more data */
 		appctx->ctx.stats.st_code = STAT_STATUS_NONE;
@@ -4739,8 +4770,10 @@ static int stats_send_http_headers(struct stream_interface *si)
 	s->txn.status = 200;
 	s->logs.tv_request = now;
 
-	if (bi_putchk(si->ib, &trash) == -1)
+	if (bi_putchk(si_ic(si), &trash) == -1) {
+		si->flags |= SI_FL_WAIT_ROOM;
 		return 0;
+	}
 
 	return 1;
 }
@@ -4756,7 +4789,7 @@ static int stats_send_http_redirect(struct stream_interface *si)
 	scope_txt[0] = 0;
 	if (appctx->ctx.stats.scope_len) {
 		strcpy(scope_txt, STAT_SCOPE_PATTERN);
-		memcpy(scope_txt + strlen(STAT_SCOPE_PATTERN), bo_ptr(si->ob->buf) + appctx->ctx.stats.scope_str, appctx->ctx.stats.scope_len);
+		memcpy(scope_txt + strlen(STAT_SCOPE_PATTERN), bo_ptr(si_ob(si)) + appctx->ctx.stats.scope_str, appctx->ctx.stats.scope_len);
 		scope_txt[strlen(STAT_SCOPE_PATTERN) + appctx->ctx.stats.scope_len] = 0;
 	}
 
@@ -4784,8 +4817,10 @@ static int stats_send_http_redirect(struct stream_interface *si)
 	s->txn.status = 303;
 	s->logs.tv_request = now;
 
-	if (bi_putchk(si->ib, &trash) == -1)
+	if (bi_putchk(si_ic(si), &trash) == -1) {
+		si->flags |= SI_FL_WAIT_ROOM;
 		return 0;
+	}
 
 	return 1;
 }
@@ -4799,8 +4834,8 @@ static void http_stats_io_handler(struct stream_interface *si)
 {
 	struct appctx *appctx = __objt_appctx(si->end);
 	struct session *s = si_sess(si);
-	struct channel *req = si->ob;
-	struct channel *res = si->ib;
+	struct channel *req = si_oc(si);
+	struct channel *res = si_ic(si);
 
 	if (unlikely(si->state == SI_ST_DIS || si->state == SI_ST_CLO))
 		goto out;
@@ -4820,7 +4855,7 @@ static void http_stats_io_handler(struct stream_interface *si)
 	}
 
 	if (appctx->st0 == STAT_HTTP_DUMP) {
-		unsigned int prev_len = si->ib->buf->i;
+		unsigned int prev_len = si_ib(si)->i;
 		unsigned int data_len;
 		unsigned int last_len;
 		unsigned int last_fwd = 0;
@@ -4831,20 +4866,21 @@ static void http_stats_io_handler(struct stream_interface *si)
 			 * the output area. For this, we temporarily disable
 			 * forwarding on the channel.
 			 */
-			last_fwd = si->ib->to_forward;
-			si->ib->to_forward = 0;
+			last_fwd = si_ic(si)->to_forward;
+			si_ic(si)->to_forward = 0;
 			chunk_printf(&trash, "\r\n000000\r\n");
-			if (bi_putchk(si->ib, &trash) == -1) {
-				si->ib->to_forward = last_fwd;
+			if (bi_putchk(si_ic(si), &trash) == -1) {
+				si->flags |= SI_FL_WAIT_ROOM;
+				si_ic(si)->to_forward = last_fwd;
 				goto fail;
 			}
 		}
 
-		data_len = si->ib->buf->i;
+		data_len = si_ib(si)->i;
 		if (stats_dump_stat_to_buffer(si, s->be->uri_auth))
 			appctx->st0 = STAT_HTTP_DONE;
 
-		last_len = si->ib->buf->i;
+		last_len = si_ib(si)->i;
 
 		/* Now we must either adjust or remove the chunk size. This is
 		 * not easy because the chunk size might wrap at the end of the
@@ -4854,25 +4890,26 @@ static void http_stats_io_handler(struct stream_interface *si)
 		 * applet.
 		 */
 		if (appctx->ctx.stats.flags & STAT_CHUNKED) {
-			si->ib->total  -= (last_len - prev_len);
-			si->ib->buf->i -= (last_len - prev_len);
+			si_ic(si)->total -= (last_len - prev_len);
+			si_ib(si)->i     -= (last_len - prev_len);
 
 			if (last_len != data_len) {
 				chunk_printf(&trash, "\r\n%06x\r\n", (last_len - data_len));
-				bi_putchk(si->ib, &trash);
+				if (bi_putchk(si_ic(si), &trash) == -1)
+					si->flags |= SI_FL_WAIT_ROOM;
 
-				si->ib->total  += (last_len - data_len);
-				si->ib->buf->i += (last_len - data_len);
+				si_ic(si)->total += (last_len - data_len);
+				si_ib(si)->i     += (last_len - data_len);
 			}
 			/* now re-enable forwarding */
-			channel_forward(si->ib, last_fwd);
+			channel_forward(si_ic(si), last_fwd);
 		}
 	}
 
 	if (appctx->st0 == STAT_HTTP_POST) {
 		if (stats_process_http_post(si))
 			appctx->st0 = STAT_HTTP_LAST;
-		else if (si->ob->flags & CF_SHUTR)
+		else if (si_oc(si)->flags & CF_SHUTR)
 			appctx->st0 = STAT_HTTP_DONE;
 	}
 
@@ -4884,11 +4921,13 @@ static void http_stats_io_handler(struct stream_interface *si)
 	if (appctx->st0 == STAT_HTTP_DONE) {
 		if (appctx->ctx.stats.flags & STAT_CHUNKED) {
 			chunk_printf(&trash, "\r\n0\r\n\r\n");
-			if (bi_putchk(si->ib, &trash) == -1)
+			if (bi_putchk(si_ic(si), &trash) == -1) {
+				si->flags |= SI_FL_WAIT_ROOM;
 				goto fail;
+			}
 		}
 		/* eat the whole request */
-		bo_skip(si->ob, si->ob->buf->o);
+		bo_skip(si_oc(si), si_ob(si)->o);
 		res->flags |= CF_READ_NULL;
 		si_shutr(si);
 	}
@@ -4908,8 +4947,8 @@ static void http_stats_io_handler(struct stream_interface *si)
 	si_update(si);
 
 	/* we don't want to expire timeouts while we're processing requests */
-	si->ib->rex = TICK_ETERNITY;
-	si->ob->wex = TICK_ETERNITY;
+	si_ic(si)->rex = TICK_ETERNITY;
+	si_oc(si)->wex = TICK_ETERNITY;
 
  out:
 	if (unlikely(si->state == SI_ST_DIS || si->state == SI_ST_CLO)) {
@@ -4983,8 +5022,10 @@ static int stats_dump_full_sess_to_buffer(struct stream_interface *si, struct se
 	if (appctx->ctx.sess.section > 0 && appctx->ctx.sess.uid != sess->uniq_id) {
 		/* session changed, no need to go any further */
 		chunk_appendf(&trash, "  *** session terminated while we were watching it ***\n");
-		if (bi_putchk(si->ib, &trash) == -1)
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si->flags |= SI_FL_WAIT_ROOM;
 			return 0;
+		}
 		appctx->ctx.sess.uid = 0;
 		appctx->ctx.sess.section = 0;
 		return 1;
@@ -5208,63 +5249,65 @@ static int stats_dump_full_sess_to_buffer(struct stream_interface *si, struct se
 		chunk_appendf(&trash,
 			     "  req=%p (f=0x%06x an=0x%x pipe=%d tofwd=%d total=%lld)\n"
 			     "      an_exp=%s",
-			     sess->req,
-			     sess->req->flags, sess->req->analysers,
-			     sess->req->pipe ? sess->req->pipe->data : 0,
-			     sess->req->to_forward, sess->req->total,
-			     sess->req->analyse_exp ?
-			     human_time(TICKS_TO_MS(sess->req->analyse_exp - now_ms),
+			     &sess->req,
+			     sess->req.flags, sess->req.analysers,
+			     sess->req.pipe ? sess->req.pipe->data : 0,
+			     sess->req.to_forward, sess->req.total,
+			     sess->req.analyse_exp ?
+			     human_time(TICKS_TO_MS(sess->req.analyse_exp - now_ms),
 					TICKS_TO_MS(1000)) : "<NEVER>");
 
 		chunk_appendf(&trash,
 			     " rex=%s",
-			     sess->req->rex ?
-			     human_time(TICKS_TO_MS(sess->req->rex - now_ms),
+			     sess->req.rex ?
+			     human_time(TICKS_TO_MS(sess->req.rex - now_ms),
 					TICKS_TO_MS(1000)) : "<NEVER>");
 
 		chunk_appendf(&trash,
 			     " wex=%s\n"
 			     "      buf=%p data=%p o=%d p=%d req.next=%d i=%d size=%d\n",
-			     sess->req->wex ?
-			     human_time(TICKS_TO_MS(sess->req->wex - now_ms),
+			     sess->req.wex ?
+			     human_time(TICKS_TO_MS(sess->req.wex - now_ms),
 					TICKS_TO_MS(1000)) : "<NEVER>",
-			     sess->req->buf,
-			     sess->req->buf->data, sess->req->buf->o,
-			     (int)(sess->req->buf->p - sess->req->buf->data),
-			     sess->txn.req.next, sess->req->buf->i,
-			     sess->req->buf->size);
+			     sess->req.buf,
+			     sess->req.buf->data, sess->req.buf->o,
+			     (int)(sess->req.buf->p - sess->req.buf->data),
+			     sess->txn.req.next, sess->req.buf->i,
+			     sess->req.buf->size);
 
 		chunk_appendf(&trash,
 			     "  res=%p (f=0x%06x an=0x%x pipe=%d tofwd=%d total=%lld)\n"
 			     "      an_exp=%s",
-			     sess->rep,
-			     sess->rep->flags, sess->rep->analysers,
-			     sess->rep->pipe ? sess->rep->pipe->data : 0,
-			     sess->rep->to_forward, sess->rep->total,
-			     sess->rep->analyse_exp ?
-			     human_time(TICKS_TO_MS(sess->rep->analyse_exp - now_ms),
+			     &sess->res,
+			     sess->res.flags, sess->res.analysers,
+			     sess->res.pipe ? sess->res.pipe->data : 0,
+			     sess->res.to_forward, sess->res.total,
+			     sess->res.analyse_exp ?
+			     human_time(TICKS_TO_MS(sess->res.analyse_exp - now_ms),
 					TICKS_TO_MS(1000)) : "<NEVER>");
 
 		chunk_appendf(&trash,
 			     " rex=%s",
-			     sess->rep->rex ?
-			     human_time(TICKS_TO_MS(sess->rep->rex - now_ms),
+			     sess->res.rex ?
+			     human_time(TICKS_TO_MS(sess->res.rex - now_ms),
 					TICKS_TO_MS(1000)) : "<NEVER>");
 
 		chunk_appendf(&trash,
 			     " wex=%s\n"
 			     "      buf=%p data=%p o=%d p=%d rsp.next=%d i=%d size=%d\n",
-			     sess->rep->wex ?
-			     human_time(TICKS_TO_MS(sess->rep->wex - now_ms),
+			     sess->res.wex ?
+			     human_time(TICKS_TO_MS(sess->res.wex - now_ms),
 					TICKS_TO_MS(1000)) : "<NEVER>",
-			     sess->rep->buf,
-			     sess->rep->buf->data, sess->rep->buf->o,
-			     (int)(sess->rep->buf->p - sess->rep->buf->data),
-			     sess->txn.rsp.next, sess->rep->buf->i,
-			     sess->rep->buf->size);
+			     sess->res.buf,
+			     sess->res.buf->data, sess->res.buf->o,
+			     (int)(sess->res.buf->p - sess->res.buf->data),
+			     sess->txn.rsp.next, sess->res.buf->i,
+			     sess->res.buf->size);
 
-		if (bi_putchk(si->ib, &trash) == -1)
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si->flags |= SI_FL_WAIT_ROOM;
 			return 0;
+		}
 
 		/* use other states to dump the contents */
 	}
@@ -5286,8 +5329,10 @@ static int stats_pats_list(struct stream_interface *si)
 		 */
 		chunk_reset(&trash);
 		chunk_appendf(&trash, "# id (file) description\n");
-		if (bi_putchk(si->ib, &trash) == -1)
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si->flags |= SI_FL_WAIT_ROOM;
 			return 0;
+		}
 
 		/* Now, we start the browsing of the references lists.
 		 * Note that the following call to LIST_ELEM return bad pointer. The only
@@ -5311,10 +5356,11 @@ static int stats_pats_list(struct stream_interface *si)
 			              appctx->ctx.map.ref->reference ? appctx->ctx.map.ref->reference : "",
 			              appctx->ctx.map.ref->display);
 
-			if (bi_putchk(si->ib, &trash) == -1) {
+			if (bi_putchk(si_ic(si), &trash) == -1) {
 				/* let's try again later from this session. We add ourselves into
 				 * this session's users so that it can remove us upon termination.
 				 */
+				si->flags |= SI_FL_WAIT_ROOM;
 				return 0;
 			}
 
@@ -5429,10 +5475,11 @@ static int stats_map_lookup(struct stream_interface *si)
 			chunk_appendf(&trash, "\n");
 
 			/* display response */
-			if (bi_putchk(si->ib, &trash) == -1) {
+			if (bi_putchk(si_ic(si), &trash) == -1) {
 				/* let's try again later from this session. We add ourselves into
 				 * this session's users so that it can remove us upon termination.
 				 */
+				si->flags |= SI_FL_WAIT_ROOM;
 				return 0;
 			}
 
@@ -5479,10 +5526,11 @@ static int stats_pat_list(struct stream_interface *si)
 				chunk_appendf(&trash, "%p %s\n",
 				              appctx->ctx.map.elt, appctx->ctx.map.elt->pattern);
 
-			if (bi_putchk(si->ib, &trash) == -1) {
+			if (bi_putchk(si_ic(si), &trash) == -1) {
 				/* let's try again later from this session. We add ourselves into
 				 * this session's users so that it can remove us upon termination.
 				 */
+				si->flags |= SI_FL_WAIT_ROOM;
 				return 0;
 			}
 
@@ -5512,7 +5560,7 @@ static int stats_dump_sess_to_buffer(struct stream_interface *si)
 	struct appctx *appctx = __objt_appctx(si->end);
 	struct connection *conn;
 
-	if (unlikely(si->ib->flags & (CF_WRITE_ERROR|CF_SHUTW))) {
+	if (unlikely(si_ic(si)->flags & (CF_WRITE_ERROR|CF_SHUTW))) {
 		/* If we're forced to shut down, we might have to remove our
 		 * reference to the last session being dumped.
 		 */
@@ -5613,44 +5661,44 @@ static int stats_dump_sess_to_buffer(struct stream_interface *si)
 
 			chunk_appendf(&trash,
 				     " rq[f=%06xh,i=%d,an=%02xh,rx=%s",
-				     curr_sess->req->flags,
-				     curr_sess->req->buf->i,
-				     curr_sess->req->analysers,
-				     curr_sess->req->rex ?
-				     human_time(TICKS_TO_MS(curr_sess->req->rex - now_ms),
+				     curr_sess->req.flags,
+				     curr_sess->req.buf->i,
+				     curr_sess->req.analysers,
+				     curr_sess->req.rex ?
+				     human_time(TICKS_TO_MS(curr_sess->req.rex - now_ms),
 						TICKS_TO_MS(1000)) : "");
 
 			chunk_appendf(&trash,
 				     ",wx=%s",
-				     curr_sess->req->wex ?
-				     human_time(TICKS_TO_MS(curr_sess->req->wex - now_ms),
+				     curr_sess->req.wex ?
+				     human_time(TICKS_TO_MS(curr_sess->req.wex - now_ms),
 						TICKS_TO_MS(1000)) : "");
 
 			chunk_appendf(&trash,
 				     ",ax=%s]",
-				     curr_sess->req->analyse_exp ?
-				     human_time(TICKS_TO_MS(curr_sess->req->analyse_exp - now_ms),
+				     curr_sess->req.analyse_exp ?
+				     human_time(TICKS_TO_MS(curr_sess->req.analyse_exp - now_ms),
 						TICKS_TO_MS(1000)) : "");
 
 			chunk_appendf(&trash,
 				     " rp[f=%06xh,i=%d,an=%02xh,rx=%s",
-				     curr_sess->rep->flags,
-				     curr_sess->rep->buf->i,
-				     curr_sess->rep->analysers,
-				     curr_sess->rep->rex ?
-				     human_time(TICKS_TO_MS(curr_sess->rep->rex - now_ms),
+				     curr_sess->res.flags,
+				     curr_sess->res.buf->i,
+				     curr_sess->res.analysers,
+				     curr_sess->res.rex ?
+				     human_time(TICKS_TO_MS(curr_sess->res.rex - now_ms),
 						TICKS_TO_MS(1000)) : "");
 
 			chunk_appendf(&trash,
 				     ",wx=%s",
-				     curr_sess->rep->wex ?
-				     human_time(TICKS_TO_MS(curr_sess->rep->wex - now_ms),
+				     curr_sess->res.wex ?
+				     human_time(TICKS_TO_MS(curr_sess->res.wex - now_ms),
 						TICKS_TO_MS(1000)) : "");
 
 			chunk_appendf(&trash,
 				     ",ax=%s]",
-				     curr_sess->rep->analyse_exp ?
-				     human_time(TICKS_TO_MS(curr_sess->rep->analyse_exp - now_ms),
+				     curr_sess->res.analyse_exp ?
+				     human_time(TICKS_TO_MS(curr_sess->res.analyse_exp - now_ms),
 						TICKS_TO_MS(1000)) : "");
 
 			conn = objt_conn(curr_sess->si[0].end);
@@ -5683,10 +5731,11 @@ static int stats_dump_sess_to_buffer(struct stream_interface *si)
 
 			chunk_appendf(&trash, "\n");
 
-			if (bi_putchk(si->ib, &trash) == -1) {
+			if (bi_putchk(si_ic(si), &trash) == -1) {
 				/* let's try again later from this session. We add ourselves into
 				 * this session's users so that it can remove us upon termination.
 				 */
+				si->flags |= SI_FL_WAIT_ROOM;
 				LIST_ADDQ(&curr_sess->back_refs, &appctx->ctx.sess.bref.users);
 				return 0;
 			}
@@ -5702,8 +5751,10 @@ static int stats_dump_sess_to_buffer(struct stream_interface *si)
 			else
 				chunk_appendf(&trash, "Session not found.\n");
 
-			if (bi_putchk(si->ib, &trash) == -1)
+			if (bi_putchk(si_ic(si), &trash) == -1) {
+				si->flags |= SI_FL_WAIT_ROOM;
 				return 0;
+			}
 
 			appctx->ctx.sess.target = NULL;
 			appctx->ctx.sess.uid = 0;
@@ -5765,7 +5816,7 @@ static int stats_table_request(struct stream_interface *si, int action)
 	 *     data though.
 	 */
 
-	if (unlikely(si->ib->flags & (CF_WRITE_ERROR|CF_SHUTW))) {
+	if (unlikely(si_ic(si)->flags & (CF_WRITE_ERROR|CF_SHUTW))) {
 		/* in case of abort, remove any refcount we might have set on an entry */
 		if (appctx->st2 == STAT_ST_LIST) {
 			appctx->ctx.table.entry->ref_cnt--;
@@ -5965,7 +6016,7 @@ static int stats_dump_errors_to_buffer(struct stream_interface *si)
 	struct appctx *appctx = __objt_appctx(si->end);
 	extern const char *monthname[12];
 
-	if (unlikely(si->ib->flags & (CF_WRITE_ERROR|CF_SHUTW)))
+	if (unlikely(si_ic(si)->flags & (CF_WRITE_ERROR|CF_SHUTW)))
 		return 1;
 
 	chunk_reset(&trash);
@@ -5982,8 +6033,9 @@ static int stats_dump_errors_to_buffer(struct stream_interface *si)
 			     tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(date.tv_usec/1000),
 			     error_snapshot_id);
 
-		if (bi_putchk(si->ib, &trash) == -1) {
+		if (bi_putchk(si_ic(si), &trash) == -1) {
 			/* Socket buffer full. Let's try again later from the same point */
+			si->flags |= SI_FL_WAIT_ROOM;
 			return 0;
 		}
 
@@ -6066,8 +6118,9 @@ static int stats_dump_errors_to_buffer(struct stream_interface *si)
 				     es->b_flags, es->b_out, es->b_tot,
 				     es->len, es->b_wrap, es->pos);
 
-			if (bi_putchk(si->ib, &trash) == -1) {
+			if (bi_putchk(si_ic(si), &trash) == -1) {
 				/* Socket buffer full. Let's try again later from the same point */
+				si->flags |= SI_FL_WAIT_ROOM;
 				return 0;
 			}
 			appctx->ctx.errors.ptr = 0;
@@ -6078,8 +6131,10 @@ static int stats_dump_errors_to_buffer(struct stream_interface *si)
 			/* the snapshot changed while we were dumping it */
 			chunk_appendf(&trash,
 				     "  WARNING! update detected on this snapshot, dump interrupted. Please re-check!\n");
-			if (bi_putchk(si->ib, &trash) == -1)
+			if (bi_putchk(si_ic(si), &trash) == -1) {
+				si->flags |= SI_FL_WAIT_ROOM;
 				return 0;
+			}
 			goto next;
 		}
 
@@ -6093,8 +6148,9 @@ static int stats_dump_errors_to_buffer(struct stream_interface *si)
 			if (newptr == appctx->ctx.errors.ptr)
 				return 0;
 
-			if (bi_putchk(si->ib, &trash) == -1) {
+			if (bi_putchk(si_ic(si), &trash) == -1) {
 				/* Socket buffer full. Let's try again later from the same point */
+				si->flags |= SI_FL_WAIT_ROOM;
 				return 0;
 			}
 			appctx->ctx.errors.ptr = newptr;

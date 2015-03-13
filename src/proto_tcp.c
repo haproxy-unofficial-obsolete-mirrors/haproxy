@@ -1149,7 +1149,7 @@ resume_execution:
 			/* we have a matching rule. */
 			if (rule->action == TCP_ACT_REJECT) {
 				channel_abort(req);
-				channel_abort(s->rep);
+				channel_abort(&s->res);
 				req->analysers = 0;
 
 				s->be->be_counters.denied_req++;
@@ -1310,7 +1310,7 @@ resume_execution:
 			/* we have a matching rule. */
 			if (rule->action == TCP_ACT_REJECT) {
 				channel_abort(rep);
-				channel_abort(s->req);
+				channel_abort(&s->req);
 				rep->analysers = 0;
 
 				s->be->be_counters.denied_resp++;
@@ -1325,9 +1325,9 @@ resume_execution:
 				return 0;
 			}
 			else if (rule->action == TCP_ACT_CLOSE) {
-				rep->prod->flags |= SI_FL_NOLINGER | SI_FL_NOHALF;
-				si_shutr(rep->prod);
-				si_shutw(rep->prod);
+				chn_prod(rep)->flags |= SI_FL_NOLINGER | SI_FL_NOHALF;
+				si_shutr(chn_prod(rep));
+				si_shutw(chn_prod(rep));
 				break;
 			}
 			else {

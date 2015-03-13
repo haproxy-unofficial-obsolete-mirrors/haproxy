@@ -2,7 +2,7 @@
  * include/proto/stream_interface.h
  * This file contains stream_interface function prototypes
  *
- * Copyright (C) 2000-2012 Willy Tarreau - w@1wt.eu
+ * Copyright (C) 2000-2014 Willy Tarreau - w@1wt.eu
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -46,6 +46,63 @@ extern struct data_cb si_idle_conn_cb;
 struct appctx *stream_int_register_handler(struct stream_interface *si, struct si_applet *app);
 void stream_int_unregister_handler(struct stream_interface *si);
 
+/* returns the channel which receives data from this stream interface (input channel) */
+static inline struct channel *si_ic(struct stream_interface *si)
+{
+	if (si->flags & SI_FL_ISBACK)
+		return &LIST_ELEM(si, struct session *, si[1])->res;
+	else
+		return &LIST_ELEM(si, struct session *, si[0])->req;
+}
+
+/* returns the channel which feeds data to this stream interface (output channel) */
+static inline struct channel *si_oc(struct stream_interface *si)
+{
+	if (si->flags & SI_FL_ISBACK)
+		return &LIST_ELEM(si, struct session *, si[1])->req;
+	else
+		return &LIST_ELEM(si, struct session *, si[0])->res;
+}
+
+/* returns the buffer which receives data from this stream interface (input channel's buffer) */
+static inline struct buffer *si_ib(struct stream_interface *si)
+{
+	return si_ic(si)->buf;
+}
+
+/* returns the buffer which feeds data to this stream interface (output channel's buffer) */
+static inline struct buffer *si_ob(struct stream_interface *si)
+{
+	return si_oc(si)->buf;
+}
+
+/* returns the session associated to a stream interface */
+static inline struct session *si_sess(struct stream_interface *si)
+{
+	if (si->flags & SI_FL_ISBACK)
+		return LIST_ELEM(si, struct session *, si[1]);
+	else
+		return LIST_ELEM(si, struct session *, si[0]);
+}
+
+/* returns the task associated to this stream interface */
+static inline struct task *si_task(struct stream_interface *si)
+{
+	if (si->flags & SI_FL_ISBACK)
+		return LIST_ELEM(si, struct session *, si[1])->task;
+	else
+		return LIST_ELEM(si, struct session *, si[0])->task;
+}
+
+/* returns the stream interface on the other side. Used during forwarding. */
+static inline struct stream_interface *si_opposite(struct stream_interface *si)
+{
+	if (si->flags & SI_FL_ISBACK)
+		return &LIST_ELEM(si, struct session *, si[1])->si[0];
+	else
+		return &LIST_ELEM(si, struct session *, si[0])->si[1];
+}
+
 /* Initializes all required fields for a new appctx. Note that it does the
  * minimum acceptable initialization for an appctx. This means only the
  * 3 integer states st0, st1, st2 are zeroed.
@@ -88,15 +145,15 @@ static inline void appctx_free(struct appctx *appctx)
 }
 
 /* initializes a stream interface in the SI_ST_INI state. It's detached from
- * any endpoint and is only attached to an owner (generally a task).
+ * any endpoint and only keeps its side which is expected to have already been
+ * set.
  */
-static inline void si_reset(struct stream_interface *si, void *owner)
+static inline void si_reset(struct stream_interface *si)
 {
-	si->owner          = owner;
 	si->err_type       = SI_ET_NONE;
 	si->conn_retries   = 0;  /* used for logging too */
 	si->exp            = TICK_ETERNITY;
-	si->flags          = SI_FL_NONE;
+	si->flags         &= SI_FL_ISBACK;
 	si->end            = NULL;
 	si->state          = si->prev_state = SI_ST_INI;
 }
@@ -320,7 +377,7 @@ static inline int si_connect(struct stream_interface *si)
 		return SN_ERR_INTERNAL;
 
 	if (!conn_ctrl_ready(conn) || !conn_xprt_ready(conn)) {
-		ret = conn->ctrl->connect(conn, !channel_is_empty(si->ob), 0);
+		ret = conn->ctrl->connect(conn, !channel_is_empty(si_oc(si)), 0);
 		if (ret != SN_ERR_NONE)
 			return ret;
 
@@ -330,7 +387,7 @@ static inline int si_connect(struct stream_interface *si)
 		/* we're in the process of establishing a connection */
 		si->state = SI_ST_CON;
 	}
-	else if (!channel_is_empty(si->ob)) {
+	else if (!channel_is_empty(si_oc(si))) {
 		/* reuse the existing connection, we'll have to send a
 		 * request there.
 		 */
@@ -345,12 +402,6 @@ static inline int si_connect(struct stream_interface *si)
 		conn_get_from_addr(conn);
 
 	return ret;
-}
-
-/* finds the session which owns a stream interface */
-static inline struct session *si_sess(struct stream_interface *si)
-{
-	return (struct session *)((struct task *)si->owner)->context;
 }
 
 /* for debugging, reports the stream interface state name */

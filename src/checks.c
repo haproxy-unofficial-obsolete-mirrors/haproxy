@@ -1293,14 +1293,13 @@ static void event_srv_chk_r(struct connection *conn)
 	 * To avoid sending RSTs all the time, we first try to drain pending
 	 * data.
 	 */
-	if (conn->xprt && conn->xprt->shutw)
-		conn->xprt->shutw(conn, 0);
+	__conn_data_stop_both(conn);
+	conn_data_shutw_hard(conn);
 
 	/* OK, let's not stay here forever */
 	if (check->result == CHK_RES_FAILED)
 		conn->flags |= CO_FL_ERROR;
 
-	__conn_data_stop_both(conn);
 	task_wakeup(t, TASK_WOKEN_IO);
 	return;
 
@@ -1341,7 +1340,7 @@ static int wake_srv_chk(struct connection *conn)
 		/* We're here because nobody wants to handle the error, so we
 		 * sure want to abort the hard way.
 		 */
-		conn_drain(conn);
+		conn_sock_drain(conn);
 		conn_force_close(conn);
 	}
 	return 0;
@@ -2080,7 +2079,7 @@ static struct task *process_chk_conn(struct task *t)
 			 * as a failed response coupled with "observe layer7" caused the
 			 * server state to be suddenly changed.
 			 */
-			conn_drain(conn);
+			conn_sock_drain(conn);
 			conn_force_close(conn);
 		}
 
