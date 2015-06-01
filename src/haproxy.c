@@ -79,9 +79,10 @@
 #include <types/acl.h>
 #include <types/peers.h>
 
-#include <proto/auth.h>
 #include <proto/acl.h>
+#include <proto/applet.h>
 #include <proto/arg.h>
+#include <proto/auth.h>
 #include <proto/backend.h>
 #include <proto/channel.h>
 #include <proto/checks.h>
@@ -98,6 +99,7 @@
 #include <proto/queue.h>
 #include <proto/server.h>
 #include <proto/session.h>
+#include <proto/stream.h>
 #include <proto/signal.h>
 #include <proto/task.h>
 
@@ -144,6 +146,7 @@ struct global global = {
 		.maxrewrite = MAXREWRITE,
 		.chksize = BUFSIZE,
 		.reserved_bufs = RESERVED_BUFS,
+		.pattern_cache = DEFAULT_PAT_LRU_SIZE,
 #ifdef USE_OPENSSL
 		.sslcachesize = SSLCACHESIZE,
 		.ssl_default_dh_param = SSL_DEFAULT_DH_PARAM,
@@ -262,8 +265,8 @@ void display_build_opts()
 	{
 		int i;
 
-		for (i = 0; comp_algos[i].name; i++) {
-			printf("%s %s", (i == 0 ? "" : ","), comp_algos[i].name);
+		for (i = 0; comp_algos[i].cfg_name; i++) {
+			printf("%s %s(\"%s\")", (i == 0 ? "" : ","), comp_algos[i].cfg_name, comp_algos[i].ua_name);
 		}
 		if (i == 0) {
 			printf("none");
@@ -559,6 +562,7 @@ void init(int argc, char **argv)
 	if (init_acl() != 0)
 		exit(1);
 	init_task();
+	init_stream();
 	init_session();
 	init_connection();
 	/* warning, we init buffers later */
@@ -730,6 +734,9 @@ void init(int argc, char **argv)
 	}
 
 	pattern_finalize_config();
+#if (defined SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB && TLS_TICKETS_NO > 0)
+	tlskeys_finalize_config();
+#endif
 
 	err_code |= check_config_validity();
 	if (err_code & (ERR_ABORT|ERR_FATAL)) {
@@ -840,7 +847,7 @@ void init(int argc, char **argv)
 		mem = mem * MEM_USABLE_RATIO;
 
 		global.maxconn = mem /
-			((SESSION_MAX_COST + 2 * global.tune.bufsize) +    // session + 2 buffers per session
+			((STREAM_MAX_COST + 2 * global.tune.bufsize) +    // stream + 2 buffers per stream
 			 sides * global.ssl_session_max_cost + // SSL buffers, one per side
 			 global.ssl_handshake_max_cost);       // 1 handshake per connection max
 
@@ -870,7 +877,7 @@ void init(int argc, char **argv)
 		mem -= global.maxzlibmem;
 		mem = mem * MEM_USABLE_RATIO;
 
-		sslmem = mem - global.maxconn * (int64_t)(SESSION_MAX_COST + 2 * global.tune.bufsize);
+		sslmem = mem - global.maxconn * (int64_t)(STREAM_MAX_COST + 2 * global.tune.bufsize);
 		global.maxsslconn = sslmem / (global.ssl_session_max_cost + global.ssl_handshake_max_cost);
 		global.maxsslconn = round_2dig(global.maxsslconn);
 
@@ -879,7 +886,7 @@ void init(int argc, char **argv)
 			      "high for the global.memmax value (%d MB). The absolute maximum possible value "
 			      "without SSL is %d, but %d was found and SSL is in use.\n",
 			      global.rlimit_memmax,
-			      (int)(mem / (SESSION_MAX_COST + 2 * global.tune.bufsize)),
+			      (int)(mem / (STREAM_MAX_COST + 2 * global.tune.bufsize)),
 			      global.maxconn);
 			exit(1);
 		}
@@ -907,7 +914,7 @@ void init(int argc, char **argv)
 		if (sides)
 			clearmem -= (global.ssl_session_max_cost + global.ssl_handshake_max_cost) * (int64_t)global.maxsslconn;
 
-		global.maxconn = clearmem / (SESSION_MAX_COST + 2 * global.tune.bufsize);
+		global.maxconn = clearmem / (STREAM_MAX_COST + 2 * global.tune.bufsize);
 		global.maxconn = round_2dig(global.maxconn);
 #ifdef SYSTEM_MAXCONN
 		if (global.maxconn > DEFAULT_MAXCONN)
@@ -1213,8 +1220,7 @@ void deinit(void)
 				free(exp->preg);
 			}
 
-			if (exp->replace && exp->action != ACT_SETBE)
-				free((char *)exp->replace);
+			free((char *)exp->replace);
 			expb = exp;
 			exp = exp->next;
 			free(expb);
@@ -1226,8 +1232,7 @@ void deinit(void)
 				free(exp->preg);
 			}
 
-			if (exp->replace && exp->action != ACT_SETBE)
-				free((char *)exp->replace);
+			free((char *)exp->replace);
 			expb = exp;
 			exp = exp->next;
 			free(expb);
@@ -1430,6 +1435,7 @@ void deinit(void)
 		free(wl);
 	}
 
+	pool_destroy2(pool2_stream);
 	pool_destroy2(pool2_session);
 	pool_destroy2(pool2_connection);
 	pool_destroy2(pool2_buffer);
@@ -1440,6 +1446,7 @@ void deinit(void)
 	pool_destroy2(pool2_pendconn);
 	pool_destroy2(pool2_sig_handlers);
 	pool_destroy2(pool2_hdr_idx);
+	pool_destroy2(pool2_http_txn);
     
 	if (have_appsession) {
 		pool_destroy2(apools.serverid);
@@ -1482,9 +1489,14 @@ void run_poll_loop()
 		if (jobs == 0)
 			break;
 
+		/* expire immediately if events are pending */
+		if (fd_cache_num || run_queue || signal_queue_len || !LIST_ISEMPTY(&applet_runq))
+			next = now_ms;
+
 		/* The poller will ensure it returns around <next> */
 		cur_poller.poll(&cur_poller, next);
 		fd_process_cached_events();
+		applet_run_active();
 	}
 }
 
@@ -1729,6 +1741,7 @@ int main(int argc, char **argv)
 
 	if (global.mode & (MODE_DAEMON | MODE_SYSTEMD)) {
 		struct proxy *px;
+		struct peers *curpeers;
 		int ret = 0;
 		int *children = calloc(global.nbproc, sizeof(int));
 		int proc;
@@ -1754,7 +1767,7 @@ int main(int argc, char **argv)
 
 #ifdef USE_CPU_AFFINITY
 		if (proc < global.nbproc &&  /* child */
-		    proc < 32 &&             /* only the first 32 processes may be pinned */
+		    proc < LONGBITS &&       /* only the first 32/64 processes may be pinned */
 		    global.cpu_map[proc])    /* only do this if the process has a CPU map */
 			sched_setaffinity(0, sizeof(unsigned long), (void *)&global.cpu_map[proc]);
 #endif
@@ -1769,6 +1782,15 @@ int main(int argc, char **argv)
 		free(global.chroot);  global.chroot = NULL;
 		free(global.pidfile); global.pidfile = NULL;
 
+		if (proc == global.nbproc) {
+			if (global.mode & MODE_SYSTEMD) {
+				protocol_unbind_all();
+				for (proc = 0; proc < global.nbproc; proc++)
+					while (waitpid(children[proc], NULL, 0) == -1 && errno == EINTR);
+			}
+			exit(0); /* parent must leave */
+		}
+
 		/* we might have to unbind some proxies from some processes */
 		px = proxy;
 		while (px != NULL) {
@@ -1779,13 +1801,17 @@ int main(int argc, char **argv)
 			px = px->next;
 		}
 
-		if (proc == global.nbproc) {
-			if (global.mode & MODE_SYSTEMD) {
-				protocol_unbind_all();
-				for (proc = 0; proc < global.nbproc; proc++)
-					while (waitpid(children[proc], NULL, 0) == -1 && errno == EINTR);
-			}
-			exit(0); /* parent must leave */
+		/* we might have to unbind some peers sections from some processes */
+		for (curpeers = peers; curpeers; curpeers = curpeers->next) {
+			if (!curpeers->peers_fe)
+				continue;
+
+			if (curpeers->peers_fe->bind_proc & (1UL << proc))
+				continue;
+
+			stop_proxy(curpeers->peers_fe);
+			/* disable this peer section so that it kills itself */
+			curpeers->peers_fe = NULL;
 		}
 
 		free(children);

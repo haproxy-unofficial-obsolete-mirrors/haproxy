@@ -73,8 +73,9 @@
 #include <proto/proxy.h>
 #include <proto/peers.h>
 #include <proto/sample.h>
-#include <proto/server.h>
 #include <proto/session.h>
+#include <proto/server.h>
+#include <proto/stream.h>
 #include <proto/raw_sock.h>
 #include <proto/task.h>
 #include <proto/stick_table.h>
@@ -153,11 +154,12 @@ static const struct cfg_opt cfg_opts[] =
 	{ "contstats",    PR_O_CONTSTATS,  PR_CAP_FE, 0, 0 },
 	{ "dontlognull",  PR_O_NULLNOLOG,  PR_CAP_FE, 0, 0 },
 	{ "http_proxy",	  PR_O_HTTP_PROXY, PR_CAP_FE | PR_CAP_BE, 0, PR_MODE_HTTP },
+	{ "http-buffer-request", PR_O_WREQ_BODY,  PR_CAP_FE | PR_CAP_BE, 0, PR_MODE_HTTP },
+	{ "http-ignore-probes", PR_O_IGNORE_PRB, PR_CAP_FE, 0, PR_MODE_HTTP },
 	{ "prefer-last-server", PR_O_PREF_LAST,  PR_CAP_BE, 0, PR_MODE_HTTP },
 	{ "logasap",      PR_O_LOGASAP,    PR_CAP_FE, 0, 0 },
 	{ "nolinger",     PR_O_TCP_NOLING, PR_CAP_FE | PR_CAP_BE, 0, 0 },
 	{ "persist",      PR_O_PERSIST,    PR_CAP_BE, 0, 0 },
-	{ "redispatch",   PR_O_REDISP,     PR_CAP_BE, 0, 0 },
 	{ "srvtcpka",     PR_O_TCP_SRV_KA, PR_CAP_BE, 0, 0 },
 #ifdef TPROXY
 	{ "transparent",  PR_O_TRANSP,     PR_CAP_BE, 0, 0 },
@@ -317,6 +319,39 @@ int str2listener(char *str, struct proxy *curproxy, struct bind_conf *bind_conf,
  fail:
 	free(dupstr);
 	return 0;
+}
+
+/*
+ * Report a fatal Alert when there is too much arguments
+ * The index is the current keyword in args
+ * Return 0 if the number of argument is correct, otherwise emit an alert and return 1
+ * Fill err_code with an ERR_ALERT and an ERR_FATAL
+ */
+int alertif_too_many_args_idx(int maxarg, int index, const char *file, int linenum, char **args, int *err_code)
+{
+	char *kw = NULL;
+	int i;
+
+	if (!*args[index + maxarg + 1])
+		return 0;
+
+	memprintf(&kw, "%s", args[0]);
+	for (i = 1; i <= index; i++) {
+		memprintf(&kw, "%s %s", kw, args[i]);
+	}
+
+	Alert("parsing [%s:%d] : '%s' cannot handle unexpected argument '%s'.\n", file, linenum, kw, args[index + maxarg + 1]);
+	free(kw);
+	*err_code |= ERR_ALERT | ERR_FATAL;
+	return 1;
+}
+
+/*
+ * same as alertif_too_many_args_idx with a 0 index
+ */
+int alertif_too_many_args(int maxarg, const char *file, int linenum, char **args, int *err_code)
+{
+	return alertif_too_many_args_idx(maxarg, 0, file, linenum, args, err_code);
 }
 
 /* Report a warning if a rule is placed after a 'tcp-request content' rule.
@@ -545,10 +580,13 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 
 	if (!strcmp(args[0], "global")) {  /* new section */
 		/* no option, nothing special to do */
+		alertif_too_many_args(0, file, linenum, args, &err_code);
 		goto out;
 	}
 	else if (!strcmp(args[0], "ca-base")) {
 #ifdef USE_OPENSSL
+		if(alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.ca_base != NULL) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT;
@@ -568,6 +606,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 	}
 	else if (!strcmp(args[0], "crt-base")) {
 #ifdef USE_OPENSSL
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.crt_base != NULL) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT;
@@ -586,30 +626,48 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 #endif
 	}
 	else if (!strcmp(args[0], "daemon")) {
+		if (alertif_too_many_args(0, file, linenum, args, &err_code))
+			goto out;
 		global.mode |= MODE_DAEMON;
 	}
 	else if (!strcmp(args[0], "debug")) {
+		if (alertif_too_many_args(0, file, linenum, args, &err_code))
+			goto out;
 		global.mode |= MODE_DEBUG;
 	}
 	else if (!strcmp(args[0], "noepoll")) {
+		if (alertif_too_many_args(0, file, linenum, args, &err_code))
+			goto out;
 		global.tune.options &= ~GTUNE_USE_EPOLL;
 	}
 	else if (!strcmp(args[0], "nokqueue")) {
+		if (alertif_too_many_args(0, file, linenum, args, &err_code))
+			goto out;
 		global.tune.options &= ~GTUNE_USE_KQUEUE;
 	}
 	else if (!strcmp(args[0], "nopoll")) {
+		if (alertif_too_many_args(0, file, linenum, args, &err_code))
+			goto out;
 		global.tune.options &= ~GTUNE_USE_POLL;
 	}
 	else if (!strcmp(args[0], "nosplice")) {
+		if (alertif_too_many_args(0, file, linenum, args, &err_code))
+			goto out;
 		global.tune.options &= ~GTUNE_USE_SPLICE;
 	}
 	else if (!strcmp(args[0], "nogetaddrinfo")) {
+		if (alertif_too_many_args(0, file, linenum, args, &err_code))
+			goto out;
 		global.tune.options &= ~GTUNE_USE_GAI;
 	}
 	else if (!strcmp(args[0], "quiet")) {
+		if (alertif_too_many_args(0, file, linenum, args, &err_code))
+			goto out;
 		global.mode |= MODE_QUIET;
 	}
 	else if (!strcmp(args[0], "tune.maxpollevents")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.tune.maxpollevents != 0) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT;
@@ -623,6 +681,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.tune.maxpollevents = atol(args[1]);
 	}
 	else if (!strcmp(args[0], "tune.maxaccept")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.tune.maxaccept != 0) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT;
@@ -636,6 +696,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.tune.maxaccept = atol(args[1]);
 	}
 	else if (!strcmp(args[0], "tune.chksize")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -645,9 +707,13 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 	}
 #ifdef USE_OPENSSL
 	else if (!strcmp(args[0], "tune.ssl.force-private-cache")) {
+		if (alertif_too_many_args(0, file, linenum, args, &err_code))
+			goto out;
 		global.tune.sslprivatecache = 1;
 	}
 	else if (!strcmp(args[0], "tune.ssl.cachesize")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -659,6 +725,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		unsigned int ssllifetime;
 		const char *res;
 
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects ssl sessions <lifetime> in seconds as argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -676,6 +744,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.tune.ssllifetime = ssllifetime;
 	}
 	else if (!strcmp(args[0], "tune.ssl.maxrecord")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -683,7 +753,10 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		}
 		global.tune.ssl_max_record = atol(args[1]);
 	}
+#ifndef OPENSSL_NO_DH
 	else if (!strcmp(args[0], "tune.ssl.default-dh-param")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -697,7 +770,10 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		}
 	}
 #endif
+#endif
 	else if (!strcmp(args[0], "tune.buffers.limit")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -712,6 +788,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		}
 	}
 	else if (!strcmp(args[0], "tune.buffers.reserve")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -724,6 +802,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			global.tune.buf_limit = global.tune.reserved_bufs + 1;
 	}
 	else if (!strcmp(args[0], "tune.bufsize")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -736,6 +816,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		alloc_trash_buffers(global.tune.bufsize);
 	}
 	else if (!strcmp(args[0], "tune.maxrewrite")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -749,6 +831,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		unsigned int idle;
 		const char *res;
 
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects a timer value between 0 and 65535 ms.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -771,6 +855,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.tune.idle_timer = idle;
 	}
 	else if (!strcmp(args[0], "tune.rcvbuf.client")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.tune.client_rcvbuf != 0) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT;
@@ -784,6 +870,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.tune.client_rcvbuf = atol(args[1]);
 	}
 	else if (!strcmp(args[0], "tune.rcvbuf.server")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.tune.server_rcvbuf != 0) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT;
@@ -797,6 +885,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.tune.server_rcvbuf = atol(args[1]);
 	}
 	else if (!strcmp(args[0], "tune.sndbuf.client")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.tune.client_sndbuf != 0) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT;
@@ -810,6 +900,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.tune.client_sndbuf = atol(args[1]);
 	}
 	else if (!strcmp(args[0], "tune.sndbuf.server")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.tune.server_sndbuf != 0) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT;
@@ -823,6 +915,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.tune.server_sndbuf = atol(args[1]);
 	}
 	else if (!strcmp(args[0], "tune.pipesize")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -831,6 +925,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.tune.pipesize = atol(args[1]);
 	}
 	else if (!strcmp(args[0], "tune.http.cookielen")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -839,6 +935,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.tune.cookie_len = atol(args[1]) + 1;
 	}
 	else if (!strcmp(args[0], "tune.http.maxhdr")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -848,6 +946,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 	}
 	else if (!strcmp(args[0], "tune.zlib.memlevel")) {
 #ifdef USE_ZLIB
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*args[1]) {
 			global.tune.zlibmemlevel = atoi(args[1]);
 			if (global.tune.zlibmemlevel < 1 || global.tune.zlibmemlevel > 9) {
@@ -870,6 +970,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 	}
 	else if (!strcmp(args[0], "tune.zlib.windowsize")) {
 #ifdef USE_ZLIB
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*args[1]) {
 			global.tune.zlibwindowsize = atoi(args[1]);
 			if (global.tune.zlibwindowsize < 8 || global.tune.zlibwindowsize > 15) {
@@ -891,6 +993,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 #endif
 	}
 	else if (!strcmp(args[0], "tune.comp.maxlevel")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*args[1]) {
 			global.tune.comp_maxlevel = atoi(args[1]);
 			if (global.tune.comp_maxlevel < 1 || global.tune.comp_maxlevel > 9) {
@@ -906,7 +1010,25 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 	}
+	else if (!strcmp(args[0], "tune.pattern.cache-size")) {
+		if (*args[1]) {
+			global.tune.pattern_cache = atoi(args[1]);
+			if (global.tune.pattern_cache < 0) {
+				Alert("parsing [%s:%d] : '%s' expects a positive numeric value\n",
+				      file, linenum, args[0]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+		} else {
+			Alert("parsing [%s:%d] : '%s' expects a positive numeric value\n",
+			      file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+	}
 	else if (!strcmp(args[0], "uid")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.uid != 0) {
 			Alert("parsing [%s:%d] : user/uid already specified. Continuing.\n", file, linenum);
 			err_code |= ERR_ALERT;
@@ -920,6 +1042,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.uid = atol(args[1]);
 	}
 	else if (!strcmp(args[0], "gid")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.gid != 0) {
 			Alert("parsing [%s:%d] : group/gid already specified. Continuing.\n", file, linenum);
 			err_code |= ERR_ALERT;
@@ -933,11 +1057,15 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.gid = atol(args[1]);
 	}
 	else if (!strcmp(args[0], "external-check")) {
+		if (alertif_too_many_args(0, file, linenum, args, &err_code))
+			goto out;
 		global.external_check = 1;
 	}
 	/* user/group name handling */
 	else if (!strcmp(args[0], "user")) {
 		struct passwd *ha_user;
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.uid != 0) {
 			Alert("parsing [%s:%d] : user/uid already specified. Continuing.\n", file, linenum);
 			err_code |= ERR_ALERT;
@@ -955,6 +1083,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 	}
 	else if (!strcmp(args[0], "group")) {
 		struct group *ha_group;
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.gid != 0) {
 			Alert("parsing [%s:%d] : gid/group was already specified. Continuing.\n", file, linenum);
 			err_code |= ERR_ALERT;
@@ -972,6 +1102,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 	}
 	/* end of user/group name handling*/
 	else if (!strcmp(args[0], "nbproc")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -986,6 +1118,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		}
 	}
 	else if (!strcmp(args[0], "maxconn")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.maxconn != 0) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT;
@@ -1007,6 +1141,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 	}
 	else if (!strcmp(args[0], "maxsslconn")) {
 #ifdef USE_OPENSSL
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -1021,6 +1157,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 	}
 	else if (!strcmp(args[0], "ssl-default-bind-ciphers")) {
 #ifdef USE_OPENSSL
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects a cipher suite as an argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -1036,6 +1174,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 	}
 	else if (!strcmp(args[0], "ssl-default-server-ciphers")) {
 #ifdef USE_OPENSSL
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects a cipher suite as an argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -1049,7 +1189,25 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		goto out;
 #endif
 	}
+#ifdef USE_OPENSSL
+#ifndef OPENSSL_NO_DH
+	else if (!strcmp(args[0], "ssl-dh-param-file")) {
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d] : '%s' expects a file path as an argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		if (ssl_sock_load_global_dh_param_from_file(args[1])) {
+			Alert("parsing [%s:%d] : '%s': unable to load DH parameters from file <%s>.\n", file, linenum, args[0], args[1]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+	}
+#endif
+#endif
 	else if (!strcmp(args[0], "ssl-server-verify")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -1066,6 +1224,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		}
 	}
 	else if (!strcmp(args[0], "maxconnrate")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.cps_lim != 0) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT;
@@ -1079,6 +1239,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.cps_lim = atol(args[1]);
 	}
 	else if (!strcmp(args[0], "maxsessrate")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.sps_lim != 0) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT;
@@ -1092,6 +1254,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.sps_lim = atol(args[1]);
 	}
 	else if (!strcmp(args[0], "maxsslrate")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.ssl_lim != 0) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT;
@@ -1105,6 +1269,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.ssl_lim = atol(args[1]);
 	}
 	else if (!strcmp(args[0], "maxcomprate")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument in kb/s.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -1113,6 +1279,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.comp_rate_lim = atoi(args[1]) * 1024;
 	}
 	else if (!strcmp(args[0], "maxpipes")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.maxpipes != 0) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT;
@@ -1126,6 +1294,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.maxpipes = atol(args[1]);
 	}
 	else if (!strcmp(args[0], "maxzlibmem")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -1134,6 +1304,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.maxzlibmem = atol(args[1]) * 1024L * 1024L;
 	}
 	else if (!strcmp(args[0], "maxcompcpuusage")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument between 0 and 100.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -1145,9 +1317,11 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-}
+	}
 
 	else if (!strcmp(args[0], "ulimit-n")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.rlimit_nofile != 0) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT;
@@ -1161,6 +1335,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.rlimit_nofile = atol(args[1]);
 	}
 	else if (!strcmp(args[0], "chroot")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.chroot != NULL) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT;
@@ -1200,6 +1376,9 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		int i;
 		char c;
 
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
+
 		for (i=0; args[1][i]; i++) {
 			c = args[1][i];
 			if (!isupper((unsigned char)c) && !islower((unsigned char)c) &&
@@ -1221,6 +1400,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.node = strdup(args[1]);
 	}
 	else if (!strcmp(args[0], "pidfile")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.pidfile != NULL) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT;
@@ -1336,6 +1517,9 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		int arg = 0;
 		int len = 0;
 
+		if (alertif_too_many_args(8, file, linenum, args, &err_code)) /* does not strictly check optional arguments */
+			goto out;
+
 		if (*(args[1]) == 0 || *(args[2]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects <address> and <facility> as arguments.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -1365,6 +1549,9 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			global.max_syslog_len = logsrv->maxlen;
 			logline = realloc(logline, global.max_syslog_len + 1);
 		}
+
+		if (alertif_too_many_args_idx(3, arg + 1, file, linenum, args, &err_code))
+			goto out;
 
 		logsrv->facility = get_log_facility(args[arg+2]);
 		if (logsrv->facility < 0) {
@@ -1441,6 +1628,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		snprintf(global.log_send_hostname, len + 2, "%s ", name);
 	}
 	else if (!strcmp(args[0], "log-tag")) {  /* tag to report to syslog */
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects a tag for use in syslog.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -1450,6 +1639,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		global.log_tag = strdup(args[1]);
 	}
 	else if (!strcmp(args[0], "spread-checks")) {  /* random time between checks (0-50) */
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (global.spread_checks != 0) {
 			Alert("parsing [%s:%d]: spread-checks already specified. Continuing.\n", file, linenum);
 			err_code |= ERR_ALERT;
@@ -1470,7 +1661,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		const char *err;
 		unsigned int val;
 
-
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d]: '%s' expects an integer argument (0..50).\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -1598,6 +1790,7 @@ void init_default_instance()
 	defproxy.state = PR_STNEW;
 	defproxy.maxconn = cfg_maxpconn;
 	defproxy.conn_retries = CONN_RETRIES;
+	defproxy.redispatch_after = 0;
 
 	defproxy.defsrv.check.inter = DEF_CHKINTR;
 	defproxy.defsrv.check.fastinter = 0;
@@ -1718,7 +1911,7 @@ static int create_cond_regex_rule(const char *file, int line,
 }
 
 /*
- * Parse a line in a <listen>, <frontend>, <backend> or <ruleset> section.
+ * Parse a line in a <listen>, <frontend> or <backend> section.
  * Returns the error code, 0 if OK, or any combination of :
  *  - ERR_ABORT: must abort ASAP
  *  - ERR_FATAL: we can continue parsing but not start the service
@@ -1744,6 +1937,9 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
+
 		err = invalid_char(args[1]);
 		if (err) {
 			Alert("parsing [%s:%d] : character '%c' is not permitted in '%s' name '%s'.\n",
@@ -1758,9 +1954,9 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 			 * combinations are allowed:
 			 */
 			if (strcmp(curpeers->id, args[1]) == 0) {
-				Warning("Parsing [%s:%d]: peers '%s' has same name as another peers (declared at %s:%d).\n",
+				Alert("Parsing [%s:%d]: peers section '%s' has the same name as another peers section declared at %s:%d.\n",
 					file, linenum, args[1], curpeers->conf.file, curpeers->conf.line);
-				err_code |= ERR_WARN;
+				err_code |= ERR_ALERT | ERR_FATAL;
 			}
 		}
 
@@ -1776,6 +1972,7 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 		curpeers->conf.line = linenum;
 		curpeers->last_change = now.tv_sec;
 		curpeers->id = strdup(args[1]);
+		curpeers->state = PR_STNEW;
 	}
 	else if (strcmp(args[0], "peer") == 0) { /* peer definition */
 		struct sockaddr_storage *sk;
@@ -1807,7 +2004,6 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 		curpeers->count++;
 		newpeer->next = curpeers->remote;
 		curpeers->remote = newpeer;
-		newpeer->peers = curpeers;
 		newpeer->conf.file = strdup(file);
 		newpeer->conf.line = linenum;
 
@@ -1851,6 +2047,7 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 		if (strcmp(newpeer->id, localpeer) == 0) {
 			/* Current is local peer, it define a frontend */
 			newpeer->local = 1;
+			peers->local = newpeer;
 
 			if (!curpeers->peers_fe) {
 				if ((curpeers->peers_fe  = calloc(1, sizeof(struct proxy))) == NULL) {
@@ -1861,17 +2058,10 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 
 				init_new_proxy(curpeers->peers_fe);
 				curpeers->peers_fe->parent = curpeers;
-
-				curpeers->peers_fe->last_change = now.tv_sec;
 				curpeers->peers_fe->id = strdup(args[1]);
-				curpeers->peers_fe->cap = PR_CAP_FE;
-				curpeers->peers_fe->maxconn = 0;
-				curpeers->peers_fe->conn_retries = CONN_RETRIES;
-				curpeers->peers_fe->timeout.connect = 5000;
-				curpeers->peers_fe->accept = peer_accept;
-				curpeers->peers_fe->options2 |= PR_O2_INDEPSTR | PR_O2_SMARTCON | PR_O2_SMARTACC;
 				curpeers->peers_fe->conf.args.file = curpeers->peers_fe->conf.file = strdup(file);
 				curpeers->peers_fe->conf.args.line = curpeers->peers_fe->conf.line = linenum;
+				peers_setup_frontend(curpeers->peers_fe);
 
 				bind_conf = bind_conf_alloc(&curpeers->peers_fe->conf.bind, file, linenum, args[2]);
 
@@ -1891,10 +2081,10 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 					l->maxaccept = 1;
 					l->maxconn = ((struct proxy *)curpeers->peers_fe)->maxconn;
 					l->backlog = ((struct proxy *)curpeers->peers_fe)->backlog;
-					l->timeout = &((struct proxy *)curpeers->peers_fe)->timeout.client;
-					l->accept = session_accept;
-					l->handler = process_session;
+					l->accept = session_accept_fd;
+					l->handler = process_stream;
 					l->analysers |=  ((struct proxy *)curpeers->peers_fe)->fe_req_ana;
+					l->default_target = ((struct proxy *)curpeers->peers_fe)->default_target;
 					l->options |= LI_O_UNLIMITED; /* don't make the peers subject to global limits */
 					global.maxsock += l->maxconn;
 				}
@@ -1908,6 +2098,12 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 			}
 		}
 	} /* neither "peer" nor "peers" */
+	else if (!strcmp(args[0], "disabled")) {  /* disables this peers section */
+		curpeers->state = PR_STSTOPPED;
+	}
+	else if (!strcmp(args[0], "enabled")) {  /* enables this peers section (used to revert a disabled default) */
+		curpeers->state = PR_STNEW;
+	}
 	else if (*args[0] != 0) {
 		Alert("parsing [%s:%d] : unknown keyword '%s' in '%s' section\n", file, linenum, args[0], cursection);
 		err_code |= ERR_ALERT | ERR_FATAL;
@@ -1921,7 +2117,7 @@ out:
 
 
 /*
- * Parse a line in a <listen>, <frontend>, <backend> or <ruleset> section.
+ * Parse a line in a <listen>, <frontend> or <backend> section.
  * Returns the error code, 0 if OK, or any combination of :
  *  - ERR_ABORT: must abort ASAP
  *  - ERR_FATAL: we can continue parsing but not start the service
@@ -1959,9 +2155,9 @@ int cfg_parse_mailers(const char *file, int linenum, char **args, int kwm)
 			 * combinations are allowed:
 			 */
 			if (strcmp(curmailers->id, args[1]) == 0) {
-				Warning("Parsing [%s:%d]: mailers '%s' has same name as another mailers (declared at %s:%d).\n",
+				Alert("Parsing [%s:%d]: mailers section '%s' has the same name as another mailers section declared at %s:%d.\n",
 					file, linenum, args[1], curmailers->conf.file, curmailers->conf.line);
-				err_code |= ERR_WARN;
+				err_code |= ERR_ALERT | ERR_FATAL;
 			}
 		}
 
@@ -2087,16 +2283,12 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		rc = PR_CAP_LISTEN;
  	else if (!strcmp(args[0], "frontend"))
 		rc = PR_CAP_FE | PR_CAP_RS;
- 	else if (!strcmp(args[0], "backend"))
+	else if (!strcmp(args[0], "backend"))
 		rc = PR_CAP_BE | PR_CAP_RS;
- 	else if (!strcmp(args[0], "ruleset"))
-		rc = PR_CAP_RS;
 	else
 		rc = PR_CAP_NONE;
 
 	if (rc != PR_CAP_NONE) {  /* new proxy */
-		struct ebpt_node *node;
-
 		if (!*args[1]) {
 			Alert("parsing [%s:%d] : '%s' expects an <id> argument and\n"
 			      "  optionnally supports [addr1]:port1[-end1]{,[addr]:port[-end]}...\n",
@@ -2112,30 +2304,12 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 		}
 
-		for (node = ebis_lookup(&proxy_by_name, args[1]); node; node = ebpt_next(node)) {
-			curproxy = container_of(node, struct proxy, conf.by_name);
-
-			if (strcmp(curproxy->id, args[1]) != 0)
-				break;
-
-			/*
-			 * If there are two proxies with the same name only following
-			 * combinations are allowed:
-			 *
-			 *			listen backend frontend ruleset
-			 *	listen             -      -       -        -
-			 *	backend            -      -       OK       -
-			 *	frontend           -      OK      -        -
-			 *	ruleset            -      -       -        -
-			 */
-
-			if ((rc != (PR_CAP_FE|PR_CAP_RS) || curproxy->cap != (PR_CAP_BE|PR_CAP_RS)) &&
-			    (rc != (PR_CAP_BE|PR_CAP_RS) || curproxy->cap != (PR_CAP_FE|PR_CAP_RS))) {
-				Warning("Parsing [%s:%d]: %s '%s' has same name as another %s (declared at %s:%d).\n",
-					file, linenum, proxy_cap_str(rc), args[1], proxy_type_str(curproxy),
-					curproxy->conf.file, curproxy->conf.line);
-				err_code |= ERR_WARN;
-			}
+		curproxy = (rc & PR_CAP_FE) ? proxy_fe_by_name(args[1]) : proxy_be_by_name(args[1]);
+		if (curproxy) {
+			Alert("Parsing [%s:%d]: %s '%s' has the same name as %s '%s' declared at %s:%d.\n",
+			      file, linenum, proxy_cap_str(rc), args[1], proxy_type_str(curproxy),
+			      curproxy->id, curproxy->conf.file, curproxy->conf.line);
+				err_code |= ERR_ALERT | ERR_FATAL;
 		}
 
 		if ((curproxy = (struct proxy *)calloc(1, sizeof(struct proxy))) == NULL) {
@@ -2154,27 +2328,10 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		curproxy->cap = rc;
 		proxy_store_name(curproxy);
 
-		/* parse the listener address if any */
-		if ((curproxy->cap & PR_CAP_FE) && *args[2]) {
-			struct listener *l;
-
-			bind_conf = bind_conf_alloc(&curproxy->conf.bind, file, linenum, args[2]);
-
-			if (!str2listener(args[2], curproxy, bind_conf, file, linenum, &errmsg)) {
-				if (errmsg && *errmsg) {
-					indent_msg(&errmsg, 2);
-					Alert("parsing [%s:%d] : '%s %s' : %s\n", file, linenum, args[0], args[1], errmsg);
-				}
-				else
-					Alert("parsing [%s:%d] : '%s %s' : error encountered while parsing listening address '%s'.\n",
-					      file, linenum, args[0], args[1], args[2]);
-				err_code |= ERR_FATAL;
-				goto out;
-			}
-
-			list_for_each_entry(l, &bind_conf->listeners, by_bind) {
-				global.maxsock++;
-			}
+		if (alertif_too_many_args(1, file, linenum, args, &err_code)) {
+			if (curproxy->cap & PR_CAP_FE)
+				Alert("parsing [%s:%d] : please use the 'bind' keyword for listening addresses.\n", file, linenum);
+			goto out;
 		}
 
 		/* set default values */
@@ -2223,6 +2380,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			curproxy->lbprm.algo = defproxy.lbprm.algo;
 			curproxy->fullconn = defproxy.fullconn;
 			curproxy->conn_retries = defproxy.conn_retries;
+			curproxy->redispatch_after = defproxy.redispatch_after;
 			curproxy->max_ka_queue = defproxy.max_ka_queue;
 
 			if (defproxy.check_req) {
@@ -2383,6 +2541,11 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		/* FIXME-20070101: we should do this too at the end of the
 		 * config parsing to free all default values.
 		 */
+		if (alertif_too_many_args(1, file, linenum, args, &err_code)) {
+			err_code |= ERR_ABORT;
+			goto out;
+		}
+
 		free(defproxy.check_req);
 		free(defproxy.check_command);
 		free(defproxy.check_path);
@@ -2569,6 +2732,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		if (warnifnotcap(curproxy, PR_CAP_FE, file, linenum, args[0], NULL))
 			err_code |= ERR_WARN;
 
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
+
 		if (!*args[1]) {
 			Alert("parsing [%s:%d] : '%s' expects an URI.\n",
 			      file, linenum, args[0]);
@@ -2585,6 +2751,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		goto out;
 	}
 	else if (!strcmp(args[0], "mode")) {  /* sets the proxy mode */
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
+
 		if (!strcmp(args[1], "http")) curproxy->mode = PR_MODE_HTTP;
 		else if (!strcmp(args[1], "tcp")) curproxy->mode = PR_MODE_TCP;
 		else if (!strcmp(args[1], "health")) curproxy->mode = PR_MODE_HEALTH;
@@ -2604,6 +2773,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
+
 		if (!*args[1]) {
 			Alert("parsing [%s:%d]: '%s' expects an integer argument.\n",
 				file, linenum, args[0]);
@@ -2613,6 +2785,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 
 		curproxy->uuid = atol(args[1]);
 		curproxy->conf.id.key = curproxy->uuid;
+		curproxy->options |= PR_O_FORCED_ID;
 
 		if (curproxy->uuid <= 0) {
 			Alert("parsing [%s:%d]: custom id has to be > 0.\n",
@@ -2661,9 +2834,13 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 
 	}
 	else if (!strcmp(args[0], "disabled")) {  /* disables this proxy */
+		if (alertif_too_many_args(0, file, linenum, args, &err_code))
+			goto out;
 		curproxy->state = PR_STSTOPPED;
 	}
 	else if (!strcmp(args[0], "enabled")) {  /* enables this proxy (used to revert a disabled default) */
+		if (alertif_too_many_args(0, file, linenum, args, &err_code))
+			goto out;
 		curproxy->state = PR_STNEW;
 	}
 	else if (!strcmp(args[0], "bind-process")) {  /* enable this proxy only on some processes */
@@ -2970,6 +3147,8 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
                 }
 
 		if (!strcmp(args[1], "command")) {
+			if (alertif_too_many_args(1, file, linenum, args, &err_code))
+				goto out;
 			if (*(args[1]) == 0) {
 				Alert("parsing [%s:%d] : missing argument after '%s'.\n",
 				      file, linenum, args[1]);
@@ -2980,6 +3159,8 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			curproxy->check_command = strdup(args[2]);
 		}
 		else if (!strcmp(args[1], "path")) {
+			if (alertif_too_many_args(1, file, linenum, args, &err_code))
+				goto out;
 			if (*(args[1]) == 0) {
 				Alert("parsing [%s:%d] : missing argument after '%s'.\n",
 				      file, linenum, args[1]);
@@ -3012,6 +3193,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 
 				beg = args[1] + 11;
 				end = strchr(beg, ')');
+
+				if (alertif_too_many_args(1, file, linenum, args, &err_code))
+					goto out;
 
 				if (!end || end == beg) {
 					Alert("parsing [%s:%d] : persist rdp-cookie(name)' requires an rdp cookie name.\n",
@@ -3125,6 +3309,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 				goto out;
 			}
 
+			if (alertif_too_many_args_idx(4, 1, file, linenum, args, &err_code))
+				goto out;
+
 			if (*(args[4]) == 0) {
 				Alert("parsing [%s:%d] : '%s' expects 'cookie' <cookie_name> 'len' <len>.\n",
 				      file, linenum, args[0]);
@@ -3145,6 +3332,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;
 			}
+
+			if (alertif_too_many_args_idx(4, 1, file, linenum, args, &err_code))
+				goto out;
 
 			if (*(args[3]) == 0 || strcmp(args[4], "len") != 0 || *(args[5]) == 0) {
 				Alert("parsing [%s:%d] : '%s %s' expects 'header' <header_name> 'len' <len>.\n",
@@ -3172,6 +3362,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 				goto out;
 			}
 
+			if (alertif_too_many_args_idx(4, 1, file, linenum, args, &err_code))
+				goto out;
+
 			if (*(args[3]) == 0 || strcmp(args[4], "len") != 0 || *(args[5]) == 0) {
 				Alert("parsing [%s:%d] : '%s %s' expects 'header' <header_name> 'len' <len>.\n",
 				      file, linenum, args[0], args[1]);
@@ -3198,6 +3391,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 	else if (!strcmp(args[0], "retries")) {  /* connection retries */
 		if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], NULL))
 			err_code |= ERR_WARN;
+
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects an integer argument (dispatch counts for one).\n",
@@ -3326,7 +3522,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
-		if ((rule = http_parse_redirect_rule(file, linenum, curproxy, (const char **)args + 1, &errmsg, 0)) == NULL) {
+		if ((rule = http_parse_redirect_rule(file, linenum, curproxy, (const char **)args + 1, &errmsg, 0, 0)) == NULL) {
 			Alert("parsing [%s:%d] : error detected in %s '%s' while parsing redirect rule : %s.\n",
 			      file, linenum, proxy_type_str(curproxy), curproxy->id, errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -3459,6 +3655,15 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 	}
 	else if (!strcmp(args[0], "stick-table")) {
 		int myidx = 1;
+		struct proxy *other;
+
+		other = proxy_tbl_by_name(curproxy->id);
+		if (other) {
+			Alert("parsing [%s:%d] : stick-table name '%s' conflicts with table declared in %s '%s' at %s:%d.\n",
+			      file, linenum, curproxy->id, proxy_type_str(other), other->id, other->conf.file, other->conf.line);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
 
 		curproxy->table.id =  curproxy->id;
 		curproxy->table.type = (unsigned int)-1;
@@ -3956,6 +4161,9 @@ stats_error_parsing:
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
+				if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+					goto out;
+
 				if (warnifnotcap(curproxy, cfg_opts[optnum].cap, file, linenum, args[1], NULL)) {
 					err_code |= ERR_WARN;
 					goto out;
@@ -3987,6 +4195,8 @@ stats_error_parsing:
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
+				if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+					goto out;
 				if (warnifnotcap(curproxy, cfg_opts2[optnum].cap, file, linenum, args[1], NULL)) {
 					err_code |= ERR_WARN;
 					goto out;
@@ -4015,6 +4225,8 @@ stats_error_parsing:
 		 * sections).
 		 */
 		if (strcmp(args[1], "httpclose") == 0) {
+			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+				goto out;
 			if (kwm == KWM_STD) {
 				curproxy->options &= ~PR_O_HTTP_MODE;
 				curproxy->options |= PR_O_HTTP_PCL;
@@ -4027,6 +4239,8 @@ stats_error_parsing:
 			}
 		}
 		else if (strcmp(args[1], "forceclose") == 0) {
+			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+				goto out;
 			if (kwm == KWM_STD) {
 				curproxy->options &= ~PR_O_HTTP_MODE;
 				curproxy->options |= PR_O_HTTP_FCL;
@@ -4039,6 +4253,8 @@ stats_error_parsing:
 			}
 		}
 		else if (strcmp(args[1], "http-server-close") == 0) {
+			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+				goto out;
 			if (kwm == KWM_STD) {
 				curproxy->options &= ~PR_O_HTTP_MODE;
 				curproxy->options |= PR_O_HTTP_SCL;
@@ -4051,6 +4267,8 @@ stats_error_parsing:
 			}
 		}
 		else if (strcmp(args[1], "http-keep-alive") == 0) {
+			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+				goto out;
 			if (kwm == KWM_STD) {
 				curproxy->options &= ~PR_O_HTTP_MODE;
 				curproxy->options |= PR_O_HTTP_KAL;
@@ -4063,6 +4281,8 @@ stats_error_parsing:
 			}
 		}
 		else if (strcmp(args[1], "http-tunnel") == 0) {
+			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+				goto out;
 			if (kwm == KWM_STD) {
 				curproxy->options &= ~PR_O_HTTP_MODE;
 				curproxy->options |= PR_O_HTTP_TUN;
@@ -4073,6 +4293,37 @@ stats_error_parsing:
 					curproxy->options &= ~PR_O_HTTP_MODE;
 				goto out;
 			}
+		}
+
+		/* Redispatch can take an integer argument that control when the
+		 * resispatch occurs. All values are relative to the retries option.
+		 * This can be cancelled using "no option xxx".
+		 */
+		if (strcmp(args[1], "redispatch") == 0) {
+			if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[1], NULL)) {
+				err_code |= ERR_WARN;
+				goto out;
+			}
+
+			curproxy->no_options &= ~PR_O_REDISP;
+			curproxy->options &= ~PR_O_REDISP;
+
+			switch (kwm) {
+			case KWM_STD:
+				curproxy->options |= PR_O_REDISP;
+				curproxy->redispatch_after = -1;
+				if(*args[2]) {
+					curproxy->redispatch_after = atol(args[2]);
+				}
+				break;
+			case KWM_NO:
+				curproxy->no_options |= PR_O_REDISP;
+				curproxy->redispatch_after = 0;
+				break;
+			case KWM_DEF: /* already cleared */
+				break;
+			}
+			goto out;
 		}
 
 		if (kwm != KWM_STD) {
@@ -4091,10 +4342,12 @@ stats_error_parsing:
 					curproxy->options2 |= PR_O2_CLFLOG;
 					logformat = clf_http_log_format;
 				} else {
-					Alert("parsing [%s:%d] : keyword '%s' only supports option 'clf'.\n", file, linenum, args[2]);
+					Alert("parsing [%s:%d] : keyword '%s' only supports option 'clf'.\n", file, linenum, args[1]);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
+				if (alertif_too_many_args_idx(1, 1, file, linenum, args, &err_code))
+					goto out;
 			}
 			if (curproxy->conf.logformat_string != default_http_log_format &&
 			    curproxy->conf.logformat_string != default_tcp_log_format &&
@@ -4117,11 +4370,17 @@ stats_error_parsing:
 			free(curproxy->conf.lfs_file);
 			curproxy->conf.lfs_file = strdup(curproxy->conf.args.file);
 			curproxy->conf.lfs_line = curproxy->conf.args.line;
+
+			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+				goto out;
 		}
 		else if (!strcmp(args[1], "tcpka")) {
-			/* enable TCP keep-alives on client and server sessions */
+			/* enable TCP keep-alives on client and server streams */
 			if (warnifnotcap(curproxy, PR_CAP_BE | PR_CAP_FE, file, linenum, args[1], NULL))
 				err_code |= ERR_WARN;
+
+			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+				goto out;
 
 			if (curproxy->cap & PR_CAP_FE)
 				curproxy->options |= PR_O_TCP_CLI_KA;
@@ -4156,6 +4415,8 @@ stats_error_parsing:
 				curproxy->check_len = snprintf(curproxy->check_req, reqlen,
 							       "%s %s %s\r\n", args[2], args[3], *args[4]?args[4]:"HTTP/1.0");
 			}
+			if (alertif_too_many_args_idx(3, 1, file, linenum, args, &err_code))
+				goto out;
 		}
 		else if (!strcmp(args[1], "ssl-hello-chk")) {
 			/* use SSLv3 CLIENT HELLO to check servers' health */
@@ -4166,6 +4427,9 @@ stats_error_parsing:
 			curproxy->check_req = NULL;
 			curproxy->options2 &= ~PR_O2_CHK_ANY;
 			curproxy->options2 |= PR_O2_SSL3_CHK;
+
+			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+				goto out;
 		}
 		else if (!strcmp(args[1], "smtpchk")) {
 			/* use SMTP request to check servers' health */
@@ -4190,6 +4454,8 @@ stats_error_parsing:
 					curproxy->check_len = strlen(DEF_SMTP_CHECK_REQ);
 				}
 			}
+			if (alertif_too_many_args_idx(2, 1, file, linenum, args, &err_code))
+				goto out;
 		}
 		else if (!strcmp(args[1], "pgsql-check")) {
 			/* use PostgreSQL request to check servers' health */
@@ -4248,6 +4514,8 @@ stats_error_parsing:
 					}
 				} /* end while loop */
 			}
+			if (alertif_too_many_args_idx(2, 1, file, linenum, args, &err_code))
+				goto out;
 		}
 
 		else if (!strcmp(args[1], "redis-check")) {
@@ -4263,6 +4531,9 @@ stats_error_parsing:
 			curproxy->check_req = (char *) malloc(sizeof(DEF_REDIS_CHECK_REQ) - 1);
 			memcpy(curproxy->check_req, DEF_REDIS_CHECK_REQ, sizeof(DEF_REDIS_CHECK_REQ) - 1);
 			curproxy->check_len = sizeof(DEF_REDIS_CHECK_REQ) - 1;
+
+			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+				goto out;
 		}
 
 		else if (!strcmp(args[1], "mysql-check")) {
@@ -4392,6 +4663,8 @@ stats_error_parsing:
 			curproxy->check_req = (char *) malloc(sizeof(DEF_LDAP_CHECK_REQ) - 1);
 			memcpy(curproxy->check_req, DEF_LDAP_CHECK_REQ, sizeof(DEF_LDAP_CHECK_REQ) - 1);
 			curproxy->check_len = sizeof(DEF_LDAP_CHECK_REQ) - 1;
+			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+				goto out;
 		}
 		else if (!strcmp(args[1], "tcp-check")) {
 			/* use raw TCPCHK send/expect to check servers' health */
@@ -4402,6 +4675,8 @@ stats_error_parsing:
 			curproxy->check_req = NULL;
 			curproxy->options2 &= ~PR_O2_CHK_ANY;
 			curproxy->options2 |= PR_O2_TCPCHK_CHK;
+			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+				goto out;
 		}
 		else if (!strcmp(args[1], "external-check")) {
 			/* excute an external command to check servers' health */
@@ -4409,6 +4684,8 @@ stats_error_parsing:
 			curproxy->check_req = NULL;
 			curproxy->options2 &= ~PR_O2_CHK_ANY;
 			curproxy->options2 |= PR_O2_EXT_CHK;
+			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+				goto out;
 		}
 		else if (!strcmp(args[1], "forwardfor")) {
 			int cur_arg;
@@ -4527,6 +4804,9 @@ stats_error_parsing:
 		}
 		free(curproxy->defbe.name);
 		curproxy->defbe.name = strdup(args[1]);
+
+		if (alertif_too_many_args_idx(1, 0, file, linenum, args, &err_code))
+			goto out;
 	}
 	else if (!strcmp(args[0], "redispatch") || !strcmp(args[0], "redisp")) {
 		if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], NULL))
@@ -4538,6 +4818,9 @@ stats_error_parsing:
 		err_code |= ERR_WARN;
 		/* enable reconnections to dispatch */
 		curproxy->options |= PR_O_REDISP;
+
+		if (alertif_too_many_args_idx(1, 0, file, linenum, args, &err_code))
+			goto out;
 	}
 	else if (!strcmp(args[0], "http-check")) {
 		if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], NULL))
@@ -4546,10 +4829,14 @@ stats_error_parsing:
 		if (strcmp(args[1], "disable-on-404") == 0) {
 			/* enable a graceful server shutdown on an HTTP 404 response */
 			curproxy->options |= PR_O_DISABLE404;
+			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+				goto out;
 		}
 		else if (strcmp(args[1], "send-state") == 0) {
 			/* enable emission of the apparent state of a server in HTTP checks */
 			curproxy->options2 |= PR_O2_CHK_SNDST;
+			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+				goto out;
 		}
 		else if (strcmp(args[1], "expect") == 0) {
 			const char *ptr_arg;
@@ -4664,22 +4951,45 @@ stats_error_parsing:
 		if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], NULL))
 			err_code |= ERR_WARN;
 
-		if (strcmp(args[1], "connect") == 0) {
+		if (strcmp(args[1], "comment") == 0) {
+			int cur_arg;
+			struct tcpcheck_rule *tcpcheck;
+
+			cur_arg = 1;
+			tcpcheck = (struct tcpcheck_rule *)calloc(1, sizeof(*tcpcheck));
+			tcpcheck->action = TCPCHK_ACT_COMMENT;
+
+			if (!*args[cur_arg + 1]) {
+				Alert("parsing [%s:%d] : '%s' expects a comment string.\n",
+					file, linenum, args[cur_arg]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+
+			tcpcheck->comment = strdup(args[cur_arg + 1]);
+
+			LIST_ADDQ(&curproxy->tcpcheck_rules, &tcpcheck->list);
+			if (alertif_too_many_args_idx(1, 1, file, linenum, args, &err_code))
+				goto out;
+		}
+		else if (strcmp(args[1], "connect") == 0) {
 			const char *ptr_arg;
 			int cur_arg;
 			struct tcpcheck_rule *tcpcheck;
-			struct list *l;
 
 			/* check if first rule is also a 'connect' action */
-			l = (struct list *)&curproxy->tcpcheck_rules;
-			if (l->p != l->n) {
-				tcpcheck = (struct tcpcheck_rule *)l->n;
-				if (tcpcheck && tcpcheck->action != TCPCHK_ACT_CONNECT) {
-					Alert("parsing [%s:%d] : first step MUST also be a 'connect' when there is a 'connect' step in the tcp-check ruleset.\n",
-					      file, linenum);
-					err_code |= ERR_ALERT | ERR_FATAL;
-					goto out;
-				}
+			tcpcheck = LIST_NEXT(&curproxy->tcpcheck_rules, struct tcpcheck_rule *, list);
+			while (&tcpcheck->list != &curproxy->tcpcheck_rules &&
+			       tcpcheck->action == TCPCHK_ACT_COMMENT) {
+				tcpcheck = LIST_NEXT(&tcpcheck->list, struct tcpcheck_rule *, list);
+			}
+
+			if (&tcpcheck->list != &curproxy->tcpcheck_rules
+			    && tcpcheck->action != TCPCHK_ACT_CONNECT) {
+				Alert("parsing [%s:%d] : first step MUST also be a 'connect' when there is a 'connect' step in the tcp-check ruleset.\n",
+				      file, linenum);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
 			}
 
 			cur_arg = 2;
@@ -4712,11 +5022,22 @@ stats_error_parsing:
 					cur_arg++;
 				}
 #endif /* USE_OPENSSL */
+				/* comment for this tcpcheck line */
+				else if (strcmp(args[cur_arg], "comment") == 0) {
+					if (!*args[cur_arg + 1]) {
+						Alert("parsing [%s:%d] : '%s' expects a comment string.\n",
+							file, linenum, args[cur_arg]);
+						err_code |= ERR_ALERT | ERR_FATAL;
+						goto out;
+					}
+					tcpcheck->comment = strdup(args[cur_arg + 1]);
+					cur_arg += 2;
+				}
 				else {
 #ifdef USE_OPENSSL
-					Alert("parsing [%s:%d] : '%s %s' expects 'port', 'send-proxy' or 'ssl' but got '%s' as argument.\n",
+					Alert("parsing [%s:%d] : '%s %s' expects 'comment', 'port', 'send-proxy' or 'ssl' but got '%s' as argument.\n",
 #else /* USE_OPENSSL */
-					Alert("parsing [%s:%d] : '%s %s' expects 'port', 'send-proxy' or but got '%s' as argument.\n",
+					Alert("parsing [%s:%d] : '%s %s' expects 'comment', 'port', 'send-proxy' or but got '%s' as argument.\n",
 #endif /* USE_OPENSSL */
 					      file, linenum, args[0], args[1], args[cur_arg]);
 					err_code |= ERR_ALERT | ERR_FATAL;
@@ -4744,6 +5065,17 @@ stats_error_parsing:
 				tcpcheck->string = strdup(args[2]);
 				tcpcheck->expect_regex = NULL;
 
+				/* comment for this tcpcheck line */
+				if (strcmp(args[3], "comment") == 0) {
+					if (!*args[4]) {
+						Alert("parsing [%s:%d] : '%s' expects a comment string.\n",
+							file, linenum, args[3]);
+						err_code |= ERR_ALERT | ERR_FATAL;
+						goto out;
+					}
+					tcpcheck->comment = strdup(args[4]);
+				}
+
 				LIST_ADDQ(&curproxy->tcpcheck_rules, &tcpcheck->list);
 			}
 		}
@@ -4768,6 +5100,17 @@ stats_error_parsing:
 					goto out;
 				}
 				tcpcheck->expect_regex = NULL;
+
+				/* comment for this tcpcheck line */
+				if (strcmp(args[3], "comment") == 0) {
+					if (!*args[4]) {
+						Alert("parsing [%s:%d] : '%s' expects a comment string.\n",
+							file, linenum, args[3]);
+						err_code |= ERR_ALERT | ERR_FATAL;
+						goto out;
+					}
+					tcpcheck->comment = strdup(args[4]);
+				}
 
 				LIST_ADDQ(&curproxy->tcpcheck_rules, &tcpcheck->list);
 			}
@@ -4820,6 +5163,18 @@ stats_error_parsing:
 				tcpcheck->expect_regex = NULL;
 				tcpcheck->inverse = inverse;
 
+				/* tcpcheck comment */
+				cur_arg += 2;
+				if (strcmp(args[cur_arg], "comment") == 0) {
+					if (!*args[cur_arg + 1]) {
+						Alert("parsing [%s:%d] : '%s' expects a comment string.\n",
+							file, linenum, args[cur_arg + 1]);
+						err_code |= ERR_ALERT | ERR_FATAL;
+						goto out;
+					}
+					tcpcheck->comment = strdup(args[cur_arg + 1]);
+				}
+
 				LIST_ADDQ(&curproxy->tcpcheck_rules, &tcpcheck->list);
 			}
 			else if (strcmp(ptr_arg, "string") == 0) {
@@ -4839,6 +5194,18 @@ stats_error_parsing:
 				tcpcheck->string = strdup(args[cur_arg + 1]);
 				tcpcheck->expect_regex = NULL;
 				tcpcheck->inverse = inverse;
+
+				/* tcpcheck comment */
+				cur_arg += 2;
+				if (strcmp(args[cur_arg], "comment") == 0) {
+					if (!*args[cur_arg + 1]) {
+						Alert("parsing [%s:%d] : '%s' expects a comment string.\n",
+							file, linenum, args[cur_arg + 1]);
+						err_code |= ERR_ALERT | ERR_FATAL;
+						goto out;
+					}
+					tcpcheck->comment = strdup(args[cur_arg + 1]);
+				}
 
 				LIST_ADDQ(&curproxy->tcpcheck_rules, &tcpcheck->list);
 			}
@@ -4868,6 +5235,18 @@ stats_error_parsing:
 				}
 				tcpcheck->inverse = inverse;
 
+				/* tcpcheck comment */
+				cur_arg += 2;
+				if (strcmp(args[cur_arg], "comment") == 0) {
+					if (!*args[cur_arg + 1]) {
+						Alert("parsing [%s:%d] : '%s' expects a comment string.\n",
+							file, linenum, args[cur_arg + 1]);
+						err_code |= ERR_ALERT | ERR_FATAL;
+						goto out;
+					}
+					tcpcheck->comment = strdup(args[cur_arg + 1]);
+				}
+
 				LIST_ADDQ(&curproxy->tcpcheck_rules, &tcpcheck->list);
 			}
 			else {
@@ -4878,7 +5257,7 @@ stats_error_parsing:
 			}
 		}
 		else {
-			Alert("parsing [%s:%d] : '%s' only supports 'connect', 'send' or 'expect'.\n", file, linenum, args[0]);
+			Alert("parsing [%s:%d] : '%s' only supports 'comment', 'connect', 'send' or 'expect'.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
@@ -4920,6 +5299,8 @@ stats_error_parsing:
 	else if (!strcmp(args[0], "transparent")) {
 		/* enable transparent proxy connections */
 		curproxy->options |= PR_O_TRANSP;
+		if (alertif_too_many_args(0, file, linenum, args, &err_code))
+			goto out;
 	}
 #endif
 	else if (!strcmp(args[0], "maxconn")) {  /* maxconn */
@@ -4932,6 +5313,8 @@ stats_error_parsing:
 			goto out;
 		}
 		curproxy->maxconn = atol(args[1]);
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 	}
 	else if (!strcmp(args[0], "backlog")) {  /* backlog */
 		if (warnifnotcap(curproxy, PR_CAP_FE, file, linenum, args[0], NULL))
@@ -4943,6 +5326,8 @@ stats_error_parsing:
 			goto out;
 		}
 		curproxy->backlog = atol(args[1]);
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 	}
 	else if (!strcmp(args[0], "fullconn")) {  /* fullconn */
 		if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], " Maybe you want 'maxconn' instead ?"))
@@ -4954,6 +5339,8 @@ stats_error_parsing:
 			goto out;
 		}
 		curproxy->fullconn = atol(args[1]);
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 	}
 	else if (!strcmp(args[0], "grace")) {  /* grace time (ms) */
 		if (*(args[1]) == 0) {
@@ -4969,6 +5356,8 @@ stats_error_parsing:
 			goto out;
 		}
 		curproxy->grace = val;
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 	}
 	else if (!strcmp(args[0], "dispatch")) {  /* dispatch address */
 		struct sockaddr_storage *sk;
@@ -5011,6 +5400,9 @@ stats_error_parsing:
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
+
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 
 		curproxy->dispatch_addr = *sk;
 		curproxy->options |= PR_O_DISPATCH;
@@ -5218,6 +5610,9 @@ stats_error_parsing:
 				global.max_syslog_len = logsrv->maxlen;
 				logline = realloc(logline, global.max_syslog_len + 1);
 			}
+
+			if (alertif_too_many_args_idx(3, arg + 1, file, linenum, args, &err_code))
+				goto out;
 
 			logsrv->facility = get_log_facility(args[arg+2]);
 			if (logsrv->facility < 0) {
@@ -5514,26 +5909,6 @@ stats_error_parsing:
 						   args[0], args[1], NULL, (const char **)args+2);
 		if (err_code & ERR_FATAL)
 			goto out;
-	}
-	else if (!strcmp(args[0], "reqsetbe")) { /* switch the backend from a regex, respecting case */
-		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   SMP_OPT_DIR_REQ, ACT_SETBE, 0,
-						   args[0], args[1], args[2], (const char **)args+3);
-		if (err_code & ERR_FATAL)
-			goto out;
-
-		if (!already_warned(WARN_REQSETBE_DEPRECATED))
-			Warning("parsing [%s:%d] : The '%s' directive is now deprecated in favor of the more efficient 'use_backend' which uses a different but more powerful syntax. Future versions will not support '%s' anymore, you should convert it now!\n", file, linenum, args[0], args[0]);
-	}
-	else if (!strcmp(args[0], "reqisetbe")) { /* switch the backend from a regex, ignoring case */
-		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   SMP_OPT_DIR_REQ, ACT_SETBE, REG_ICASE,
-						   args[0], args[1], args[2], (const char **)args+3);
-		if (err_code & ERR_FATAL)
-			goto out;
-
-		if (!already_warned(WARN_REQSETBE_DEPRECATED))
-			Warning("parsing [%s:%d] : The '%s' directive is now deprecated in favor of the more efficient 'use_backend' which uses a different but more powerful syntax. Future versions will not support '%s' anymore, you should convert it now!\n", file, linenum, args[0], args[0]);
 	}
 	else if (!strcmp(args[0], "reqirep")) {  /* replace request header from a regex, ignoring case */
 		if (*(args[2]) == 0) {
@@ -5979,6 +6354,8 @@ cfg_parse_users(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
 
 		err = invalid_char(args[1]);
 		if (err) {
@@ -6033,6 +6410,9 @@ cfg_parse_users(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
+		if (!userlist)
+			goto out;
+
 		for (ag = userlist->groups; ag; ag = ag->next)
 			if (!strcmp(ag->name, args[1])) {
 				Warning("parsing [%s:%d]: ignoring duplicated group '%s' in userlist '%s'.\n",
@@ -6083,6 +6463,8 @@ cfg_parse_users(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
+		if (!userlist)
+			goto out;
 
 		for (newuser = userlist->users; newuser; newuser = newuser->next)
 			if (!strcmp(newuser->user, args[1])) {
@@ -6160,18 +6542,24 @@ out:
  */
 int readcfgfile(const char *file)
 {
-	char thisline[LINESIZE];
+	char *thisline;
+	int linesize = LINESIZE;
 	FILE *f;
 	int linenum = 0;
 	int err_code = 0;
 	struct cfg_section *cs = NULL;
 	struct cfg_section *ics;
+	int readbytes = 0;
+
+	if ((thisline = malloc(sizeof(*thisline) * linesize)) == NULL) {
+		Alert("parsing [%s] : out of memory.\n", file);
+		return -1;
+	}
 
 	/* Register internal sections */
 	if (!cfg_register_section("listen",   cfg_parse_listen) ||
 	    !cfg_register_section("frontend", cfg_parse_listen) ||
 	    !cfg_register_section("backend",  cfg_parse_listen) ||
-	    !cfg_register_section("ruleset",  cfg_parse_listen) ||
 	    !cfg_register_section("defaults", cfg_parse_listen) ||
 	    !cfg_register_section("global",   cfg_parse_global) ||
 	    !cfg_register_section("userlist", cfg_parse_users)  ||
@@ -6183,37 +6571,70 @@ int readcfgfile(const char *file)
 	if ((f=fopen(file,"r")) == NULL)
 		return -1;
 
-	while (fgets(thisline, sizeof(thisline), f) != NULL) {
+next_line:
+	while (fgets(thisline + readbytes, linesize - readbytes, f) != NULL) {
 		int arg, kwm = KWM_STD;
 		char *end;
 		char *args[MAX_LINE_ARGS + 1];
 		char *line = thisline;
+		int dquote = 0;  /* double quote */
+		int squote = 0;  /* simple quote */
 
 		linenum++;
 
 		end = line + strlen(line);
 
-		if (end-line == sizeof(thisline)-1 && *(end-1) != '\n') {
+		if (end-line == linesize-1 && *(end-1) != '\n') {
 			/* Check if we reached the limit and the last char is not \n.
 			 * Watch out for the last line without the terminating '\n'!
 			 */
-			Alert("parsing [%s:%d]: line too long, limit: %d.\n",
-			      file, linenum, (int)sizeof(thisline)-1);
-			err_code |= ERR_ALERT | ERR_FATAL;
+			char *newline;
+			int newlinesize = linesize * 2;
+
+			newline = realloc(thisline, sizeof(*thisline) * newlinesize);
+			if (newline == NULL) {
+				Alert("parsing [%s:%d]: line too long, cannot allocate memory.\n",
+				      file, linenum);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				continue;
+			}
+
+			readbytes = linesize - 1;
+			linesize = newlinesize;
+			thisline = newline;
+			continue;
 		}
+
+		readbytes = 0;
 
 		/* skip leading spaces */
 		while (isspace((unsigned char)*line))
 			line++;
-	
+
 		arg = 0;
 		args[arg] = line;
 
 		while (*line && arg < MAX_LINE_ARGS) {
+			if (*line == '"' && !squote) {  /* double quote outside single quotes */
+				if (dquote)
+					dquote = 0;
+				else
+					dquote = 1;
+				memmove(line, line + 1, end - line);
+				end--;
+			}
+			else if (*line == '\'' && !dquote) { /* single quote outside double quotes */
+				if (squote)
+					squote = 0;
+				else
+					squote = 1;
+				memmove(line, line + 1, end - line);
+				end--;
+			}
+			else if (*line == '\\' && !squote) {
 			/* first, we'll replace \\, \<space>, \#, \r, \n, \t, \xXX with their
 			 * C equivalent value. Other combinations left unchanged (eg: \1).
 			 */
-			if (*line == '\\') {
 				int skip = 0;
 				if (line[1] == ' ' || line[1] == '\\' || line[1] == '#') {
 					*line = line[1];
@@ -6222,7 +6643,7 @@ int readcfgfile(const char *file)
 				else if (line[1] == 'r') {
 					*line = '\r';
 					skip = 1;
-				} 
+				}
 				else if (line[1] == 'n') {
 					*line = '\n';
 					skip = 1;
@@ -6245,6 +6666,15 @@ int readcfgfile(const char *file)
 						Alert("parsing [%s:%d] : invalid or incomplete '\\x' sequence in '%s'.\n", file, linenum, args[0]);
 						err_code |= ERR_ALERT | ERR_FATAL;
 					}
+				} else if (line[1] == '"') {
+					*line = '"';
+					skip = 1;
+				} else if (line[1] == '\'') {
+					*line = '\'';
+					skip = 1;
+				} else if (line[1] == '$' && dquote) { /* escaping of $ only inside double quotes */
+					*line = '$';
+					skip = 1;
 				}
 				if (skip) {
 					memmove(line + 1, line + 1 + skip, end - (line + skip));
@@ -6252,21 +6682,115 @@ int readcfgfile(const char *file)
 				}
 				line++;
 			}
-			else if (*line == '#' || *line == '\n' || *line == '\r') {
+			else if ((!squote && !dquote && *line == '#') || *line == '\n' || *line == '\r') {
 				/* end of string, end of loop */
 				*line = 0;
 				break;
 			}
-			else if (isspace((unsigned char)*line)) {
+			else if (!squote && !dquote && isspace((unsigned char)*line)) {
 				/* a non-escaped space is an argument separator */
 				*line++ = '\0';
 				while (isspace((unsigned char)*line))
 					line++;
 				args[++arg] = line;
 			}
+			else if (dquote && *line == '$') {
+				/* environment variables are evaluated inside double quotes */
+				char *var_beg;
+				char *var_end;
+				char save_char;
+				char *value;
+				int val_len;
+				int newlinesize;
+				int braces = 0;
+
+				var_beg = line + 1;
+				var_end = var_beg;
+
+				if (*var_beg == '{') {
+					var_beg++;
+					var_end++;
+					braces = 1;
+				}
+
+				if (!isalpha((int)(unsigned char)*var_beg) && *var_beg != '_') {
+					Alert("parsing [%s:%d] : Variable expansion: Unrecognized character '%c' in variable name.\n", file, linenum, *var_beg);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto next_line; /* skip current line */
+				}
+
+				while (isalnum((int)(unsigned char)*var_end) || *var_end == '_')
+					var_end++;
+
+				save_char = *var_end;
+				*var_end = '\0';
+				value = getenv(var_beg);
+				*var_end = save_char;
+				val_len = value ? strlen(value) : 0;
+
+				if (braces) {
+					if (*var_end == '}') {
+						var_end++;
+						braces = 0;
+					} else {
+						Alert("parsing [%s:%d] : Variable expansion: Mismatched braces.\n", file, linenum);
+						err_code |= ERR_ALERT | ERR_FATAL;
+						goto next_line; /* skip current line */
+					}
+				}
+
+				newlinesize = (end - thisline) - (var_end - line) + val_len + 1;
+
+				/* if not enough space in thisline */
+				if (newlinesize  > linesize) {
+					char *newline;
+
+					newline = realloc(thisline, newlinesize * sizeof(*thisline));
+					if (newline == NULL) {
+						Alert("parsing [%s:%d] : Variable expansion: Not enough memory.\n", file, linenum);
+						err_code |= ERR_ALERT | ERR_FATAL;
+						goto next_line; /* slip current line */
+					}
+					/* recompute pointers if realloc returns a new pointer */
+					if (newline != thisline) {
+						int i;
+						int diff;
+
+						for (i = 0; i <= arg; i++) {
+							diff = args[i] - thisline;
+							args[i] = newline + diff;
+						}
+
+						diff = var_end - thisline;
+						var_end = newline + diff;
+						diff = end - thisline;
+						end = newline + diff;
+						diff = line - thisline;
+						line = newline + diff;
+						thisline = newline;
+					}
+					linesize = newlinesize;
+				}
+
+				/* insert value inside the line */
+				memmove(line + val_len, var_end, end - var_end + 1);
+				memcpy(line, value, val_len);
+				end += val_len - (var_end - line);
+				line += val_len;
+			}
 			else {
 				line++;
 			}
+		}
+
+		if (dquote) {
+			Alert("parsing [%s:%d] : Mismatched double quotes.\n", file, linenum);
+			err_code |= ERR_ALERT | ERR_FATAL;
+		}
+
+		if (squote) {
+			Alert("parsing [%s:%d] : Mismatched simple quotes.\n", file, linenum);
+			err_code |= ERR_ALERT | ERR_FATAL;
 		}
 
 		/* empty line */
@@ -6339,6 +6863,7 @@ int readcfgfile(const char *file)
 			break;
 	}
 	cursection = NULL;
+	free(thisline);
 	fclose(f);
 	return err_code;
 }
@@ -6347,7 +6872,7 @@ int readcfgfile(const char *file)
  * that it is always guaranteed that a backend pointed to by a frontend is
  * bound to all of its processes. After that, if the target is a "listen"
  * instance, the function recursively descends the target's own targets along
- * default_backend, use_backend rules, and reqsetbe rules. Since the bits are
+ * default_backend and use_backend rules. Since the bits are
  * checked first to ensure that <to> is already bound to all processes of
  * <from>, there is no risk of looping and we ensure to follow the shortest
  * path to the destination.
@@ -6361,7 +6886,6 @@ int readcfgfile(const char *file)
 void propagate_processes(struct proxy *from, struct proxy *to)
 {
 	struct switching_rule *rule;
-	struct hdr_exp *exp;
 
 	if (to) {
 		/* check whether we need to go down */
@@ -6394,14 +6918,6 @@ void propagate_processes(struct proxy *from, struct proxy *to)
 		if (rule->dynamic)
 			continue;
 		to = rule->be.backend;
-		propagate_processes(from, to);
-	}
-
-	/* reqsetbe */
-	for (exp = from->req_exp; exp != NULL; exp = exp->next) {
-		if (exp->action != ACT_SETBE)
-			continue;
-		to = (struct proxy *)exp->replace;
 		propagate_processes(from, to);
 	}
 }
@@ -6481,6 +6997,8 @@ int check_config_validity()
 		if (curproxy->state == PR_STSTOPPED) {
 			/* ensure we don't keep listeners uselessly bound */
 			stop_proxy(curproxy);
+			free((void *)curproxy->table.peers.name);
+			curproxy->table.peers.p = NULL;
 			continue;
 		}
 
@@ -6528,12 +7046,6 @@ int check_config_validity()
 					curproxy->id, bind_conf->arg, bind_conf->file, bind_conf->line);
 				bind_conf->bind_proc = 0;
 			}
-		}
-
-		if (global.nbproc > 1 && curproxy->table.peers.name) {
-			Alert("Proxy '%s': peers can't be used in multi-process mode (nbproc > 1).\n",
-			      curproxy->id);
-			cfgerr++;
 		}
 
 		switch (curproxy->mode) {
@@ -6672,7 +7184,7 @@ int check_config_validity()
 		if (curproxy->defbe.name) {
 			struct proxy *target;
 
-			target = findproxy_mode(curproxy->defbe.name, curproxy->mode, PR_CAP_BE);
+			target = proxy_be_by_name(curproxy->defbe.name);
 			if (!target) {
 				Alert("Proxy '%s': unable to find required default_backend: '%s'.\n",
 					curproxy->id, curproxy->defbe.name);
@@ -6680,6 +7192,15 @@ int check_config_validity()
 			} else if (target == curproxy) {
 				Alert("Proxy '%s': loop detected for default_backend: '%s'.\n",
 					curproxy->id, curproxy->defbe.name);
+				cfgerr++;
+			} else if (target->mode != curproxy->mode &&
+				   !(curproxy->mode == PR_MODE_TCP && target->mode == PR_MODE_HTTP)) {
+
+				Alert("%s %s '%s' (%s:%d) tries to use incompatible %s %s '%s' (%s:%d) as its default backend (see 'mode').\n",
+				      proxy_mode_str(curproxy->mode), proxy_type_str(curproxy), curproxy->id,
+				      curproxy->conf.file, curproxy->conf.line,
+				      proxy_mode_str(target->mode), proxy_type_str(target), target->id,
+				      target->conf.file, target->conf.line);
 				cfgerr++;
 			} else {
 				free(curproxy->defbe.name);
@@ -6690,32 +7211,6 @@ int check_config_validity()
 					Warning("In proxy '%s', the 'default_backend' rule always has precedence over the servers, which will never be used.\n",
 						curproxy->id);
 					err_code |= ERR_WARN;
-				}
-			}
-		}
-
-		/* find the target proxy in setbe */
-		if (curproxy->mode == PR_MODE_HTTP && curproxy->req_exp != NULL) {
-			/* map jump target for ACT_SETBE in req_rep chain */ 
-			struct hdr_exp *exp;
-			for (exp = curproxy->req_exp; exp != NULL; exp = exp->next) {
-				struct proxy *target;
-
-				if (exp->action != ACT_SETBE)
-					continue;
-
-				target = findproxy_mode(exp->replace, PR_MODE_HTTP, PR_CAP_BE);
-				if (!target) {
-					Alert("Proxy '%s': unable to find required setbe: '%s'.\n",
-						curproxy->id, exp->replace);
-					cfgerr++;
-				} else if (target == curproxy) {
-					Alert("Proxy '%s': loop detected for setbe: '%s'.\n",
-						curproxy->id, exp->replace);
-					cfgerr++;
-				} else {
-					free((void *)exp->replace);
-					exp->replace = (const char *)target;
 				}
 			}
 		}
@@ -6751,8 +7246,7 @@ int check_config_validity()
 			rule->dynamic = 0;
 			rule->be.name = pxname;
 
-			target = findproxy_mode(rule->be.name, curproxy->mode, PR_CAP_BE);
-
+			target = proxy_be_by_name(rule->be.name);
 			if (!target) {
 				Alert("Proxy '%s': unable to find required use_backend: '%s'.\n",
 					curproxy->id, rule->be.name);
@@ -6760,6 +7254,15 @@ int check_config_validity()
 			} else if (target == curproxy) {
 				Alert("Proxy '%s': loop detected for use_backend: '%s'.\n",
 					curproxy->id, rule->be.name);
+				cfgerr++;
+			} else if (target->mode != curproxy->mode &&
+				   !(curproxy->mode == PR_MODE_TCP && target->mode == PR_MODE_HTTP)) {
+
+				Alert("%s %s '%s' (%s:%d) tries to use incompatible %s %s '%s' (%s:%d) in a 'use_backend' rule (see 'mode').\n",
+				      proxy_mode_str(curproxy->mode), proxy_type_str(curproxy), curproxy->id,
+				      curproxy->conf.file, curproxy->conf.line,
+				      proxy_mode_str(target->mode), proxy_type_str(target), target->id,
+				      target->conf.file, target->conf.line);
 				cfgerr++;
 			} else {
 				free((void *)rule->be.name);
@@ -6790,7 +7293,7 @@ int check_config_validity()
 				curproxy->be_rsp_ana |= AN_RES_STORE_RULES;
 
 			if (mrule->table.name)
-				target = findproxy(mrule->table.name, 0);
+				target = proxy_tbl_by_name(mrule->table.name);
 			else
 				target = curproxy;
 
@@ -6823,7 +7326,7 @@ int check_config_validity()
 			curproxy->be_rsp_ana |= AN_RES_STORE_RULES;
 
 			if (mrule->table.name)
-				target = findproxy(mrule->table.name, 0);
+				target = proxy_tbl_by_name(mrule->table.name);
 			else
 				target = curproxy;
 
@@ -6857,7 +7360,7 @@ int check_config_validity()
 				continue;
 
 			if (trule->act_prm.trk_ctr.table.n)
-				target = findproxy(trule->act_prm.trk_ctr.table.n, 0);
+				target = proxy_tbl_by_name(trule->act_prm.trk_ctr.table.n);
 			else
 				target = curproxy;
 
@@ -6896,7 +7399,7 @@ int check_config_validity()
 				continue;
 
 			if (trule->act_prm.trk_ctr.table.n)
-				target = findproxy(trule->act_prm.trk_ctr.table.n, 0);
+				target = proxy_tbl_by_name(trule->act_prm.trk_ctr.table.n);
 			else
 				target = curproxy;
 
@@ -6935,7 +7438,7 @@ int check_config_validity()
 				continue;
 
 			if (hrqrule->act_prm.trk_ctr.table.n)
-				target = findproxy(hrqrule->act_prm.trk_ctr.table.n, 0);
+				target = proxy_tbl_by_name(hrqrule->act_prm.trk_ctr.table.n);
 			else
 				target = curproxy;
 
@@ -6993,6 +7496,10 @@ int check_config_validity()
 				free((void *)curproxy->table.peers.name);
 				curproxy->table.peers.p = NULL;
 				cfgerr++;
+			}
+			else if (curpeers->state == PR_STSTOPPED) {
+				/* silently disable this peers section */
+				curproxy->table.peers.p = NULL;
 			}
 			else if (!curpeers->peers_fe) {
 				Alert("Proxy '%s': unable to find local peer '%s' in peers section '%s'.\n",
@@ -7285,7 +7792,7 @@ out_uri_auth_compat:
 				}
 
 				if (pname) {
-					px = findproxy(pname, PR_CAP_BE);
+					px = proxy_be_by_name(pname);
 					if (!px) {
 						Alert("config : %s '%s', server '%s': unable to find required proxy '%s' for tracking.\n",
 							proxy_type_str(curproxy), curproxy->id,
@@ -7587,23 +8094,23 @@ out_uri_auth_compat:
 		list_for_each_entry(bind_conf, &curproxy->conf.bind, by_fe) {
 			unsigned long mask;
 
-			mask = bind_conf->bind_proc ? bind_conf->bind_proc : ~0UL;
+			mask = bind_conf->bind_proc ? bind_conf->bind_proc : nbits(global.nbproc);
 			curproxy->bind_proc |= mask;
 		}
 
 		if (!curproxy->bind_proc)
-			curproxy->bind_proc = ~0UL;
+			curproxy->bind_proc = nbits(global.nbproc);
 	}
 
 	if (global.stats_fe) {
 		list_for_each_entry(bind_conf, &global.stats_fe->conf.bind, by_fe) {
 			unsigned long mask;
 
-			mask = bind_conf->bind_proc ? bind_conf->bind_proc : ~0UL;
+			mask = bind_conf->bind_proc ? bind_conf->bind_proc : nbits(global.nbproc);
 			global.stats_fe->bind_proc |= mask;
 		}
 		if (!global.stats_fe->bind_proc)
-			global.stats_fe->bind_proc = ~0UL;
+			global.stats_fe->bind_proc = nbits(global.nbproc);
 	}
 
 	/* propagate bindings from frontends to backends. Don't do it if there
@@ -7620,7 +8127,7 @@ out_uri_auth_compat:
 	for (curproxy = proxy; curproxy; curproxy = curproxy->next) {
 		if (curproxy->bind_proc)
 			continue;
-		curproxy->bind_proc = ~0UL;
+		curproxy->bind_proc = nbits(global.nbproc);
 	}
 
 	/*******************************************************/
@@ -7715,10 +8222,10 @@ out_uri_auth_compat:
 				listener->maxaccept = (listener->maxaccept + nbproc - 1) / nbproc;
 			}
 
-			listener->timeout = &curproxy->timeout.client;
-			listener->accept = session_accept;
-			listener->handler = process_session;
+			listener->accept = session_accept_fd;
+			listener->handler = process_stream;
 			listener->analysers |= curproxy->fe_req_ana;
+			listener->default_target = curproxy->default_target;
 
 			if (!LIST_ISEMPTY(&curproxy->tcp_req.l4_rules))
 				listener->options |= LI_O_TCP_RULES;
@@ -7743,7 +8250,11 @@ out_uri_auth_compat:
 			free(bind_conf->ciphers);
 			free(bind_conf->ecdhe);
 			free(bind_conf->crl_file);
-			free(bind_conf->tls_ticket_keys);
+			if(bind_conf->keys_ref) {
+				free(bind_conf->keys_ref->filename);
+				free(bind_conf->keys_ref->tlskeys);
+				free(bind_conf->keys_ref);
+			}
 #endif /* USE_OPENSSL */
 		}
 
@@ -7810,7 +8321,6 @@ out_uri_auth_compat:
 			 */
 			for (fe = proxy; fe; fe = fe->next) {
 				struct switching_rule *rule;
-				struct hdr_exp *exp;
 				int found = 0;
 
 				if (!(fe->cap & PR_CAP_FE))
@@ -7832,15 +8342,6 @@ out_uri_auth_compat:
 					}
 				}
 
-				/* check if a "reqsetbe" rule matches */
-				for (exp = fe->req_exp; !found && exp; exp = exp->next) {
-					if (exp->action == ACT_SETBE &&
-					    (struct proxy *)exp->replace == curproxy) {
-						found = 1;
-						break;
-					}
-				}
-
 				/* now we've checked all possible ways to reference a backend
 				 * from a frontend.
 				 */
@@ -7855,20 +8356,6 @@ out_uri_auth_compat:
 			curproxy->fullconn = (total + 9) / 10;
 			if (!curproxy->fullconn)
 				curproxy->fullconn = 1;
-		}
-	}
-
-	/* initialize stick-tables on backend capable proxies. This must not
-	 * be done earlier because the data size may be discovered while parsing
-	 * other proxies.
-	 */
-	for (curproxy = proxy; curproxy; curproxy = curproxy->next) {
-		if (curproxy->state == PR_STSTOPPED)
-			continue;
-
-		if (!stktable_init(&curproxy->table)) {
-			Alert("Proxy '%s': failed to initialize stick-table.\n", curproxy->id);
-			cfgerr++;
 		}
 	}
 
@@ -7888,25 +8375,52 @@ out_uri_auth_compat:
 				global.last_checks |= cfg_opts2[optnum].checks;
 	}
 
+	/* compute the required process bindings for the peers */
+	for (curproxy = proxy; curproxy; curproxy = curproxy->next)
+		if (curproxy->table.peers.p)
+			curproxy->table.peers.p->peers_fe->bind_proc |= curproxy->bind_proc;
+
 	if (peers) {
 		struct peers *curpeers = peers, **last;
 		struct peer *p, *pb;
 
-		/* Remove all peers sections which don't have a valid listener.
-		 * This can happen when a peers section is never referenced and
-		 * does not contain a local peer.
+		/* Remove all peers sections which don't have a valid listener,
+		 * which are not used by any table, or which are bound to more
+		 * than one process.
 		 */
 		last = &peers;
 		while (*last) {
 			curpeers = *last;
-			if (curpeers->peers_fe) {
+
+			if (curpeers->state == PR_STSTOPPED) {
+				/* the "disabled" keyword was present */
+				if (curpeers->peers_fe)
+					stop_proxy(curpeers->peers_fe);
+				curpeers->peers_fe = NULL;
+			}
+			else if (!curpeers->peers_fe) {
+				Warning("Removing incomplete section 'peers %s' (no peer named '%s').\n",
+					curpeers->id, localpeer);
+			}
+			else if (popcount(curpeers->peers_fe->bind_proc) != 1) {
+				/* either it's totally stopped or too much used */
+				if (curpeers->peers_fe->bind_proc) {
+					Alert("Peers section '%s': peers referenced by sections "
+					      "running in different processes (%d different ones). "
+					      "Check global.nbproc and all tables' bind-process "
+					      "settings.\n", curpeers->id, popcount(curpeers->peers_fe->bind_proc));
+					cfgerr++;
+				}
+				stop_proxy(curpeers->peers_fe);
+				curpeers->peers_fe = NULL;
+			}
+			else {
+				peers_init_sync(curpeers);
 				last = &curpeers->next;
 				continue;
 			}
 
-			Warning("Removing incomplete section 'peers %s' (no peer named '%s').\n",
-				curpeers->id, localpeer);
-
+			/* clean what has been detected above */
 			p = curpeers->remote;
 			while (p) {
 				pb = p->next;
@@ -7922,6 +8436,20 @@ out_uri_auth_compat:
 			curpeers = curpeers->next;
 			free(*last);
 			*last = curpeers;
+		}
+	}
+
+	/* initialize stick-tables on backend capable proxies. This must not
+	 * be done earlier because the data size may be discovered while parsing
+	 * other proxies.
+	 */
+	for (curproxy = proxy; curproxy; curproxy = curproxy->next) {
+		if (curproxy->state == PR_STSTOPPED)
+			continue;
+
+		if (!stktable_init(&curproxy->table)) {
+			Alert("Proxy '%s': failed to initialize stick-table.\n", curproxy->id);
+			cfgerr++;
 		}
 	}
 

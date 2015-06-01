@@ -37,17 +37,17 @@
 #define TX_CLALLOW	0x00000002	/* a client header matches an allow regex */
 #define TX_SVDENY	0x00000004	/* a server header matches a deny regex */
 #define TX_SVALLOW	0x00000008	/* a server header matches an allow regex */
-#define TX_CLTARPIT	0x00000010	/* the session is tarpitted (anti-dos) */
+#define TX_CLTARPIT	0x00000010	/* the transaction is tarpitted (anti-dos) */
 
 /* transaction flags dedicated to cookies : bits values 0x20 to 0x80 (0-7 shift 5) */
-#define TX_CK_NONE	0x00000000	/* this session had no cookie */
-#define TX_CK_INVALID	0x00000020	/* this session had a cookie which matches no server */
-#define TX_CK_DOWN	0x00000040	/* this session had cookie matching a down server */
-#define TX_CK_VALID	0x00000060	/* this session had cookie matching a valid server */
-#define TX_CK_EXPIRED	0x00000080	/* this session had an expired cookie (idle for too long) */
-#define TX_CK_OLD	0x000000A0	/* this session had too old a cookie (offered too long ago) */
-#define TX_CK_UNUSED	0x000000C0	/* this session had a cookie but it was not used (eg: use-server was preferred) */
-#define TX_CK_MASK	0x000000E0	/* mask to get this session's cookie flags */
+#define TX_CK_NONE	0x00000000	/* this transaction had no cookie */
+#define TX_CK_INVALID	0x00000020	/* this transaction had a cookie which matches no server */
+#define TX_CK_DOWN	0x00000040	/* this transaction had cookie matching a down server */
+#define TX_CK_VALID	0x00000060	/* this transaction had cookie matching a valid server */
+#define TX_CK_EXPIRED	0x00000080	/* this transaction had an expired cookie (idle for too long) */
+#define TX_CK_OLD	0x000000A0	/* this transaction had too old a cookie (offered too long ago) */
+#define TX_CK_UNUSED	0x000000C0	/* this transaction had a cookie but it was not used (eg: use-server was preferred) */
+#define TX_CK_MASK	0x000000E0	/* mask to get this transaction's cookie flags */
 #define TX_CK_SHIFT	5		/* bit shift */
 
 /* response cookie information, bits values 0x100 to 0x700 (0-7 shift 8) */
@@ -286,6 +286,7 @@ enum {
 	HTTP_RES_ACT_DEL_ACL,
 	HTTP_RES_ACT_DEL_MAP,
 	HTTP_RES_ACT_SET_MAP,
+	HTTP_RES_ACT_REDIR,
 	HTTP_RES_ACT_CUSTOM_STOP,  /* used for module keywords */
 	HTTP_RES_ACT_CUSTOM_CONT,  /* used for module keywords */
 	HTTP_RES_ACT_MAX /* must always be last */
@@ -309,7 +310,9 @@ enum {
 	HTTP_ERR_200 = 0,
 	HTTP_ERR_400,
 	HTTP_ERR_403,
+	HTTP_ERR_405,
 	HTTP_ERR_408,
+	HTTP_ERR_429,
 	HTTP_ERR_500,
 	HTTP_ERR_502,
 	HTTP_ERR_503,
@@ -357,7 +360,11 @@ enum {
  *  - next (parse pointer)   : next relative byte to be parsed. Always points
  *                             to a byte matching the current state.
  *
- *  - sol (start of line)    : start of current line before MSG_BODY, or zero.
+ *  - sol (start of line)    : start of current line before MSG_BODY. Starting
+ *                             from MSG_BODY, contains the length of the last
+ *                             parsed chunk size so that when added to sov it
+ *                             always points to the beginning of the current
+ *                             data chunk.
  *
  *  - eol (End of Line)      : Before HTTP_MSG_BODY, relative offset in the
  *                             buffer of the first byte which marks the end of
@@ -399,7 +406,6 @@ struct http_msg {
 	} sl;                                  /* start line */
 	unsigned long long chunk_len;          /* cache for last chunk size or content-length header value */
 	unsigned long long body_len;           /* total known length of the body, excluding encoding */
-	char **cap;                            /* array of captured headers (may be NULL) */
 };
 
 struct http_auth_data {
@@ -411,13 +417,14 @@ struct http_auth_data {
 
 struct proxy;
 struct http_txn;
-struct session;
+struct stream;
 
 struct http_req_rule {
 	struct list list;
 	struct acl_cond *cond;                 /* acl condition to meet */
 	unsigned int action;                   /* HTTP_REQ_* */
-	int (*action_ptr)(struct http_req_rule *rule, struct proxy *px, struct session *s, struct http_txn *http_txn);  /* ptr to custom action */
+	short deny_status;                     /* HTTP status to return to user when denying */
+	int (*action_ptr)(struct http_req_rule *rule, struct proxy *px, struct stream *s);  /* ptr to custom action */
 	union {
 		struct {
 			char *realm;
@@ -453,7 +460,7 @@ struct http_res_rule {
 	struct list list;
 	struct acl_cond *cond;                 /* acl condition to meet */
 	unsigned int action;                   /* HTTP_RES_* */
-	int (*action_ptr)(struct http_res_rule *rule, struct proxy *px, struct session *s, struct http_txn *http_txn);  /* ptr to custom action */
+	int (*action_ptr)(struct http_res_rule *rule, struct proxy *px, struct stream *s);  /* ptr to custom action */
 	union {
 		struct {
 			char *name;            /* header name */
@@ -461,6 +468,7 @@ struct http_res_rule {
 			struct list fmt;       /* log-format compatible expression */
 			struct my_regex re;    /* used by replace-header and replace-value */
 		} hdr_add;                     /* args used by "add-header" and "set-header" */
+		struct redirect_rule *redir;   /* redirect rule or "http-request redirect" */
 		int nice;                      /* nice value for HTTP_RES_ACT_SET_NICE */
 		int loglevel;                  /* log-level value for HTTP_RES_ACT_SET_LOGL */
 		int tos;                       /* tos value for HTTP_RES_ACT_SET_TOS */
@@ -471,6 +479,9 @@ struct http_res_rule {
 			struct list key;       /* pattern to retrieve MAP or ACL key */
 			struct list value;     /* pattern to retrieve MAP value */
 		} map;
+		struct {
+			void *p[4];
+		} act;                         /* generic pointers to be used by custom actions */
 	} arg;                                 /* arguments used by some actions */
 };
 
@@ -484,6 +495,7 @@ struct http_txn {
 	unsigned int flags;             /* transaction flags */
 	enum http_meth_t meth;          /* HTTP method */
 	/* 1 unused byte here */
+	short rule_deny_status;         /* HTTP status from rule when denying */
 	short status;                   /* HTTP status from the server, negative if from proxy */
 
 	char *uri;                      /* first line if log needed, NULL otherwise */
@@ -545,6 +557,8 @@ extern struct http_req_action_kw_list http_req_keywords;
 extern struct http_res_action_kw_list http_res_keywords;
 
 extern const struct http_method_name http_known_methods[HTTP_METH_OTHER];
+
+extern struct pool_head *pool2_http_txn;
 
 #endif /* _TYPES_PROTO_HTTP_H */
 

@@ -27,10 +27,11 @@
 #include <common/ticks.h>
 #include <common/time.h>
 
+#include <proto/applet.h>
 #include <proto/channel.h>
 #include <proto/connection.h>
 #include <proto/pipe.h>
-#include <proto/session.h>
+#include <proto/stream.h>
 #include <proto/stream_interface.h>
 #include <proto/task.h>
 
@@ -47,6 +48,11 @@ static void stream_int_shutr_conn(struct stream_interface *si);
 static void stream_int_shutw_conn(struct stream_interface *si);
 static void stream_int_chk_rcv_conn(struct stream_interface *si);
 static void stream_int_chk_snd_conn(struct stream_interface *si);
+static void stream_int_update_applet(struct stream_interface *si);
+static void stream_int_shutr_applet(struct stream_interface *si);
+static void stream_int_shutw_applet(struct stream_interface *si);
+static void stream_int_chk_rcv_applet(struct stream_interface *si);
+static void stream_int_chk_snd_applet(struct stream_interface *si);
 static void si_conn_recv_cb(struct connection *conn);
 static void si_conn_send_cb(struct connection *conn);
 static int si_conn_wake_cb(struct connection *conn);
@@ -69,6 +75,15 @@ struct si_ops si_conn_ops = {
 	.chk_snd = stream_int_chk_snd_conn,
 	.shutr   = stream_int_shutr_conn,
 	.shutw   = stream_int_shutw_conn,
+};
+
+/* stream-interface operations for connections */
+struct si_ops si_applet_ops = {
+	.update  = stream_int_update_applet,
+	.chk_rcv = stream_int_chk_rcv_applet,
+	.chk_snd = stream_int_chk_snd_applet,
+	.shutr   = stream_int_shutr_applet,
+	.shutw   = stream_int_shutw_applet,
 };
 
 struct data_cb si_conn_cb = {
@@ -224,12 +239,11 @@ static void stream_int_update_embedded(struct stream_interface *si)
 }
 
 /*
- * This function performs a shutdown-read on a stream interface attached to an
- * applet in a connected or init state (it does nothing for other states). It
- * either shuts the read side or marks itself as closed. The buffer flags are
- * updated to reflect the new state. If the stream interface has SI_FL_NOHALF,
- * we also forward the close to the write side. The owner task is woken up if
- * it exists.
+ * This function performs a shutdown-read on a detached stream interface in a
+ * connected or init state (it does nothing for other states). It either shuts
+ * the read side or marks itself as closed. The buffer flags are updated to
+ * reflect the new state. If the stream interface has SI_FL_NOHALF, we also
+ * forward the close to the write side. The owner task is woken up if it exists.
  */
 static void stream_int_shutr(struct stream_interface *si)
 {
@@ -248,7 +262,6 @@ static void stream_int_shutr(struct stream_interface *si)
 	if (si_oc(si)->flags & CF_SHUTW) {
 		si->state = SI_ST_DIS;
 		si->exp = TICK_ETERNITY;
-		si_applet_release(si);
 	}
 	else if (si->flags & SI_FL_NOHALF) {
 		/* we want to immediately forward this close to the write side */
@@ -261,11 +274,11 @@ static void stream_int_shutr(struct stream_interface *si)
 }
 
 /*
- * This function performs a shutdown-write on a stream interface attached to an
- * applet in a connected or init state (it does nothing for other states). It
- * either shuts the write side or marks itself as closed. The buffer flags are
- * updated to reflect the new state. It does also close everything if the SI
- * was marked as being in error state. The owner task is woken up if it exists.
+ * This function performs a shutdown-write on a detached stream interface in a
+ * connected or init state (it does nothing for other states). It either shuts
+ * the write side or marks itself as closed. The buffer flags are updated to
+ * reflect the new state. It does also close everything if the SI was marked as
+ * being in error state. The owner task is woken up if it exists.
  */
 static void stream_int_shutw(struct stream_interface *si)
 {
@@ -298,7 +311,6 @@ static void stream_int_shutw(struct stream_interface *si)
 	case SI_ST_TAR:
 		/* Note that none of these states may happen with applets */
 		si->state = SI_ST_DIS;
-		si_applet_release(si);
 	default:
 		si->flags &= ~(SI_FL_WAIT_ROOM | SI_FL_NOLINGER);
 		ic->flags &= ~CF_SHUTR_NOW;
@@ -371,18 +383,18 @@ static void stream_int_chk_snd(struct stream_interface *si)
  * function itself. It also pre-initializes the applet's context and
  * returns it (or NULL in case it could not be allocated).
  */
-struct appctx *stream_int_register_handler(struct stream_interface *si, struct si_applet *app)
+struct appctx *stream_int_register_handler(struct stream_interface *si, struct applet *app)
 {
 	struct appctx *appctx;
 
 	DPRINTF(stderr, "registering handler %p for si %p (was %p)\n", app, si, si_task(si));
 
-	appctx = si_alloc_appctx(si);
+	appctx = si_alloc_appctx(si, app);
 	if (!appctx)
 		return NULL;
 
-	appctx_set_applet(appctx, app);
-	si->flags |= SI_FL_WAIT_DATA;
+	si_applet_cant_get(si);
+	appctx_wakeup(appctx);
 	return si_appctx(si);
 }
 
@@ -629,7 +641,7 @@ static int si_conn_wake_cb(struct connection *conn)
 	if (ic->flags & CF_READ_ACTIVITY)
 		ic->flags &= ~CF_READ_DONTWAIT;
 
-	session_release_buffers(si_sess(si));
+	stream_release_buffers(si_strm(si));
 	return 0;
 }
 
@@ -1149,7 +1161,7 @@ static void si_conn_recv_cb(struct connection *conn)
 	}
 
 	/* now we'll need a buffer */
-	if (!session_alloc_recv_buffer(ic)) {
+	if (!stream_alloc_recv_buffer(ic)) {
 		si->flags |= SI_FL_WAIT_ROOM;
 		goto end_recv;
 	}
@@ -1330,7 +1342,7 @@ void stream_sock_read0(struct stream_interface *si)
 
 	if (si->flags & SI_FL_NOHALF) {
 		/* we want to immediately forward this close to the write side */
-		/* force flag on ssl to keep session in cache */
+		/* force flag on ssl to keep stream in cache */
 		conn_data_shutw_hard(conn);
 		goto do_close;
 	}
@@ -1356,6 +1368,303 @@ void stream_sock_read0(struct stream_interface *si)
 	si->state = SI_ST_DIS;
 	si->exp = TICK_ETERNITY;
 	return;
+}
+
+/* notifies the stream interface that the applet has completed its work */
+void si_applet_done(struct stream_interface *si)
+{
+	struct channel *ic = si_ic(si);
+	struct channel *oc = si_oc(si);
+
+	/* process consumer side */
+	if (channel_is_empty(oc)) {
+		if (((oc->flags & (CF_SHUTW|CF_SHUTW_NOW)) == CF_SHUTW_NOW) &&
+		    (si->state == SI_ST_EST))
+			stream_int_shutw_applet(si);
+		oc->wex = TICK_ETERNITY;
+	}
+
+	/* indicate that we may be waiting for data from the output channel */
+	if ((oc->flags & (CF_SHUTW|CF_SHUTW_NOW)) == 0 && channel_may_recv(oc))
+		si->flags |= SI_FL_WAIT_DATA;
+
+	/* update OC timeouts and wake the other side up if it's waiting for room */
+	if (oc->flags & CF_WRITE_ACTIVITY) {
+		if ((oc->flags & (CF_SHUTW|CF_WRITE_PARTIAL)) == CF_WRITE_PARTIAL &&
+		    !channel_is_empty(oc))
+			if (tick_isset(oc->wex))
+				oc->wex = tick_add_ifset(now_ms, oc->wto);
+
+		if (!(si->flags & SI_FL_INDEP_STR))
+			if (tick_isset(ic->rex))
+				ic->rex = tick_add_ifset(now_ms, ic->rto);
+
+		if (likely((oc->flags & (CF_SHUTW|CF_WRITE_PARTIAL|CF_DONT_READ)) == CF_WRITE_PARTIAL &&
+			   channel_may_recv(oc) &&
+			   (si_opposite(si)->flags & SI_FL_WAIT_ROOM)))
+			si_chk_rcv(si_opposite(si));
+	}
+
+	/* Notify the other side when we've injected data into the IC that
+	 * needs to be forwarded. We can do fast-forwarding as soon as there
+	 * are output data, but we avoid doing this for partial buffers,
+	 * because it is very likely that it will be done again immediately
+	 * afterwards once the following data are parsed (eg: HTTP chunking).
+	 * We only remove SI_FL_WAIT_ROOM once we've emptied the whole output
+	 * buffer, because applets are often forced to stop before the buffer
+	 * is full. We must not stop based on input data alone because an HTTP
+	 * parser might need more data to complete the parsing.
+	 */
+	if (!channel_is_empty(ic) &&
+	    (si_opposite(si)->flags & SI_FL_WAIT_DATA) &&
+	    (si_ib(si)->i == 0 || ic->pipe)) {
+		si_chk_snd(si_opposite(si));
+		if (channel_is_empty(ic))
+			si->flags &= ~SI_FL_WAIT_ROOM;
+	}
+
+	if (si->flags & SI_FL_WAIT_ROOM) {
+		ic->rex = TICK_ETERNITY;
+	}
+	else if ((ic->flags & (CF_SHUTR|CF_READ_PARTIAL|CF_DONT_READ)) == CF_READ_PARTIAL &&
+		 channel_may_recv(ic)) {
+		/* we must re-enable reading if si_chk_snd() has freed some space */
+		if (!(ic->flags & CF_READ_NOEXP) && tick_isset(ic->rex))
+			ic->rex = tick_add_ifset(now_ms, ic->rto);
+	}
+
+	/* get away from the active list if we can't work anymore. */
+	if (((si->flags & (SI_FL_WANT_PUT|SI_FL_WAIT_ROOM)) != SI_FL_WANT_PUT) &&
+	    ((si->flags & (SI_FL_WANT_GET|SI_FL_WAIT_DATA)) != SI_FL_WANT_GET))
+		appctx_pause(si_appctx(si));
+
+	/* wake the task up only when needed */
+	if (/* changes on the production side */
+	    (ic->flags & (CF_READ_NULL|CF_READ_ERROR)) ||
+	    si->state != SI_ST_EST ||
+	    (si->flags & SI_FL_ERR) ||
+	    ((ic->flags & CF_READ_PARTIAL) &&
+	     (!ic->to_forward || si_opposite(si)->state != SI_ST_EST)) ||
+
+	    /* changes on the consumption side */
+	    (oc->flags & (CF_WRITE_NULL|CF_WRITE_ERROR)) ||
+	    ((oc->flags & CF_WRITE_ACTIVITY) &&
+	     ((oc->flags & CF_SHUTW) ||
+	      ((oc->flags & CF_WAKE_WRITE) &&
+	       (si_opposite(si)->state != SI_ST_EST ||
+	        (channel_is_empty(oc) && !oc->to_forward)))))) {
+		task_wakeup(si_task(si), TASK_WOKEN_IO);
+		appctx_pause(si_appctx(si));
+	}
+	if (ic->flags & CF_READ_ACTIVITY)
+		ic->flags &= ~CF_READ_DONTWAIT;
+
+	stream_release_buffers(si_strm(si));
+}
+
+/* updates the timers and flags of a stream interface attached to an applet.
+ * it's called from the upper layers after the buffers/channels have been
+ * updated.
+ */
+void stream_int_update_applet(struct stream_interface *si)
+{
+	struct channel *ic = si_ic(si);
+	struct channel *oc = si_oc(si);
+
+	/* Check if we need to close the read side */
+	if (!(ic->flags & CF_SHUTR)) {
+		/* Read not closed, update FD status and timeout for reads */
+		if ((ic->flags & CF_DONT_READ) || !channel_may_recv(ic)) {
+			/* stop reading */
+			if (!(si->flags & SI_FL_WAIT_ROOM)) {
+				if (!(ic->flags & CF_DONT_READ)) /* full */
+					si->flags |= SI_FL_WAIT_ROOM;
+				ic->rex = TICK_ETERNITY;
+			}
+		}
+		else {
+			/* (re)start reading and update timeout. Note: we don't recompute the timeout
+			 * everytime we get here, otherwise it would risk never to expire. We only
+			 * update it if is was not yet set. The stream socket handler will already
+			 * have updated it if there has been a completed I/O.
+			 */
+			si->flags &= ~SI_FL_WAIT_ROOM;
+			if (!(ic->flags & (CF_READ_NOEXP|CF_DONT_READ)) && !tick_isset(ic->rex))
+				ic->rex = tick_add_ifset(now_ms, ic->rto);
+		}
+	}
+
+	/* Check if we need to close the write side */
+	if (!(oc->flags & CF_SHUTW)) {
+		/* Write not closed, update FD status and timeout for writes */
+		if (channel_is_empty(oc)) {
+			/* stop writing */
+			if (!(si->flags & SI_FL_WAIT_DATA)) {
+				if ((oc->flags & CF_SHUTW_NOW) == 0)
+					si->flags |= SI_FL_WAIT_DATA;
+				oc->wex = TICK_ETERNITY;
+			}
+		}
+		else {
+			/* (re)start writing and update timeout. Note: we don't recompute the timeout
+			 * everytime we get here, otherwise it would risk never to expire. We only
+			 * update it if is was not yet set. The stream socket handler will already
+			 * have updated it if there has been a completed I/O.
+			 */
+			si->flags &= ~SI_FL_WAIT_DATA;
+			if (!tick_isset(oc->wex)) {
+				oc->wex = tick_add_ifset(now_ms, oc->wto);
+				if (tick_isset(ic->rex) && !(si->flags & SI_FL_INDEP_STR)) {
+					/* Note: depending on the protocol, we don't know if we're waiting
+					 * for incoming data or not. So in order to prevent the socket from
+					 * expiring read timeouts during writes, we refresh the read timeout,
+					 * except if it was already infinite or if we have explicitly setup
+					 * independent streams.
+					 */
+					ic->rex = tick_add_ifset(now_ms, ic->rto);
+				}
+			}
+		}
+	}
+
+	if (((si->flags & (SI_FL_WANT_PUT|SI_FL_WAIT_ROOM)) == SI_FL_WANT_PUT) ||
+	    ((si->flags & (SI_FL_WANT_GET|SI_FL_WAIT_DATA)) == SI_FL_WANT_GET))
+		appctx_wakeup(si_appctx(si));
+	else
+		appctx_pause(si_appctx(si));
+}
+
+/*
+ * This function performs a shutdown-read on a stream interface attached to an
+ * applet in a connected or init state (it does nothing for other states). It
+ * either shuts the read side or marks itself as closed. The buffer flags are
+ * updated to reflect the new state. If the stream interface has SI_FL_NOHALF,
+ * we also forward the close to the write side. The owner task is woken up if
+ * it exists.
+ */
+static void stream_int_shutr_applet(struct stream_interface *si)
+{
+	struct channel *ic = si_ic(si);
+
+	ic->flags &= ~CF_SHUTR_NOW;
+	if (ic->flags & CF_SHUTR)
+		return;
+	ic->flags |= CF_SHUTR;
+	ic->rex = TICK_ETERNITY;
+	si->flags &= ~SI_FL_WAIT_ROOM;
+
+	/* Note: on shutr, we don't call the applet */
+
+	if (si->state != SI_ST_EST && si->state != SI_ST_CON)
+		return;
+
+	if (si_oc(si)->flags & CF_SHUTW) {
+		si->state = SI_ST_DIS;
+		si->exp = TICK_ETERNITY;
+		si_applet_release(si);
+	}
+	else if (si->flags & SI_FL_NOHALF) {
+		/* we want to immediately forward this close to the write side */
+		return stream_int_shutw_applet(si);
+	}
+}
+
+/*
+ * This function performs a shutdown-write on a stream interface attached to an
+ * applet in a connected or init state (it does nothing for other states). It
+ * either shuts the write side or marks itself as closed. The buffer flags are
+ * updated to reflect the new state. It does also close everything if the SI
+ * was marked as being in error state. The owner task is woken up if it exists.
+ */
+static void stream_int_shutw_applet(struct stream_interface *si)
+{
+	struct channel *ic = si_ic(si);
+	struct channel *oc = si_oc(si);
+
+	oc->flags &= ~CF_SHUTW_NOW;
+	if (oc->flags & CF_SHUTW)
+		return;
+	oc->flags |= CF_SHUTW;
+	oc->wex = TICK_ETERNITY;
+	si->flags &= ~SI_FL_WAIT_DATA;
+
+	/* on shutw we always wake the applet up */
+	appctx_wakeup(si_appctx(si));
+
+	switch (si->state) {
+	case SI_ST_EST:
+		/* we have to shut before closing, otherwise some short messages
+		 * may never leave the system, especially when there are remaining
+		 * unread data in the socket input buffer, or when nolinger is set.
+		 * However, if SI_FL_NOLINGER is explicitly set, we know there is
+		 * no risk so we close both sides immediately.
+		 */
+		if (!(si->flags & (SI_FL_ERR | SI_FL_NOLINGER)) &&
+		    !(ic->flags & (CF_SHUTR|CF_DONT_READ)))
+			return;
+
+		/* fall through */
+	case SI_ST_CON:
+	case SI_ST_CER:
+	case SI_ST_QUE:
+	case SI_ST_TAR:
+		/* Note that none of these states may happen with applets */
+		si->state = SI_ST_DIS;
+		si_applet_release(si);
+	default:
+		si->flags &= ~(SI_FL_WAIT_ROOM | SI_FL_NOLINGER);
+		ic->flags &= ~CF_SHUTR_NOW;
+		ic->flags |= CF_SHUTR;
+		ic->rex = TICK_ETERNITY;
+		si->exp = TICK_ETERNITY;
+	}
+}
+
+/* chk_rcv function for applets */
+static void stream_int_chk_rcv_applet(struct stream_interface *si)
+{
+	struct channel *ic = si_ic(si);
+
+	DPRINTF(stderr, "%s: si=%p, si->state=%d ic->flags=%08x oc->flags=%08x\n",
+		__FUNCTION__,
+		si, si->state, ic->flags, si_oc(si)->flags);
+
+	if (unlikely(si->state != SI_ST_EST || (ic->flags & (CF_SHUTR|CF_DONT_READ))))
+		return;
+	/* here we only wake the applet up if it was waiting for some room */
+	if (!(si->flags & SI_FL_WAIT_ROOM))
+		return;
+
+	if (channel_may_recv(ic) && !ic->pipe) {
+		/* (re)start reading */
+		appctx_wakeup(si_appctx(si));
+        }
+}
+
+/* chk_snd function for applets */
+static void stream_int_chk_snd_applet(struct stream_interface *si)
+{
+	struct channel *oc = si_oc(si);
+
+	DPRINTF(stderr, "%s: si=%p, si->state=%d ic->flags=%08x oc->flags=%08x\n",
+		__FUNCTION__,
+		si, si->state, si_ic(si)->flags, oc->flags);
+
+	if (unlikely(si->state != SI_ST_EST || (oc->flags & CF_SHUTW)))
+		return;
+
+	/* we only wake the applet up if it was waiting for some data */
+
+	if (!(si->flags & SI_FL_WAIT_DATA))
+		return;
+
+	if (!tick_isset(oc->wex))
+		oc->wex = tick_add_ifset(now_ms, oc->wto);
+
+	if (!channel_is_empty(oc)) {
+		/* (re)start sending */
+		appctx_wakeup(si_appctx(si));
+	}
 }
 
 /*

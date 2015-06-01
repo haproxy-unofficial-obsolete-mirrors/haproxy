@@ -87,8 +87,8 @@ HAProxy Lua file (`hello_world.lua`):
 .. code-block:: lua
 
     function hello_world(txn)
-       local res = txn:res_channel()
-       res:send("hello world\n")
+       txn.res:send("hello world\n")
+       txn:close()
     end
 
 How to start HAProxy for testing this configuration:
@@ -118,6 +118,114 @@ Core class
 
    The "core" class is static, t is not possible to create a new object of this
    type.
+
+.. js:attribute:: core.emerg
+
+  This attribute is an integer, it contains the value of the loglevel "emergency" (0).
+
+.. js:attribute:: core.alert
+
+  This attribute is an integer, it contains the value of the loglevel "alert" (1).
+
+.. js:attribute:: core.crit
+
+  This attribute is an integer, it contains the value of the loglevel "critical" (2).
+
+.. js:attribute:: core.err
+
+  This attribute is an integer, it contains the value of the loglevel "error" (3).
+
+.. js:attribute:: core.warning
+
+  This attribute is an integer, it contains the value of the loglevel "warning" (4).
+
+.. js:attribute:: core.notice
+
+  This attribute is an integer, it contains the value of the loglevel "notice" (5).
+
+.. js:attribute:: core.info
+
+  This attribute is an integer, it contains the value of the loglevel "info" (6).
+
+.. js:attribute:: core.debug
+
+  This attribute is an integer, it contains the value of the loglevel "debug" (7).
+
+.. js:function:: core.log(loglevel, msg)
+
+  **context**: body, init, task, action, sample-fetch, converter
+
+  This fucntion sends a log. The log is sent, according with the HAProxy
+  configuration file, on the default syslog server if it is configured and on
+  the stderr if it is allowed.
+
+  :param integer loglevel: Is the log level asociated with the message. It is a
+    number between 0 and 7.
+  :param string msg: The log content.
+  :see: core.emerg, core.alert, core.crit, core.err, core.warning, core.notice,
+    core.info, core.debug (log level definitions)
+  :see: code.Debug
+  :see: core.Info
+  :see: core.Warning
+  :see: core.Alert
+
+.. js:function:: core.Debug(msg)
+
+  **context**: body, init, task, action, sample-fetch, converter
+
+  :param string msg: The log content.
+  :see: log
+
+  Does the same job than:
+
+.. code-block:: lua
+
+	function Debug(msg)
+		core.log(core.debug, msg)
+	end
+..
+
+.. js:function:: core.Info(msg)
+
+  **context**: body, init, task, action, sample-fetch, converter
+
+  :param string msg: The log content.
+  :see: log
+
+.. code-block:: lua
+
+	function Info(msg)
+		core.log(core.info, msg)
+	end
+..
+
+.. js:function:: core.Warning(msg)
+
+  **context**: body, init, task, action, sample-fetch, converter
+
+  :param string msg: The log content.
+  :see: log
+
+.. code-block:: lua
+
+	function Warning(msg)
+		core.log(core.warning, msg)
+	end
+..
+
+.. js:function:: core.Alert(msg)
+
+  **context**: body, init, task, action, sample-fetch, converter
+
+  :param string msg: The log content.
+  :see: log
+
+.. code-block:: lua
+
+	function Alert(msg)
+		core.log(core.alert, msg)
+	end
+..
 
 .. js:function:: core.add_acl(filename, key)
 
@@ -250,7 +358,7 @@ Core class
 
   Register and start independent task. The task is started when the HAProxy
   main scheduler starts. For example this type of tasks can be executed to
-  perform complex health checks. 
+  perform complex health checks.
 
   :param fuction func: is the Lua function called to work as initializer.
 
@@ -268,7 +376,7 @@ Core class
   **context**: task, action, sample-fetch, converter
 
   Change the nice of the current task or current session.
-  
+
   :param integer nice: the nice value, it must be between -1024 and 1024.
 
 .. js:function:: core.set_map(filename, key, value)
@@ -294,7 +402,7 @@ Core class
 
   :returns: A socket class object.
 
-.. js:function:: socket core.yield()
+.. js:function:: core.yield()
 
   **context**: task, action, sample-fetch, converter
 
@@ -307,7 +415,31 @@ Fetches class
 .. js:class:: Fetches
 
   This class contains a lot of internal HAProxy sample fetches. See the
-  HAProxy documentation for more information about her usage.
+  HAProxy "configuration.txt" documentation for more information about her
+  usage. they are the chapters 7.3.2 to 7.3.6.
+
+  :see: TXN.f
+  :see: TXN.sf
+
+  Fetches are useful for:
+
+  * get system time,
+  * get environment variable,
+  * get random numbers,
+  * known backend status like the number of users in queue or the number of
+    connections established,
+  * client information like ip source or destination,
+  * deal with stick tables,
+  * Established SSL informations,
+  * HTTP information like headers or method.
+
+.. code-block:: lua
+
+	function action(txn)
+		-- Get source IP
+		local clientip = txn.f:src()
+	end
+..
 
 Converters class
 ================
@@ -315,7 +447,21 @@ Converters class
 .. js:class:: Converters
 
   This class contains a lot of internal HAProxy sample converters. See the
-  HAProxy documentation for more information about her usage.
+  HAProxy documentation "configuration.txt" for more information about her
+  usage. Its the chapter 7.3.1.
+
+  :see: TXN.c
+  :see: TXN.sc
+
+  Converters provides statefull transformation. They are useful for:
+
+  * converting input to base64,
+  * applying hash on input string (djb2, crc32, sdbm, wt6),
+  * format date,
+  * json escape,
+  * extracting prefered language comparing two lists,
+  * turn to lower or upper chars,
+  * deal with stick tables.
 
 Channel class
 =============
@@ -339,27 +485,27 @@ Channel class
 
 .. image:: _static/channel.png
 
-.. js:function:: channel.dup(channel)
+.. js:function:: Channel.dup(channel)
 
   This function returns a string that contain the entire buffer. The data is
   not remove from the buffer and can be reprocessed later.
 
   If the buffer cant receive more data, a 'nil' value is returned.
 
-  :param class_channel channel: The manipulated channel.
+  :param class_channel channel: The manipulated Channel.
   :returns: a string containig all the avalaible data or nil.
 
-.. js:function:: channel.get(channel)
+.. js:function:: Channel.get(channel)
 
   This function returns a string that contain the entire buffer. The data is
   consumed from the buffer.
 
   If the buffer cant receive more data, a 'nil' value is returned.
 
-  :param class_channel channel: The manipulated channel.
+  :param class_channel channel: The manipulated Channel.
   :returns: a string containig all the avalaible data or nil.
 
-.. js:function:: channel.get_line(channel)
+.. js:function:: Channel.get_line(channel)
 
   This function returns a string that contain the first line of the buffer. The
   data is consumed. If the data returned doesn't contains a final '\n' its
@@ -367,10 +513,10 @@ Channel class
 
   If the buffer cant receive more data, a 'nil' value is returned.
 
-  :param class_channel channel: The manipulated channel.
+  :param class_channel channel: The manipulated Channel.
   :returns: a string containig the avalaiable line or nil.
 
-.. js:function:: channel.set(channel, string)
+.. js:function:: Channel.set(channel, string)
 
   This function replace the content of the buffer by the string. The function
   returns the copied length, otherwise, it returns -1.
@@ -378,11 +524,11 @@ Channel class
   The data set with this function are not send. They wait for the end of
   HAProxy processing, so the buffer can be full.
 
-  :param class_channel channel: The manipulated channel.
+  :param class_channel channel: The manipulated Channel.
   :param string string: The data which will sent.
   :returns: an integer containing the amount of butes copyed or -1.
 
-.. js:function:: channel.append(channel, string)
+.. js:function:: Channel.append(channel, string)
 
   This function append the string argument to the content of the buffer. The
   function returns the copied length, otherwise, it returns -1.
@@ -390,40 +536,213 @@ Channel class
   The data set with this function are not send. They wait for the end of
   HAProxy processing, so the buffer can be full.
 
-  :param class_channel channel: The manipulated channel.
+  :param class_channel channel: The manipulated Channel.
   :param string string: The data which will sent.
   :returns: an integer containing the amount of butes copyed or -1.
 
-.. js:function:: int channel.send(channel, string)
+.. js:function:: Channel.send(channel, string)
 
   This function required immediate send of the data. Unless if the connection
   is close, the buffer is regularly flushed and all the string can be sent.
 
-  :param class_channel channel: The manipulated channel.
+  :param class_channel channel: The manipulated Channel.
   :param string string: The data which will sent.
   :returns: an integer containing the amount of butes copyed or -1.
 
-.. js:function:: int channel.get_in_length(channel)
+.. js:function:: Channel.get_in_length(channel)
 
   This function returns the length of the input part of the buffer.
 
-  :param class_channel channel: The manipulated channel.
+  :param class_channel channel: The manipulated Channel.
   :returns: an integer containing the amount of avalaible bytes.
 
-.. js:function:: int channel.get_out_length(channel)
+.. js:function:: Channel.get_out_length(channel)
 
   This function returns the length of the output part of the buffer.
 
-  :param class_channel channel: The manipulated channel.
+  :param class_channel channel: The manipulated Channel.
   :returns: an integer containing the amount of avalaible bytes.
 
-.. js:function:: channel.forward(channel, int)
+.. js:function:: Channel.forward(channel, int)
 
   This function transfer bytes from the input part of the buffer to the output
   part.
 
-  :param class_channel channel: The manipulated channel.
+  :param class_channel channel: The manipulated Channel.
   :param integer int: The amount of data which will be forwarded.
+
+
+HTTP class
+==========
+
+.. js:class:: HTTP
+
+   This class contain all the HTTP manipulation functions.
+
+.. js:function:: HTTP.req_get_header(http)
+
+  Returns an array containing all the request headers.
+
+  :param class_http http: The related http object.
+  :returns: array of headers.
+  :see: HTTP.res_get_header()
+
+.. js:function:: HTTP.res_get_header(http)
+
+  Returns an array containing all the response headers.
+
+  :param class_http http: The related http object.
+  :returns: array of headers.
+  :see: HTTP.req_get_header()
+
+.. js:function:: HTTP.req_add_header(http, name, value)
+
+  Appends an HTTP header field in the request whose name is
+  specified in "name" and whose value is defined in "value".
+
+  :param class_http http: The related http object.
+  :param string name: The header name.
+  :param string value: The header value.
+  :see: HTTP.res_add_header()
+
+.. js:function:: HTTP.res_add_header(http, name, value)
+
+  appends an HTTP header field in the response whose name is
+  specified in "name" and whose value is defined in "value".
+
+  :param class_http http: The related http object.
+  :param string name: The header name.
+  :param string value: The header value.
+  :see: HTTP.req_add_header()
+
+.. js:function:: HTTP.req_del_header(http, name)
+
+  Removes all HTTP header fields in the request whose name is
+  specified in "name".
+
+  :param class_http http: The related http object.
+  :param string name: The header name.
+  :see: HTTP.res_del_header()
+
+.. js:function:: HTTP.res_del_header(http, name)
+
+  Removes all HTTP header fields in the response whose name is
+  specified in "name".
+
+  :param class_http http: The related http object.
+  :param string name: The header name.
+  :see: HTTP.req_del_header()
+
+.. js:function:: HTTP.req_set_header(http, name, value)
+
+  This variable replace all occurence of all header "name", by only
+  one containing the "value".
+
+  :param class_http http: The related http object.
+  :param string name: The header name.
+  :param string value: The header value.
+  :see: HTTP.res_set_header()
+
+  This function does the same work as the folowwing code:
+
+.. code-block:: lua
+
+   function fcn(txn)
+      TXN.http:req_del_header("header")
+      TXN.http:req_add_header("header", "value")
+   end
+..
+
+.. js:function:: HTTP.res_set_header(http, name, value)
+
+  This variable replace all occurence of all header "name", by only
+  one containing the "value".
+
+  :param class_http http: The related http object.
+  :param string name: The header name.
+  :param string value: The header value.
+  :see: HTTP.req_set_header()
+
+.. js:function:: HTTP.req_replace_header(http, name, regex, replace)
+
+  Matches the regular expression in all occurrences of header field "name"
+  according to "regex", and replaces them with the "replace" argument. The
+  replacement value can contain back references like \1, \2, ... This
+  function works with the request.
+
+  :param class_http http: The related http object.
+  :param string name: The header name.
+  :param string regex: The match regular expression.
+  :param string replace: The replacement value.
+  :see: HTTP.res_replace_header()
+
+.. js:function:: HTTP.res_replace_header(http, name, regex, string)
+
+  Matches the regular expression in all occurrences of header field "name"
+  according to "regex", and replaces them with the "replace" argument. The
+  replacement value can contain back references like \1, \2, ... This
+  function works with the request.
+
+  :param class_http http: The related http object.
+  :param string name: The header name.
+  :param string regex: The match regular expression.
+  :param string replace: The replacement value.
+  :see: HTTP.req_replace_header()
+
+.. js:function:: HTTP.req_replace_value(http, name, regex, replace)
+
+  Works like "HTTP.req_replace_header()" except that it matches the regex
+  against every comma-delimited value of the header field "name" instead of the
+  entire header.
+
+  :param class_http http: The related http object.
+  :param string name: The header name.
+  :param string regex: The match regular expression.
+  :param string replace: The replacement value.
+  :see: HTTP.req_replace_header()
+  :see: HTTP.res_replace_value()
+
+.. js:function:: HTTP.res_replace_value(http, name, regex, replace)
+
+  Works like "HTTP.res_replace_header()" except that it matches the regex
+  against every comma-delimited value of the header field "name" instead of the
+  entire header.
+
+  :param class_http http: The related http object.
+  :param string name: The header name.
+  :param string regex: The match regular expression.
+  :param string replace: The replacement value.
+  :see: HTTP.res_replace_header()
+  :see: HTTP.req_replace_value()
+
+.. js:function:: HTTP.req_set_method(http, method)
+
+  Rewrites the request method with the parameter "method".
+
+  :param class_http http: The related http object.
+  :param string method: The new method.
+
+.. js:function:: HTTP.req_set_path(http, path)
+
+  Rewrites the request path with the "path" parameter.
+
+  :param class_http http: The related http object.
+  :param string path: The new path.
+
+.. js:function:: HTTP.req_set_query(http, query)
+
+  Rewrites the request's query string which appears after the first question
+  mark ("?") with the parameter "query".
+
+  :param class_http http: The related http object.
+  :param string query: The new query.
+
+.. js:function:: HTTP.req.set_uri(http, uri)
+
+  Rewrites the request URI with the parameter "uri".
+
+  :param class_http http: The related http object.
+  :param string uri: The new uri.
 
 TXN class
 =========
@@ -440,42 +759,128 @@ TXN class
   All the functions provided by this class are available in the context
   **sample-fetches** and **actions**.
 
-.. js:attribute:: txn.c
+.. js:attribute:: TXN.c
 
   This attribute contains a Converters class object.
 
-.. js:attribute:: txn.sc
+.. js:attribute:: TXN.sc
 
   This attribute contains a Converters class object. The functions of
   this object returns always a string.
 
-.. js:attribute:: txn.f
+.. js:attribute:: TXN.f
 
   This attribute contains a Fetches class object.
 
-.. js:attribute:: txn.sf
+.. js:attribute:: TXN.sf
 
   This attribute contains a Fetches class object. The functions of
   this object returns always a string.
 
-.. js:attribute:: txn.req
+.. js:attribute:: TXN.req
 
   This attribute contains a channel class object for the request buffer.
 
-.. js:attribute:: txn.res
+.. js:attribute:: TXN.res
 
   This attribute contains a channel class object for the response buffer.
 
-.. js:function:: txn.get_priv(txn)
+.. js:attribute:: TXN.http
 
-  Return Lua data stored in the current transaction (with the `txn.set_priv()`)
+  This attribute contains an HTTP class object. It is avalaible only if the
+  proxy has the "mode http" enabled.
+
+.. js:function:: TXN.log(TXN, loglevel, msg)
+
+  This function sends a log. The log is sent, according with the HAProxy
+  configuration file, on the default syslog server if it is configured and on
+  the stderr if it is allowed.
+
+  :param class_txn txn: The class txn object containing the data.
+  :param integer loglevel: Is the log level asociated with the message. It is a
+    number between 0 and 7.
+  :param string msg: The log content.
+  :see: core.emerg, core.alert, core.crit, core.err, core.warning, core.notice,
+    core.info, core.debug (log level definitions)
+  :see: TXN.deflog
+  :see: TXN.Debug
+  :see: TXN.Info
+  :see: TXN.Warning
+  :see: TXN.Alert
+
+.. js:function:: TXN.deflog(TXN, msg)
+
+  Sends a log line with the default loglevel for the proxy ssociated with the
+  transaction.
+
+  :param class_txn txn: The class txn object containing the data.
+  :param string msg: The log content.
+  :see: TXN.log
+
+.. js:function:: TXN.Debug(txn, msg)
+
+  :param class_txn txn: The class txn object containing the data.
+  :param string msg: The log content.
+  :see: TXN.log
+
+  Does the same job than:
+
+.. code-block:: lua
+
+	function Debug(txn, msg)
+		TXN.log(txn, core.debug, msg)
+	end
+..
+
+.. js:function:: TXN.Info(txn, msg)
+
+  :param class_txn txn: The class txn object containing the data.
+  :param string msg: The log content.
+  :see: TXN.log
+
+.. code-block:: lua
+
+	function Debug(txn, msg)
+		TXN.log(txn, core.info, msg)
+	end
+..
+
+.. js:function:: TXN.Warning(txn, msg)
+
+  :param class_txn txn: The class txn object containing the data.
+  :param string msg: The log content.
+  :see: TXN.log
+
+.. code-block:: lua
+
+	function Debug(txn, msg)
+		TXN.log(txn, core.warning, msg)
+	end
+..
+
+.. js:function:: TXN.Alert(txn, msg)
+
+  :param class_txn txn: The class txn object containing the data.
+  :param string msg: The log content.
+  :see: TXN.log
+
+.. code-block:: lua
+
+	function Debug(txn, msg)
+		TXN.log(txn, core.alert, msg)
+	end
+..
+
+.. js:function:: TXN.get_priv(txn)
+
+  Return Lua data stored in the current transaction (with the `TXN.set_priv()`)
   function. If no data are stored, it returns a nil value.
 
   :param class_txn txn: The class txn object containing the data.
   :returns: the opaque data previsously stored, or nil if nothing is
      avalaible.
 
-.. js:function:: txn.set_priv(txn, data)
+.. js:function:: TXN.set_priv(txn, data)
 
   Store any data in the current HAProxy transaction. This action replace the
   old stored data.
@@ -483,75 +888,50 @@ TXN class
   :param class_txn txn: The class txn object containing the data.
   :param opaque data: The data which is stored in the transaction.
 
-.. js:function:: txn.get_headers(txn)
+.. js:function:: TXN.get_headers(txn)
 
   This function returns an array of headers.
 
   :param class_txn txn: The class txn object containing the data.
   :returns: an array of headers.
 
-.. js:function:: txn.close(txn)
+.. js:function:: TXN.close(txn)
 
   This function close the transaction and the associated session. It can be
   used when a critical error is detected.
 
   :param class_txn txn: The class txn object containing the data.
 
-.. js:function:: txn.http.redirect(txn, location)
 
-  Not yet avalaible.
 
-.. js:function:: txn.http.req.add_header(txn, name, value)
 
-  Not yet avalaible.
 
-.. js:function:: txn.http.req.set_method(txn, string)
 
-  Not yet avalaible.
 
-.. js:function:: txn.http.req.set_path(txn, string)
+.. js:function:: TXN.set_loglevel(txn, loglevel)
 
-  Not yet avalaible.
+  Is used to change the log level of the current request. The "loglevel" must
+  be an integer between 0 and 7.
 
-.. js:function:: txn.http.req.set_query(txn, string)
+  :param class_txn txn: The class txn object containing the data.
+  :param integer loglevel: The required log level. This variable can be one of
+  :see: core.<loglevel>
 
-  Not yet avalaible.
+.. js:function:: TXN.set_tos(txn, tos)
 
-.. js:function:: txn.http.req.set_uri(txn, string)
+  Is used to set the TOS or DSCP field value of packets sent to the client to
+  the value passed in "tos" on platforms which support this.
 
-  Not yet avalaible.
+  :param class_txn txn: The class txn object containing the data.
+  :param integer tos: The new TOS os DSCP.
 
-.. js:function:: txn.http.req.set_header(txn, name, value)
+.. js:function:: TXN.set_mark(txn, mark)
 
-  Not yet avalaible.
+  Is used to set the Netfilter MARK on all packets sent to the client to the
+  value passed in "mark" on platforms which support it.
 
-.. js:function:: txn.http.req.del_header(txn, name)
-
-  Not yet avalaible.
-
-.. js:function:: txn.http.req.replace_header(txn, name, regex, string)
-
-  Not yet avalaible.
-
-.. js:function:: txn.http.req.replace_value(txn, name, regex, string)
-
-  Not yet avalaible.
-
-.. js:function:: txn.http.res.set_header(txn, name, value)
-
-  Not yet avalaible.
-
-.. js:function:: txn.http.res.del_header(txn, name)
-
-  Not yet avalaible.
-
-.. js:function:: txn.http.res.replace_header(txn, name, regex, string)
-
-  Not yet avalaible.
-
-.. js:function:: txn.http.res.replace_value(txn, name, regex, string)
-
-  Not yet avalaible.
+  :param class_txn txn: The class txn object containing the data.
+  :param integer mark: The mark value.
 
 Socket class
 ============
@@ -564,21 +944,21 @@ Socket class
   `http://w3.impa.br/~diego/software/luasocket/tcp.html
   <http://w3.impa.br/~diego/software/luasocket/tcp.html>`_
 
-.. js:function:: socket.close(socket)
+.. js:function:: Socket.close(socket)
 
   Closes a TCP object. The internal socket used by the object is closed and the
   local address to which the object was bound is made available to other
   applications. No further operations (except for further calls to the close
-  method) are allowed on a closed socket.
+  method) are allowed on a closed Socket.
 
-  :param class_socket socket: Is the manipulated socket.
+  :param class_socket socket: Is the manipulated Socket.
 
   Note: It is important to close all used sockets once they are not needed,
   since, in many systems, each socket uses a file descriptor, which are limited
   system resources. Garbage-collected objects are automatically closed before
   destruction, though.
 
-.. js:function:: socket.connect(socket, address, port)
+.. js:function:: Socket.connect(socket, address, port)
 
   Attempts to connect a socket object to a remote host.
 
@@ -588,25 +968,25 @@ Socket class
   In case of error, the method returns nil followed by a string describing the
   error. In case of success, the method returns 1.
 
-  :param class_socket socket: Is the manipulated socket.
+  :param class_socket socket: Is the manipulated Socket.
   :returns: 1 or nil.
 
-  Note: The function socket.connect is available and is a shortcut for the
+  Note: The function Socket.connect is available and is a shortcut for the
   creation of client sockets.
 
   Note: Starting with LuaSocket 2.0, the settimeout method affects the behavior
   of connect, causing it to return with an error in case of a timeout. If that
-  happens, you can still call socket.select with the socket in the sendt table.
+  happens, you can still call Socket.select with the socket in the sendt table.
   The socket will be writable when the connection is established.
 
-.. js:function:: socket.connect_ssl(socket, address, port)
+.. js:function:: Socket.connect_ssl(socket, address, port)
 
   Same behavior than the function socket:connect, but uses SSL.
 
-  :param class_socket socket: Is the manipulated socket.
+  :param class_socket socket: Is the manipulated Socket.
   :returns: 1 or nil.
 
-.. js:function:: socket.getpeername(socket)
+.. js:function:: Socket.getpeername(socket)
 
   Returns information about the remote side of a connected client object.
 
@@ -614,26 +994,26 @@ Socket class
   that peer is using for the connection. In case of error, the method returns
   nil.
 
-  :param class_socket socket: Is the manipulated socket.
+  :param class_socket socket: Is the manipulated Socket.
   :returns: a string containing the server information.
 
-.. js:function:: socket.getsockname(socket)
+.. js:function:: Socket.getsockname(socket)
 
   Returns the local address information associated to the object.
 
   The method returns a string with local IP address and a number with the port.
   In case of error, the method returns nil.
 
-  :param class_socket socket: Is the manipulated socket.
+  :param class_socket socket: Is the manipulated Socket.
   :returns: a string containing the client information.
 
-.. js:function:: socket.receive(socket, [pattern [, prefix]])
+.. js:function:: Socket.receive(socket, [pattern [, prefix]])
 
   Reads data from a client object, according to the specified read pattern.
   Patterns follow the Lua file I/O format, and the difference in performance
   between all patterns is negligible.
 
-  :param class_socket socket: Is the manipulated socket.
+  :param class_socket socket: Is the manipulated Socket.
   :param string|integer pattern: Describe what is required (see below).
   :param string prefix: A string which will be prefix the returned data.
   :returns:  a string containing the required data or nil.
@@ -643,14 +1023,14 @@ Socket class
   * **`*a`**: reads from the socket until the connection is closed. No
               end-of-line translation is performed;
 
-  * **`*l`**: reads a line of text from the socket. The line is terminated by a
+  * **`*l`**: reads a line of text from the Socket. The line is terminated by a
               LF character (ASCII 10), optionally preceded by a CR character
               (ASCII 13). The CR and LF characters are not included in the
               returned line.  In fact, all CR characters are ignored by the
               pattern. This is the default pattern.
 
   * **number**: causes the method to read a specified number of bytes from the
-                socket. Prefix is an optional string to be concatenated to the
+                Socket. Prefix is an optional string to be concatenated to the
                 beginning of any received data before return.
 
   If successful, the method returns the received pattern. In case of error, the
@@ -666,11 +1046,11 @@ Socket class
   successful results. This last feature violated the idea that all functions
   should return nil on error.  Thus it was changed too.
 
-.. js:function:: socket.send(socket, data [, start [, end ]])
+.. js:function:: Socket.send(socket, data [, start [, end ]])
 
   Sends data through client object.
 
-  :param class_socket socket: Is the manipulated socket.
+  :param class_socket socket: Is the manipulated Socket.
   :param string data: The data that will be sent.
   :param integer start: The start position in the buffer of the data which will
    be sent.
@@ -695,11 +1075,11 @@ Socket class
   concatenate them in Lua (with the '..' operator) and send the result in one
   call instead of calling the method several times.
 
-.. js:function:: socket.setoption(socket, option [, value])
+.. js:function:: Socket.setoption(socket, option [, value])
 
   Just implemented for compatibility, this cal does nothing.
 
-.. js:function:: socket.settimeout(socket, value [, mode])
+.. js:function:: Socket.settimeout(socket, value [, mode])
 
   Changes the timeout values for the object. All I/O operations are blocking.
   That is, any call to the methods send, receive, and accept will block
@@ -713,8 +1093,127 @@ Socket class
   inactivity time waiting for complete the internal buffer send or waiting for
   receive data.
 
-  :param class_socket socket: Is the manipulated socket.
+  :param class_socket socket: Is the manipulated Socket.
   :param integer value: The timeout value.
+
+Map class
+=========
+
+.. js:class:: Map
+
+  This class permits to do some lookup in HAProxy maps. The declared maps can
+  be modified during the runtime throught the HAProxy management socket.
+
+.. code-block:: lua
+
+	default = "usa"
+
+	-- Create and load map
+	geo = Map.new("geo.map", Map.ip);
+
+	-- Create new fetch that returns the user country
+	core.register_fetches("country", function(txn)
+		local src;
+		local loc;
+
+		src = txn.f:fhdr("x-forwarded-for");
+		if (src == nil) then
+			src = txn.f:src()
+			if (src == nil) then
+				return default;
+			end
+		end
+
+		-- Perform lookup
+		loc = geo:lookup(src);
+
+		if (loc == nil) then
+			return default;
+		end
+
+		return loc;
+	end);
+
+.. js:attribute:: Map.int
+
+  See the HAProxy configuration.txt file, chapter "Using ACLs and fetching
+  samples" ans subchapter "ACL basics" to understand this pattern matching
+  method.
+
+.. js:attribute:: Map.ip
+
+  See the HAProxy configuration.txt file, chapter "Using ACLs and fetching
+  samples" ans subchapter "ACL basics" to understand this pattern matching
+  method.
+
+.. js:attribute:: Map.str
+
+  See the HAProxy configuration.txt file, chapter "Using ACLs and fetching
+  samples" ans subchapter "ACL basics" to understand this pattern matching
+  method.
+
+.. js:attribute:: Map.beg
+
+  See the HAProxy configuration.txt file, chapter "Using ACLs and fetching
+  samples" ans subchapter "ACL basics" to understand this pattern matching
+  method.
+
+.. js:attribute:: Map.sub
+
+  See the HAProxy configuration.txt file, chapter "Using ACLs and fetching
+  samples" ans subchapter "ACL basics" to understand this pattern matching
+  method.
+
+.. js:attribute:: Map.dir
+
+  See the HAProxy configuration.txt file, chapter "Using ACLs and fetching
+  samples" ans subchapter "ACL basics" to understand this pattern matching
+  method.
+
+.. js:attribute:: Map.dom
+
+  See the HAProxy configuration.txt file, chapter "Using ACLs and fetching
+  samples" ans subchapter "ACL basics" to understand this pattern matching
+  method.
+
+.. js:attribute:: Map.end
+
+  See the HAProxy configuration.txt file, chapter "Using ACLs and fetching
+  samples" ans subchapter "ACL basics" to understand this pattern matching
+  method.
+
+.. js:attribute:: Map.reg
+
+  See the HAProxy configuration.txt file, chapter "Using ACLs and fetching
+  samples" ans subchapter "ACL basics" to understand this pattern matching
+  method.
+
+
+.. js:function:: Map.new(file, method)
+
+  Creates and load a map.
+
+  :param string file: Is the file containing the map.
+  :param integer method: Is the map pattern matching method. See the attributes
+    of the Map class.
+  :returns: a class Map object.
+  :see: The Map attributes.
+
+.. js:function:: Map.lookup(map, str)
+
+  Perform a lookup in a map.
+
+  :param class_map map: Is the class Map object.
+  :param string str: Is the string used as key.
+  :returns: a string containing the result or nil if no match.
+
+.. js:function:: Map.slookup(map, str)
+
+  Perform a lookup in a map.
+
+  :param class_map map: Is the class Map object.
+  :param string str: Is the string used as key.
+  :returns: a string containing the result or empty string if no match.
 
 External Lua libraries
 ======================
@@ -756,4 +1255,4 @@ OpenSSL:
 
 * `https://github.com/brunoos/luasec/wiki
   <https://github.com/brunoos/luasec/wiki>`_
-   
+
