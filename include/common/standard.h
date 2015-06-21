@@ -25,6 +25,7 @@
 #include <limits.h>
 #include <string.h>
 #include <time.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -104,6 +105,7 @@ extern int strlcpy2(char *dst, const char *src, int size);
  */
 extern char itoa_str[][171];
 extern char *ultoa_r(unsigned long n, char *buffer, int size);
+extern char *sltoa_r(long n, char *buffer, int size);
 extern const char *ulltoh_r(unsigned long long n, char *buffer, int size);
 static inline const char *ultoa(unsigned long n)
 {
@@ -375,6 +377,33 @@ char *encode_chunk(char *start, char *stop,
                    const char escape, const fd_set *map,
                    const struct chunk *chunk);
 
+
+/* Check a string for using it in a CSV output format. If the string contains
+ * one of the following four char <">, <,>, CR or LF, the string is
+ * encapsulated between <"> and the <"> are escaped by a <""> sequence.
+ * <str> is the input string to be escaped. The function assumes that
+ * the input string is null-terminated.
+ *
+ * If <quote> is 0, the result is returned escaped but without double quote.
+ * Is it useful if the escaped string is used between double quotes in the
+ * format.
+ *
+ *    printf("..., \"%s\", ...\r\n", csv_enc(str, 0));
+ *
+ * If the <quote> is 1, the converter put the quotes only if any character is
+ * escaped. If the <quote> is 2, the converter put always the quotes.
+ *
+ * <output> is a struct chunk used for storing the output string if any
+ * change will be done.
+ *
+ * The function returns the converted string on this output. If an error
+ * occurs, the function return an empty string. This type of output is useful
+ * for using the function directly as printf() argument.
+ *
+ * If the output buffer is too short to conatin the input string, the result
+ * is truncated.
+ */
+const char *csv_enc(const char *str, int quote, struct chunk *output);
 
 /* Decode an URL-encoded string in-place. The resulting string might
  * be shorter. If some forbidden characters are found, the conversion is
@@ -958,5 +987,24 @@ static inline unsigned char utf8_return_length(unsigned char code)
 {
 	return code & 0x0f;
 }
+
+/* returns a 64-bit a timestamp with the finest resolution available. The
+ * unit is intentionally not specified. It's mostly used to compare dates.
+ */
+#if defined(__i386__) || defined(__x86_64__)
+static inline unsigned long long rdtsc()
+{
+     unsigned int a, d;
+     asm volatile("rdtsc" : "=a" (a), "=d" (d));
+     return a + ((unsigned long long)d << 32);
+}
+#else
+static inline unsigned long long rdtsc()
+{
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return tv.tv_sec * 1000000 + tv.tv_usec;
+}
+#endif
 
 #endif /* _COMMON_STANDARD_H */

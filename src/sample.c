@@ -32,8 +32,13 @@
 #include <proto/sample.h>
 #include <proto/stick_table.h>
 
+#ifdef USE_51DEGREES
+#include <51Degrees.h>
+#endif
+
 /* sample type names */
 const char *smp_to_type[SMP_TYPES] = {
+	[SMP_T_ANY]  = "any",
 	[SMP_T_BOOL] = "bool",
 	[SMP_T_UINT] = "uint",
 	[SMP_T_SINT] = "sint",
@@ -42,6 +47,7 @@ const char *smp_to_type[SMP_TYPES] = {
 	[SMP_T_IPV6] = "ipv6",
 	[SMP_T_STR]  = "str",
 	[SMP_T_BIN]  = "bin",
+	[SMP_T_METH] = "meth",
 };
 
 /* static sample used in sample_process() when <p> is NULL */
@@ -607,7 +613,24 @@ static int c_int2str(struct sample *smp)
 	char *pos;
 
 	pos = ultoa_r(smp->data.uint, trash->str, trash->size);
+	if (!pos)
+		return 0;
 
+	trash->size = trash->size - (pos - trash->str);
+	trash->str = pos;
+	trash->len = strlen(pos);
+	smp->data.str = *trash;
+	smp->type = SMP_T_STR;
+	smp->flags &= ~SMP_F_CONST;
+	return 1;
+}
+
+static int c_sint2str(struct sample *smp)
+{
+	struct chunk *trash = get_trash_chunk();
+	char *pos;
+
+	pos = sltoa_r(smp->data.sint, trash->str, trash->size);
 	if (!pos)
 		return 0;
 
@@ -774,16 +797,17 @@ static int c_int2bin(struct sample *smp)
 /*****************************************************************/
 
 sample_cast_fct sample_casts[SMP_TYPES][SMP_TYPES] = {
-/*            to:  BOOL       UINT       SINT       ADDR        IPV4      IPV6        STR         BIN         METH */
-/* from: BOOL */ { c_none,    c_none,    c_none,    NULL,       NULL,     NULL,       c_int2str,  NULL,       NULL,       },
-/*       UINT */ { c_none,    c_none,    c_none,    c_int2ip,   c_int2ip, NULL,       c_int2str,  c_int2bin,  NULL,       },
-/*       SINT */ { c_none,    c_none,    c_none,    c_int2ip,   c_int2ip, NULL,       c_int2str,  c_int2bin,  NULL,       },
-/*       ADDR */ { NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       NULL,       NULL,       NULL,       },
-/*       IPV4 */ { NULL,      c_ip2int,  c_ip2int,  c_none,     c_none,   c_ip2ipv6,  c_ip2str,   c_addr2bin, NULL,       },
-/*       IPV6 */ { NULL,      NULL,      NULL,      c_none,     NULL,     c_none,     c_ipv62str, c_addr2bin, NULL,       },
-/*        STR */ { c_str2int, c_str2int, c_str2int, c_str2addr, c_str2ip, c_str2ipv6, c_none,     c_none,     c_str2meth, },
-/*        BIN */ { NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       c_bin2str,  c_none,     c_str2meth, },
-/*       METH */ { NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       c_meth2str, c_meth2str, c_none,     },
+/*            to:  ANY     BOOL       UINT       SINT       ADDR        IPV4      IPV6        STR         BIN         METH */
+/* from:  ANY */ { c_none, c_none,    c_none,    c_none,    c_none,     c_none,   c_none,     c_none,     c_none,     c_none,     },
+/*       BOOL */ { c_none, c_none,    c_none,    c_none,    NULL,       NULL,     NULL,       c_int2str,  NULL,       NULL,       },
+/*       UINT */ { c_none, c_none,    c_none,    c_none,    c_int2ip,   c_int2ip, NULL,       c_int2str,  c_int2bin,  NULL,       },
+/*       SINT */ { c_none, c_none,    c_none,    c_none,    c_int2ip,   c_int2ip, NULL,       c_sint2str, c_int2bin,  NULL,       },
+/*       ADDR */ { c_none, NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       NULL,       NULL,       NULL,       },
+/*       IPV4 */ { c_none, NULL,      c_ip2int,  c_ip2int,  c_none,     c_none,   c_ip2ipv6,  c_ip2str,   c_addr2bin, NULL,       },
+/*       IPV6 */ { c_none, NULL,      NULL,      NULL,      c_none,     NULL,     c_none,     c_ipv62str, c_addr2bin, NULL,       },
+/*        STR */ { c_none, c_str2int, c_str2int, c_str2int, c_str2addr, c_str2ip, c_str2ipv6, c_none,     c_none,     c_str2meth, },
+/*        BIN */ { c_none, NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       c_bin2str,  c_none,     c_str2meth, },
+/*       METH */ { c_none, NULL,      NULL,      NULL,      NULL,       NULL,     NULL,       c_meth2str, c_meth2str, c_none,     }
 };
 
 /*
@@ -1022,8 +1046,8 @@ out_error:
  *   smp      1        0     Present, may change (eg: request length)
  *   smp      1        1     Present, last known value (eg: request length)
  */
-struct sample *sample_process(struct proxy *px, struct session *l4, void *l7,
-                              unsigned int opt,
+struct sample *sample_process(struct proxy *px, struct session *sess,
+                              struct stream *strm, unsigned int opt,
                               struct sample_expr *expr, struct sample *p)
 {
 	struct sample_conv_expr *conv_expr;
@@ -1033,7 +1057,11 @@ struct sample *sample_process(struct proxy *px, struct session *l4, void *l7,
 		memset(p, 0, sizeof(*p));
 	}
 
-	if (!expr->fetch->process(px, l4, l7, opt, expr->arg_p, p, expr->fetch->kw, expr->fetch->private))
+	p->px   = px;
+	p->sess = sess;
+	p->strm = strm;
+	p->opt  = opt;
+	if (!expr->fetch->process(expr->arg_p, p, expr->fetch->kw, expr->fetch->private))
 		return NULL;
 
 	list_for_each_entry(conv_expr, &expr->conv_exprs, list) {
@@ -1052,7 +1080,7 @@ struct sample *sample_process(struct proxy *px, struct session *l4, void *l7,
 
 		/* OK cast succeeded */
 
-		if (!conv_expr->conv->process(l4, conv_expr->arg_p, p, conv_expr->conv->private))
+		if (!conv_expr->conv->process(conv_expr->arg_p, p, conv_expr->conv->private))
 			return NULL;
 	}
 	return p;
@@ -1124,7 +1152,7 @@ int smp_resolve_args(struct proxy *p)
 				*sname++ = '\0';
 				pname = arg->data.str.str;
 
-				px = findproxy(pname, PR_CAP_BE);
+				px = proxy_be_by_name(pname);
 				if (!px) {
 					Alert("parsing [%s:%d] : unable to find proxy '%s' referenced in arg %d of %s%s%s%s '%s' %s proxy '%s'.\n",
 					      cur->file, cur->line, pname,
@@ -1154,7 +1182,7 @@ int smp_resolve_args(struct proxy *p)
 		case ARGT_FE:
 			if (arg->data.str.len) {
 				pname = arg->data.str.str;
-				px = findproxy(pname, PR_CAP_FE);
+				px = proxy_fe_by_name(pname);
 			}
 
 			if (!px) {
@@ -1182,7 +1210,7 @@ int smp_resolve_args(struct proxy *p)
 		case ARGT_BE:
 			if (arg->data.str.len) {
 				pname = arg->data.str.str;
-				px = findproxy(pname, PR_CAP_BE);
+				px = proxy_be_by_name(pname);
 			}
 
 			if (!px) {
@@ -1210,7 +1238,7 @@ int smp_resolve_args(struct proxy *p)
 		case ARGT_TAB:
 			if (arg->data.str.len) {
 				pname = arg->data.str.str;
-				px = find_stktable(pname);
+				px = proxy_tbl_by_name(pname);
 			}
 
 			if (!px) {
@@ -1331,14 +1359,15 @@ int smp_resolve_args(struct proxy *p)
  *   smp      1        0     Not present yet, may appear later (eg: header)
  *   smp      1        1     never happens (either flag is cleared on output)
  */
-struct sample *sample_fetch_string(struct proxy *px, struct session *l4, void *l7,
-                                   unsigned int opt, struct sample_expr *expr)
+struct sample *sample_fetch_string(struct proxy *px, struct session *sess,
+                                   struct stream *strm, unsigned int opt,
+                                   struct sample_expr *expr)
 {
 	struct sample *smp = &temp_smp;
 
 	memset(smp, 0, sizeof(*smp));
 
-	if (!sample_process(px, l4, l7, opt, expr, smp)) {
+	if (!sample_process(px, sess, strm, opt, expr, smp)) {
 		if ((smp->flags & SMP_F_MAY_CHANGE) && !(opt & SMP_OPT_FINAL))
 			return smp;
 		return NULL;
@@ -1360,8 +1389,45 @@ struct sample *sample_fetch_string(struct proxy *px, struct session *l4, void *l
 /*    These functions set the data type on return.               */
 /*****************************************************************/
 
-static int sample_conv_bin2base64(struct session *session, const struct arg *arg_p,
-                                  struct sample *smp, void *private)
+#ifdef DEBUG_EXPR
+static int sample_conv_debug(const struct arg *arg_p, struct sample *smp, void *private)
+{
+	int i;
+	struct sample tmp;
+
+	if (!(global.mode & MODE_QUIET) || (global.mode & (MODE_VERBOSE | MODE_STARTING))) {
+		fprintf(stderr, "[debug converter] type: %s ", smp_to_type[smp->type]);
+		if (!sample_casts[smp->type][SMP_T_STR]) {
+			fprintf(stderr, "(undisplayable)");
+		} else {
+
+			/* Copy sample fetch. This put the sample as const, the
+			 * cast will copy data if a transformation is required.
+			 */
+			memcpy(&tmp, smp, sizeof(struct sample));
+			tmp.flags = SMP_F_CONST;
+
+			if (!sample_casts[smp->type][SMP_T_STR](&tmp))
+				fprintf(stderr, "(undisplayable)");
+
+			else {
+				/* Display the displayable chars*. */
+				fprintf(stderr, "<");
+				for (i = 0; i < tmp.data.str.len; i++) {
+					if (isprint(tmp.data.str.str[i]))
+						fputc(tmp.data.str.str[i], stderr);
+					else
+						fputc('.', stderr);
+				}
+			}
+			fprintf(stderr, ">\n");
+		}
+	}
+	return 1;
+}
+#endif
+
+static int sample_conv_bin2base64(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	struct chunk *trash = get_trash_chunk();
 	int b64_len;
@@ -1378,8 +1444,7 @@ static int sample_conv_bin2base64(struct session *session, const struct arg *arg
 	return 1;
 }
 
-static int sample_conv_bin2hex(struct session *session, const struct arg *arg_p,
-                               struct sample *smp, void *private)
+static int sample_conv_bin2hex(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	struct chunk *trash = get_trash_chunk();
 	unsigned char c;
@@ -1398,8 +1463,7 @@ static int sample_conv_bin2hex(struct session *session, const struct arg *arg_p,
 }
 
 /* hashes the binary input into a 32-bit unsigned int */
-static int sample_conv_djb2(struct session *session, const struct arg *arg_p,
-                            struct sample *smp, void *private)
+static int sample_conv_djb2(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	smp->data.uint = hash_djb2(smp->data.str.str, smp->data.str.len);
 	if (arg_p && arg_p->data.uint)
@@ -1408,8 +1472,7 @@ static int sample_conv_djb2(struct session *session, const struct arg *arg_p,
 	return 1;
 }
 
-static int sample_conv_str2lower(struct session *session, const struct arg *arg_p,
-                                 struct sample *smp, void *private)
+static int sample_conv_str2lower(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	int i;
 
@@ -1426,8 +1489,7 @@ static int sample_conv_str2lower(struct session *session, const struct arg *arg_
 	return 1;
 }
 
-static int sample_conv_str2upper(struct session *session, const struct arg *arg_p,
-                                 struct sample *smp, void *private)
+static int sample_conv_str2upper(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	int i;
 
@@ -1445,8 +1507,7 @@ static int sample_conv_str2upper(struct session *session, const struct arg *arg_
 }
 
 /* takes the netmask in arg_p */
-static int sample_conv_ipmask(struct session *session, const struct arg *arg_p,
-                              struct sample *smp, void *private)
+static int sample_conv_ipmask(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	smp->data.ipv4.s_addr &= arg_p->data.ipv4.s_addr;
 	smp->type = SMP_T_IPV4;
@@ -1457,8 +1518,7 @@ static int sample_conv_ipmask(struct session *session, const struct arg *arg_p,
  * adds an optional offset found in args[1] and emits a string representing
  * the local time in the format specified in args[1] using strftime().
  */
-static int sample_conv_ltime(struct session *session, const struct arg *args,
-                             struct sample *smp, void *private)
+static int sample_conv_ltime(const struct arg *args, struct sample *smp, void *private)
 {
 	struct chunk *temp;
 	time_t curr_date = smp->data.uint;
@@ -1475,8 +1535,7 @@ static int sample_conv_ltime(struct session *session, const struct arg *args,
 }
 
 /* hashes the binary input into a 32-bit unsigned int */
-static int sample_conv_sdbm(struct session *session, const struct arg *arg_p,
-                            struct sample *smp, void *private)
+static int sample_conv_sdbm(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	smp->data.uint = hash_sdbm(smp->data.str.str, smp->data.str.len);
 	if (arg_p && arg_p->data.uint)
@@ -1489,8 +1548,7 @@ static int sample_conv_sdbm(struct session *session, const struct arg *arg_p,
  * adds an optional offset found in args[1] and emits a string representing
  * the UTC date in the format specified in args[1] using strftime().
  */
-static int sample_conv_utime(struct session *session, const struct arg *args,
-                             struct sample *smp, void *private)
+static int sample_conv_utime(const struct arg *args, struct sample *smp, void *private)
 {
 	struct chunk *temp;
 	time_t curr_date = smp->data.uint;
@@ -1507,8 +1565,7 @@ static int sample_conv_utime(struct session *session, const struct arg *args,
 }
 
 /* hashes the binary input into a 32-bit unsigned int */
-static int sample_conv_wt6(struct session *session, const struct arg *arg_p,
-                           struct sample *smp, void *private)
+static int sample_conv_wt6(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	smp->data.uint = hash_wt6(smp->data.str.str, smp->data.str.len);
 	if (arg_p && arg_p->data.uint)
@@ -1518,8 +1575,7 @@ static int sample_conv_wt6(struct session *session, const struct arg *arg_p,
 }
 
 /* hashes the binary input into a 32-bit unsigned int */
-static int sample_conv_crc32(struct session *session, const struct arg *arg_p,
-                             struct sample *smp, void *private)
+static int sample_conv_crc32(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	smp->data.uint = hash_crc32(smp->data.str.str, smp->data.str.len);
 	if (arg_p && arg_p->data.uint)
@@ -1599,8 +1655,7 @@ static int sample_conv_json_check(struct arg *arg, struct sample_conv *conv,
 	return 0;
 }
 
-static int sample_conv_json(struct session *session, const struct arg *arg_p,
-                            struct sample *smp, void *private)
+static int sample_conv_json(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	struct chunk *temp;
 	char _str[7]; /* \u + 4 hex digit + null char for sprintf. */
@@ -1714,8 +1769,7 @@ static int sample_conv_json(struct session *session, const struct arg *arg_p,
 /* This sample function is designed to extract some bytes from an input buffer.
  * First arg is the offset.
  * Optional second arg is the length to truncate */
-static int sample_conv_bytes(struct session *session, const struct arg *arg_p,
-                             struct sample *smp, void *private)
+static int sample_conv_bytes(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	if (smp->data.str.len <= arg_p[0].data.uint) {
 		smp->data.str.len = 0;
@@ -1772,8 +1826,7 @@ static int sample_conv_field_check(struct arg *args, struct sample_conv *conv,
  * First arg is the index of the field (start at 1)
  * Second arg is a char list of separators (type string)
  */
-static int sample_conv_field(struct session *session, const struct arg *arg_p,
-                             struct sample *smp, void *private)
+static int sample_conv_field(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	unsigned int field;
 	char *start, *end;
@@ -1824,8 +1877,7 @@ found:
  * First arg is the index of the word (start at 1)
  * Second arg is a char list of words separators (type string)
  */
-static int sample_conv_word(struct session *session, const struct arg *arg_p,
-                            struct sample *smp, void *private)
+static int sample_conv_word(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	unsigned int word;
 	char *start, *end;
@@ -1919,8 +1971,7 @@ static int sample_conv_regsub_check(struct arg *args, struct sample_conv *conv,
  * location until nothing matches anymore. First arg is the regex to apply to
  * the input string, second arg is the replacement expression.
  */
-static int sample_conv_regsub(struct session *session, const struct arg *arg_p,
-                              struct sample *smp, void *private)
+static int sample_conv_regsub(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	char *start, *end;
 	struct my_regex *reg = arg_p[0].data.reg;
@@ -1992,8 +2043,7 @@ static int sample_conv_regsub(struct session *session, const struct arg *arg_p,
 /* Takes a UINT on input, applies a binary twos complement and returns the UINT
  * result.
  */
-static int sample_conv_binary_cpl(struct session *session, const struct arg *arg_p,
-                                  struct sample *smp, void *private)
+static int sample_conv_binary_cpl(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	smp->data.uint = ~smp->data.uint;
 	return 1;
@@ -2002,8 +2052,7 @@ static int sample_conv_binary_cpl(struct session *session, const struct arg *arg
 /* Takes a UINT on input, applies a binary "and" with the UINT in arg_p, and
  * returns the UINT result.
  */
-static int sample_conv_binary_and(struct session *session, const struct arg *arg_p,
-                                  struct sample *smp, void *private)
+static int sample_conv_binary_and(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	smp->data.uint &= arg_p->data.uint;
 	return 1;
@@ -2012,8 +2061,7 @@ static int sample_conv_binary_and(struct session *session, const struct arg *arg
 /* Takes a UINT on input, applies a binary "or" with the UINT in arg_p, and
  * returns the UINT result.
  */
-static int sample_conv_binary_or(struct session *session, const struct arg *arg_p,
-                                 struct sample *smp, void *private)
+static int sample_conv_binary_or(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	smp->data.uint |= arg_p->data.uint;
 	return 1;
@@ -2022,8 +2070,7 @@ static int sample_conv_binary_or(struct session *session, const struct arg *arg_
 /* Takes a UINT on input, applies a binary "xor" with the UINT in arg_p, and
  * returns the UINT result.
  */
-static int sample_conv_binary_xor(struct session *session, const struct arg *arg_p,
-                                  struct sample *smp, void *private)
+static int sample_conv_binary_xor(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	smp->data.uint ^= arg_p->data.uint;
 	return 1;
@@ -2032,8 +2079,7 @@ static int sample_conv_binary_xor(struct session *session, const struct arg *arg
 /* Takes a UINT on input, applies an arithmetic "add" with the UINT in arg_p,
  * and returns the UINT result.
  */
-static int sample_conv_arith_add(struct session *session, const struct arg *arg_p,
-                                 struct sample *smp, void *private)
+static int sample_conv_arith_add(const struct arg *arg_p, struct sample *smp, void *private)
 {
 	smp->data.uint += arg_p->data.uint;
 	return 1;
@@ -2042,7 +2088,7 @@ static int sample_conv_arith_add(struct session *session, const struct arg *arg_
 /* Takes a UINT on input, applies an arithmetic "sub" with the UINT in arg_p,
  * and returns the UINT result.
  */
-static int sample_conv_arith_sub(struct session *session, const struct arg *arg_p,
+static int sample_conv_arith_sub(const struct arg *arg_p,
                                  struct sample *smp, void *private)
 {
 	smp->data.uint -= arg_p->data.uint;
@@ -2052,7 +2098,7 @@ static int sample_conv_arith_sub(struct session *session, const struct arg *arg_
 /* Takes a UINT on input, applies an arithmetic "mul" with the UINT in arg_p,
  * and returns the UINT result.
  */
-static int sample_conv_arith_mul(struct session *session, const struct arg *arg_p,
+static int sample_conv_arith_mul(const struct arg *arg_p,
                                  struct sample *smp, void *private)
 {
 	smp->data.uint *= arg_p->data.uint;
@@ -2063,7 +2109,7 @@ static int sample_conv_arith_mul(struct session *session, const struct arg *arg_
  * and returns the UINT result. If arg_p makes the result overflow, then the
  * largest possible quantity is returned.
  */
-static int sample_conv_arith_div(struct session *session, const struct arg *arg_p,
+static int sample_conv_arith_div(const struct arg *arg_p,
                                  struct sample *smp, void *private)
 {
 	if (arg_p->data.uint)
@@ -2077,7 +2123,7 @@ static int sample_conv_arith_div(struct session *session, const struct arg *arg_
  * and returns the UINT result. If arg_p makes the result overflow, then zero
  * is returned.
  */
-static int sample_conv_arith_mod(struct session *session, const struct arg *arg_p,
+static int sample_conv_arith_mod(const struct arg *arg_p,
                                  struct sample *smp, void *private)
 {
 	if (arg_p->data.uint)
@@ -2090,7 +2136,7 @@ static int sample_conv_arith_mod(struct session *session, const struct arg *arg_
 /* Takes an UINT on input, applies an arithmetic "neg" and returns the UINT
  * result.
  */
-static int sample_conv_arith_neg(struct session *session, const struct arg *arg_p,
+static int sample_conv_arith_neg(const struct arg *arg_p,
                                  struct sample *smp, void *private)
 {
 	smp->data.uint = -smp->data.uint;
@@ -2100,7 +2146,7 @@ static int sample_conv_arith_neg(struct session *session, const struct arg *arg_
 /* Takes a UINT on input, returns true is the value is non-null, otherwise
  * false. The output is a BOOL.
  */
-static int sample_conv_arith_bool(struct session *session, const struct arg *arg_p,
+static int sample_conv_arith_bool(const struct arg *arg_p,
                                   struct sample *smp, void *private)
 {
 	smp->data.uint = !!smp->data.uint;
@@ -2111,7 +2157,7 @@ static int sample_conv_arith_bool(struct session *session, const struct arg *arg
 /* Takes a UINT on input, returns false is the value is non-null, otherwise
  * truee. The output is a BOOL.
  */
-static int sample_conv_arith_not(struct session *session, const struct arg *arg_p,
+static int sample_conv_arith_not(const struct arg *arg_p,
                                  struct sample *smp, void *private)
 {
 	smp->data.uint = !smp->data.uint;
@@ -2122,7 +2168,7 @@ static int sample_conv_arith_not(struct session *session, const struct arg *arg_
 /* Takes a UINT on input, returns true is the value is odd, otherwise false.
  * The output is a BOOL.
  */
-static int sample_conv_arith_odd(struct session *session, const struct arg *arg_p,
+static int sample_conv_arith_odd(const struct arg *arg_p,
                                  struct sample *smp, void *private)
 {
 	smp->data.uint = smp->data.uint & 1;
@@ -2133,7 +2179,7 @@ static int sample_conv_arith_odd(struct session *session, const struct arg *arg_
 /* Takes a UINT on input, returns true is the value is even, otherwise false.
  * The output is a BOOL.
  */
-static int sample_conv_arith_even(struct session *session, const struct arg *arg_p,
+static int sample_conv_arith_even(const struct arg *arg_p,
                                   struct sample *smp, void *private)
 {
 	smp->data.uint = !(smp->data.uint & 1);
@@ -2141,14 +2187,129 @@ static int sample_conv_arith_even(struct session *session, const struct arg *arg
 	return 1;
 }
 
+#ifdef USE_51DEGREES
+#ifdef FIFTYONEDEGREES_H_TRIE_INCLUDED
+static int
+sample_fiftyone_degrees(const struct arg *args, struct sample *smp, void *private)
+{
+	int i; // used in loops.
+	int device_offset;
+	int property_index;
+	char no_data[] = "NoData"; // response when no data could be found.
+	struct chunk *tmp;
+
+	// use a temporary trash buffer and copy data in it
+	smp->data.str.str[smp->data.str.len] = '\0';
+
+	// perform detection.
+	device_offset = fiftyoneDegreesGetDeviceOffset(smp->data.str.str);
+
+	i = 0;
+	tmp = get_trash_chunk();
+	chunk_reset(tmp);
+
+	// loop through property names passed to the filter and fetch them from the dataset.
+	while (args[i].data.str.str) {
+		// try to find request property in dataset.
+		property_index = fiftyoneDegreesGetPropertyIndex(args[i].data.str.str);
+		if (property_index > 0) {
+			chunk_appendf(tmp, "%s", fiftyoneDegreesGetValue(device_offset, property_index));
+		}
+		else {
+			chunk_appendf(tmp, "%s", no_data);
+		}
+		// add seperator
+		if (global._51d_property_seperator)
+			chunk_appendf(tmp, "%c", global._51d_property_seperator);
+		else
+			chunk_appendf(tmp, ",");
+		++i;
+	}
+
+	if (tmp->len) {
+		--tmp->len;
+		tmp->str[tmp->len] = '\0';
+	}
+
+	smp->data.str.str = tmp->str;
+	smp->data.str.len = strlen(smp->data.str.str);
+
+	return 1;
+}
+#endif // FIFTYONEDEGREES_H_TRIE_INCLUDED
+
+#ifdef FIFTYONEDEGREES_H_PATTERN_INCLUDED
+static int
+sample_fiftyone_degrees(const struct arg *args, struct sample *smp, void *private)
+{
+	int i, j, found; // used in loops.
+	fiftyoneDegreesWorkset* ws; // workset for detection.
+	char no_data[] = "NoData"; // response when no data could be found.
+	const char* property_name;
+	struct chunk *tmp;
+
+	// use a temporary trash buffer and copy data in it
+	smp->data.str.str[smp->data.str.len] = '\0';
+
+	// create workset. this will later contain detection results.
+	ws = fiftyoneDegreesCreateWorkset(&global._51d_data_set);
+	if (!ws)
+		return 0;
+
+	// perform detection.
+	fiftyoneDegreesMatch(ws, smp->data.str.str);
+
+	i = 0;
+	tmp = get_trash_chunk();
+	chunk_reset(tmp);
+	// loop through property names passed to the filter and fetch them from the dataset.
+	while (args[i].data.str.str) {
+		found = j = 0;
+		// try to find request property in dataset.
+		for (j = 0; j < ws->dataSet->requiredPropertyCount; j++) {
+			property_name = fiftyoneDegreesGetPropertyName(ws->dataSet, ws->dataSet->requiredProperties[j]);
+			if (strcmp(property_name, args[i].data.str.str) == 0) {
+				found = 1;
+				fiftyoneDegreesSetValues(ws, j);
+				chunk_appendf(tmp, "%s", fiftyoneDegreesGetValueName(ws->dataSet, *ws->values));
+				break;
+			}
+		}
+		if (!found) {
+			chunk_appendf(tmp, "%s", no_data);
+		}
+
+		// add seperator
+		if (global._51d_property_seperator)
+			chunk_appendf(tmp, "%c", global._51d_property_seperator);
+		else
+			chunk_appendf(tmp, ",");
+		++i;
+	}
+
+	if (tmp->len) {
+		--tmp->len;
+		tmp->str[tmp->len] = '\0';
+	}
+
+	smp->data.str.str = tmp->str;
+	smp->data.str.len = strlen(smp->data.str.str);
+
+	fiftyoneDegreesFreeWorkset(ws);
+
+	return 1;
+}
+#endif // FIFTYONEDEGREES_H_PATTERN_INCLUDED
+#endif // USE_51DEGREES
+
+
 /************************************************************************/
 /*       All supported sample fetch functions must be declared here     */
 /************************************************************************/
 
 /* force TRUE to be returned at the fetch level */
 static int
-smp_fetch_true(struct proxy *px, struct session *s, void *l7, unsigned int opt,
-               const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_true(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	smp->type = SMP_T_BOOL;
 	smp->data.uint = 1;
@@ -2157,8 +2318,7 @@ smp_fetch_true(struct proxy *px, struct session *s, void *l7, unsigned int opt,
 
 /* force FALSE to be returned at the fetch level */
 static int
-smp_fetch_false(struct proxy *px, struct session *s, void *l7, unsigned int opt,
-                const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_false(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	smp->type = SMP_T_BOOL;
 	smp->data.uint = 0;
@@ -2167,8 +2327,7 @@ smp_fetch_false(struct proxy *px, struct session *s, void *l7, unsigned int opt,
 
 /* retrieve environment variable $1 as a string */
 static int
-smp_fetch_env(struct proxy *px, struct session *s, void *l7, unsigned int opt,
-              const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_env(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	char *env;
 
@@ -2190,8 +2349,7 @@ smp_fetch_env(struct proxy *px, struct session *s, void *l7, unsigned int opt,
  * of args[0] seconds.
  */
 static int
-smp_fetch_date(struct proxy *px, struct session *s, void *l7, unsigned int opt,
-               const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_date(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	smp->data.uint = date.tv_sec;
 
@@ -2206,8 +2364,7 @@ smp_fetch_date(struct proxy *px, struct session *s, void *l7, unsigned int opt,
 
 /* returns the number of processes */
 static int
-smp_fetch_nbproc(struct proxy *px, struct session *s, void *l7, unsigned int opt,
-                 const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_nbproc(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	smp->type = SMP_T_UINT;
 	smp->data.uint = global.nbproc;
@@ -2216,8 +2373,7 @@ smp_fetch_nbproc(struct proxy *px, struct session *s, void *l7, unsigned int opt
 
 /* returns the number of the current process (between 1 and nbproc */
 static int
-smp_fetch_proc(struct proxy *px, struct session *s, void *l7, unsigned int opt,
-               const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_proc(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	smp->type = SMP_T_UINT;
 	smp->data.uint = relative_pid;
@@ -2228,8 +2384,7 @@ smp_fetch_proc(struct proxy *px, struct session *s, void *l7, unsigned int opt,
  * range specified in argument.
  */
 static int
-smp_fetch_rand(struct proxy *px, struct session *s, void *l7, unsigned int opt,
-               const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_rand(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	smp->data.uint = random();
 
@@ -2244,11 +2399,136 @@ smp_fetch_rand(struct proxy *px, struct session *s, void *l7, unsigned int opt,
 
 /* returns true if the current process is stopping */
 static int
-smp_fetch_stopping(struct proxy *px, struct session *s, void *l7, unsigned int opt,
-                   const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_stopping(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	smp->type = SMP_T_BOOL;
 	smp->data.uint = stopping;
+	return 1;
+}
+
+static int smp_fetch_const_str(const struct arg *args, struct sample *smp, const char *kw, void *private)
+{
+	smp->flags |= SMP_F_CONST;
+	smp->type = SMP_T_STR;
+	smp->data.str.str = args[0].data.str.str;
+	smp->data.str.len = args[0].data.str.len;
+	return 1;
+}
+
+static int smp_check_const_bool(struct arg *args, char **err)
+{
+	if (strcasecmp(args[0].data.str.str, "true") == 0 ||
+	    strcasecmp(args[0].data.str.str, "1") == 0) {
+		args[0].type = ARGT_UINT;
+		args[0].data.uint = 1;
+		return 1;
+	}
+	if (strcasecmp(args[0].data.str.str, "false") == 0 ||
+	    strcasecmp(args[0].data.str.str, "0") == 0) {
+		args[0].type = ARGT_UINT;
+		args[0].data.uint = 0;
+		return 1;
+	}
+	memprintf(err, "Expects 'true', 'false', '0' or '1'");
+	return 0;
+}
+
+static int smp_fetch_const_bool(const struct arg *args, struct sample *smp, const char *kw, void *private)
+{
+	smp->type = SMP_T_BOOL;
+	smp->data.uint = args[0].data.uint;
+	return 1;
+}
+
+static int smp_fetch_const_uint(const struct arg *args, struct sample *smp, const char *kw, void *private)
+{
+	smp->type = SMP_T_UINT;
+	smp->data.uint = args[0].data.uint;
+	return 1;
+}
+
+static int smp_fetch_const_sint(const struct arg *args, struct sample *smp, const char *kw, void *private)
+{
+	smp->type = SMP_T_SINT;
+	smp->data.sint = args[0].data.sint;
+	return 1;
+}
+
+static int smp_fetch_const_ipv4(const struct arg *args, struct sample *smp, const char *kw, void *private)
+{
+	smp->type = SMP_T_IPV4;
+	smp->data.ipv4 = args[0].data.ipv4;
+	return 1;
+}
+
+static int smp_fetch_const_ipv6(const struct arg *args, struct sample *smp, const char *kw, void *private)
+{
+	smp->type = SMP_T_IPV6;
+	smp->data.ipv6 = args[0].data.ipv6;
+	return 1;
+}
+
+static int smp_check_const_bin(struct arg *args, char **err)
+{
+	char *binstr;
+	int binstrlen;
+
+	if (!parse_binary(args[0].data.str.str, &binstr, &binstrlen, err))
+		return 0;
+	args[0].type = ARGT_STR;
+	args[0].data.str.str = binstr;
+	args[0].data.str.len = binstrlen;
+	return 1;
+}
+
+static int smp_fetch_const_bin(const struct arg *args, struct sample *smp, const char *kw, void *private)
+{
+	smp->flags |= SMP_F_CONST;
+	smp->type = SMP_T_BIN;
+	smp->data.str.str = args[0].data.str.str;
+	smp->data.str.len = args[0].data.str.len;
+	return 1;
+}
+
+static int smp_check_const_meth(struct arg *args, char **err)
+{
+	enum http_meth_t meth;
+	int i;
+
+	meth = find_http_meth(args[0].data.str.str, args[0].data.str.len);
+	if (meth != HTTP_METH_OTHER) {
+		args[0].type = ARGT_UINT;
+		args[0].data.uint = meth;
+	} else {
+		/* Check method avalaibility. A methos is a token defined as :
+		 * tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
+		 *         "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+		 * token = 1*tchar
+		 */
+		for (i = 0; i < args[0].data.str.len; i++) {
+			if (!http_is_token[(unsigned char)args[0].data.str.str[i]]) {
+				memprintf(err, "expects valid method.");
+				return 0;
+			}
+		}
+	}
+	return 1;
+}
+
+static int smp_fetch_const_meth(const struct arg *args, struct sample *smp, const char *kw, void *private)
+{
+	smp->type = SMP_T_METH;
+	if (args[0].type == ARGT_UINT) {
+		smp->flags &= ~SMP_F_CONST;
+		smp->data.meth.meth = args[0].data.uint;
+		smp->data.meth.str.str = "";
+		smp->data.meth.str.len = 0;
+	} else {
+		smp->flags |= SMP_F_CONST;
+		smp->data.meth.meth = HTTP_METH_OTHER;
+		smp->data.meth.str.str = args[0].data.str.str;
+		smp->data.meth.str.len = args[0].data.str.len;
+	}
 	return 1;
 }
 
@@ -2266,11 +2546,25 @@ static struct sample_fetch_kw_list smp_kws = {ILH, {
 	{ "proc",         smp_fetch_proc,  0,            NULL, SMP_T_UINT, SMP_USE_INTRN },
 	{ "rand",         smp_fetch_rand,  ARG1(0,UINT), NULL, SMP_T_UINT, SMP_USE_INTRN },
 	{ "stopping",     smp_fetch_stopping, 0,         NULL, SMP_T_BOOL, SMP_USE_INTRN },
+
+	{ "str",  smp_fetch_const_str,  ARG1(1,STR),  NULL                , SMP_T_STR,  SMP_USE_INTRN },
+	{ "bool", smp_fetch_const_bool, ARG1(1,STR),  smp_check_const_bool, SMP_T_BOOL, SMP_USE_INTRN },
+	{ "uint", smp_fetch_const_uint, ARG1(1,UINT), NULL                , SMP_T_UINT, SMP_USE_INTRN },
+	{ "sint", smp_fetch_const_sint, ARG1(1,SINT), NULL                , SMP_T_SINT, SMP_USE_INTRN },
+	{ "ipv4", smp_fetch_const_ipv4, ARG1(1,IPV4), NULL                , SMP_T_IPV4, SMP_USE_INTRN },
+	{ "ipv6", smp_fetch_const_ipv6, ARG1(1,IPV6), NULL                , SMP_T_IPV6, SMP_USE_INTRN },
+	{ "bin",  smp_fetch_const_bin,  ARG1(1,STR),  smp_check_const_bin , SMP_T_BIN,  SMP_USE_INTRN },
+	{ "meth", smp_fetch_const_meth, ARG1(1,STR),  smp_check_const_meth, SMP_T_METH, SMP_USE_INTRN },
+
 	{ /* END */ },
 }};
 
 /* Note: must not be declared <const> as its list will be overwritten */
 static struct sample_conv_kw_list sample_conv_kws = {ILH, {
+#ifdef DEBUG_EXPR
+	{ "debug",  sample_conv_debug,     0,            NULL, SMP_T_ANY,  SMP_T_ANY  },
+#endif
+
 	{ "base64", sample_conv_bin2base64,0,            NULL, SMP_T_BIN,  SMP_T_STR  },
 	{ "upper",  sample_conv_str2upper, 0,            NULL, SMP_T_STR,  SMP_T_STR  },
 	{ "lower",  sample_conv_str2lower, 0,            NULL, SMP_T_STR,  SMP_T_STR  },
@@ -2302,6 +2596,9 @@ static struct sample_conv_kw_list sample_conv_kws = {ILH, {
 	{ "div",    sample_conv_arith_div,  ARG1(1,UINT), NULL, SMP_T_UINT, SMP_T_UINT },
 	{ "mod",    sample_conv_arith_mod,  ARG1(1,UINT), NULL, SMP_T_UINT, SMP_T_UINT },
 	{ "neg",    sample_conv_arith_neg,             0, NULL, SMP_T_UINT, SMP_T_UINT },
+#ifdef USE_51DEGREES
+	{ "51d",    sample_fiftyone_degrees,ARG5(1,STR,STR,STR,STR,STR), NULL, SMP_T_STR, SMP_T_STR },
+#endif
 
 	{ NULL, NULL, 0, 0, 0 },
 }};

@@ -24,7 +24,7 @@
 
 /*
  * BUFSIZE defines the size of a read and write buffer. It is the maximum
- * amount of bytes which can be stored by the proxy for each session. However,
+ * amount of bytes which can be stored by the proxy for each stream. However,
  * when reading HTTP headers, the proxy needs some spare space to add or rewrite
  * headers if needed. The size of this spare is defined with MAXREWRITE. So it
  * is not possible to process headers longer than BUFSIZE-MAXREWRITE bytes. By
@@ -257,9 +257,13 @@
 #define SSL_HANDSHAKE_MAX_COST (76*1024)  // measured
 #endif
 
-/* approximate session size (for maxconn estimate) */
-#ifndef SESSION_MAX_COST
-#define SESSION_MAX_COST (sizeof(struct session) + \
+#ifndef DEFAULT_SSL_CTX_CACHE
+#define DEFAULT_SSL_CTX_CACHE 1000
+#endif
+
+/* approximate stream size (for maxconn estimate) */
+#ifndef STREAM_MAX_COST
+#define STREAM_MAX_COST (sizeof(struct stream) + \
                           2 * sizeof(struct channel) + \
                           2 * sizeof(struct connection) + \
                           REQURI_LEN + \
@@ -295,4 +299,15 @@
 #ifndef TLS_TICKETS_NO
 #define TLS_TICKETS_NO 3
 #endif
+
+/* pattern lookup default cache size, in number of entries :
+ * 10k entries at 10k req/s mean 1% risk of a collision after 60 years, that's
+ * already much less than the memory's reliability in most machines and more
+ * durable than most admin's life expectancy. A collision will result in a
+ * valid result to be returned for a different entry from the same list.
+ */
+#ifndef DEFAULT_PAT_LRU_SIZE
+#define DEFAULT_PAT_LRU_SIZE 10000
+#endif
+
 #endif /* _COMMON_DEFAULTS_H */

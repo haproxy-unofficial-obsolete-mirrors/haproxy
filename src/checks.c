@@ -38,6 +38,7 @@
 
 #include <types/global.h>
 #include <types/mailers.h>
+#include <types/dns.h>
 
 #ifdef USE_OPENSSL
 #include <types/ssl_sock.h>
@@ -57,12 +58,15 @@
 #include <proto/proxy.h>
 #include <proto/raw_sock.h>
 #include <proto/server.h>
-#include <proto/session.h>
 #include <proto/stream_interface.h>
 #include <proto/task.h>
+#include <proto/log.h>
+#include <proto/dns.h>
+#include <proto/proto_udp.h>
 
 static int httpchk_expect(struct server *s, int done);
 static int tcpcheck_get_step_id(struct check *);
+static char * tcpcheck_get_step_comment(struct check *, int);
 static void tcpcheck_main(struct connection *);
 
 static const struct check_status check_statuses[HCHK_STATUS_SIZE] = {
@@ -317,7 +321,7 @@ static void set_server_check_status(struct check *check, short status, const cha
 
 		Warning("%s.\n", trash.str);
 		send_log(s->proxy, LOG_NOTICE, "%s.\n", trash.str);
-		send_email_alert(s, LOG_NOTICE, "%s", trash.str);
+		send_email_alert(s, LOG_INFO, "%s", trash.str);
 	}
 }
 
@@ -494,6 +498,8 @@ static int httpchk_build_status_header(struct server *s, char *buffer, int size)
 	int sv_state;
 	int ratio;
 	int hlen = 0;
+	char addr[46];
+	char port[6];
 	const char *srv_hlt_st[7] = { "DOWN", "DOWN %d/%d",
 				      "UP %d/%d", "UP",
 				      "NOLB %d/%d", "NOLB",
@@ -524,8 +530,11 @@ static int httpchk_build_status_header(struct server *s, char *buffer, int size)
 			     (s->state != SRV_ST_STOPPED) ? (s->check.health - s->check.rise + 1) : (s->check.health),
 			     (s->state != SRV_ST_STOPPED) ? (s->check.fall) : (s->check.rise));
 
-	hlen += snprintf(buffer + hlen,  size - hlen, "; name=%s/%s; node=%s; weight=%d/%d; scur=%d/%d; qcur=%d",
-			     s->proxy->id, s->id,
+	addr_to_str(&s->addr, addr, sizeof(addr));
+	port_to_str(&s->addr, port, sizeof(port));
+
+	hlen += snprintf(buffer + hlen,  size - hlen, "; address=%s; port=%s; name=%s/%s; node=%s; weight=%d/%d; scur=%d/%d; qcur=%d",
+			     addr, port, s->proxy->id, s->id,
 			     global.node,
 			     (s->eweight * s->proxy->lbprm.wmult + s->proxy->lbprm.wdiv - 1) / s->proxy->lbprm.wdiv,
 			     (s->proxy->lbprm.tot_weight * s->proxy->lbprm.wmult + s->proxy->lbprm.wdiv - 1) / s->proxy->lbprm.wdiv,
@@ -604,6 +613,7 @@ static void chk_report_conn_err(struct connection *conn, int errno_bck, int expi
 	const char *err_msg;
 	struct chunk *chk;
 	int step;
+	char *comment;
 
 	if (check->result != CHK_RES_UNKNOWN)
 		return;
@@ -637,13 +647,17 @@ static void chk_report_conn_err(struct connection *conn, int errno_bck, int expi
 			}
 			else if (check->last_started_step && check->last_started_step->action == TCPCHK_ACT_EXPECT) {
 				if (check->last_started_step->string)
-					chunk_appendf(chk, " (string '%s')", check->last_started_step->string);
+					chunk_appendf(chk, " (expect string '%s')", check->last_started_step->string);
 				else if (check->last_started_step->expect_regex)
 					chunk_appendf(chk, " (expect regex)");
 			}
 			else if (check->last_started_step && check->last_started_step->action == TCPCHK_ACT_SEND) {
 				chunk_appendf(chk, " (send)");
 			}
+
+			comment = tcpcheck_get_step_comment(check, step);
+			if (comment)
+				chunk_appendf(chk, " comment: '%s'", comment);
 		}
 	}
 
@@ -670,6 +684,14 @@ static void chk_report_conn_err(struct connection *conn, int errno_bck, int expi
 			set_server_check_status(check, HCHK_STATUS_L4CON, err_msg);
 		else if (expired)
 			set_server_check_status(check, HCHK_STATUS_L4TOUT, err_msg);
+
+		/*
+		 * might be due to a server IP change.
+		 * Let's trigger a DNS resolution if none are currently running.
+		 */
+		if ((check->server->resolution)	&& (check->server->resolution->step == RSLV_STEP_NONE))
+			trigger_resolution(check->server);
+
 	}
 	else if ((conn->flags & (CO_FL_CONNECTED|CO_FL_WAIT_L6_CONN)) == CO_FL_WAIT_L6_CONN) {
 		/* L6 not established (yet) */
@@ -1385,14 +1407,14 @@ static struct task *server_warmup(struct task *t)
  * establish a server health-check that makes use of a connection.
  *
  * It can return one of :
- *  - SN_ERR_NONE if everything's OK and tcpcheck_main() was not called
- *  - SN_ERR_UP if if everything's OK and tcpcheck_main() was called
- *  - SN_ERR_SRVTO if there are no more servers
- *  - SN_ERR_SRVCL if the connection was refused by the server
- *  - SN_ERR_PRXCOND if the connection has been limited by the proxy (maxconn)
- *  - SN_ERR_RESOURCE if a system resource is lacking (eg: fd limits, ports, ...)
- *  - SN_ERR_INTERNAL for any other purely internal errors
- * Additionnally, in the case of SN_ERR_RESOURCE, an emergency log will be emitted.
+ *  - SF_ERR_NONE if everything's OK and tcpcheck_main() was not called
+ *  - SF_ERR_UP if if everything's OK and tcpcheck_main() was called
+ *  - SF_ERR_SRVTO if there are no more servers
+ *  - SF_ERR_SRVCL if the connection was refused by the server
+ *  - SF_ERR_PRXCOND if the connection has been limited by the proxy (maxconn)
+ *  - SF_ERR_RESOURCE if a system resource is lacking (eg: fd limits, ports, ...)
+ *  - SF_ERR_INTERNAL for any other purely internal errors
+ * Additionnally, in the case of SF_ERR_RESOURCE, an emergency log will be emitted.
  * Note that we try to prevent the network stack from sending the ACK during the
  * connect() when a pure TCP check is used (without PROXY protocol).
  */
@@ -1466,17 +1488,20 @@ static int connect_conn_chk(struct task *t)
 	quickack = check->type == 0 || check->type == PR_O2_TCPCHK_CHK;
 
 	if (check->type == PR_O2_TCPCHK_CHK && !LIST_ISEMPTY(check->tcpcheck_rules)) {
-		struct tcpcheck_rule *r = (struct tcpcheck_rule *) check->tcpcheck_rules->n;
+		struct tcpcheck_rule *r;
+
+		r = LIST_NEXT(check->tcpcheck_rules, struct tcpcheck_rule *, list);
+
 		/* if first step is a 'connect', then tcpcheck_main must run it */
 		if (r->action == TCPCHK_ACT_CONNECT) {
 			tcpcheck_main(conn);
-			return SN_ERR_UP;
+			return SF_ERR_UP;
 		}
 		if (r->action == TCPCHK_ACT_EXPECT)
 			quickack = 0;
 	}
 
-	ret = SN_ERR_INTERNAL;
+	ret = SF_ERR_INTERNAL;
 	if (proto->connect)
 		ret = proto->connect(conn, check->type, quickack ? 2 : 0);
 	conn->flags |= CO_FL_WAKE_DATA;
@@ -1759,13 +1784,13 @@ err:
  * establish a server health-check that makes use of a process.
  *
  * It can return one of :
- *  - SN_ERR_NONE if everything's OK
- *  - SN_ERR_SRVTO if there are no more servers
- *  - SN_ERR_SRVCL if the connection was refused by the server
- *  - SN_ERR_PRXCOND if the connection has been limited by the proxy (maxconn)
- *  - SN_ERR_RESOURCE if a system resource is lacking (eg: fd limits, ports, ...)
- *  - SN_ERR_INTERNAL for any other purely internal errors
- * Additionnally, in the case of SN_ERR_RESOURCE, an emergency log will be emitted.
+ *  - SF_ERR_NONE if everything's OK
+ *  - SF_ERR_SRVTO if there are no more servers
+ *  - SF_ERR_SRVCL if the connection was refused by the server
+ *  - SF_ERR_PRXCOND if the connection has been limited by the proxy (maxconn)
+ *  - SF_ERR_RESOURCE if a system resource is lacking (eg: fd limits, ports, ...)
+ *  - SF_ERR_INTERNAL for any other purely internal errors
+ * Additionnally, in the case of SF_ERR_RESOURCE, an emergency log will be emitted.
  *
  * Blocks and then unblocks SIGCHLD
  */
@@ -1778,7 +1803,7 @@ static int connect_proc_chk(struct task *t)
 	int status;
 	pid_t pid;
 
-	status = SN_ERR_RESOURCE;
+	status = SF_ERR_RESOURCE;
 
 	block_sigchld();
 
@@ -1809,7 +1834,7 @@ static int connect_proc_chk(struct task *t)
 				int t_con = tick_add(now_ms, px->timeout.connect);
 				t->expire = tick_first(t->expire, t_con);
 			}
-			status = SN_ERR_NONE;
+			status = SF_ERR_NONE;
 			goto out;
 		}
 		else {
@@ -1858,9 +1883,9 @@ static struct task *process_chk_proc(struct task *t)
 
 		ret = connect_proc_chk(t);
 		switch (ret) {
-		case SN_ERR_UP:
+		case SF_ERR_UP:
 			return t;
-		case SN_ERR_NONE:
+		case SF_ERR_NONE:
 			/* we allow up to min(inter, timeout.connect) for a connection
 			 * to establish but only when timeout.check is set
 			 * as it may be to short for a full check otherwise
@@ -1874,14 +1899,14 @@ static struct task *process_chk_proc(struct task *t)
 
 			goto reschedule;
 
-		case SN_ERR_SRVTO: /* ETIMEDOUT */
-		case SN_ERR_SRVCL: /* ECONNREFUSED, ENETUNREACH, ... */
+		case SF_ERR_SRVTO: /* ETIMEDOUT */
+		case SF_ERR_SRVCL: /* ECONNREFUSED, ENETUNREACH, ... */
 			conn->flags |= CO_FL_ERROR;
 			chk_report_conn_err(conn, errno, 0);
 			break;
-		case SN_ERR_PRXCOND:
-		case SN_ERR_RESOURCE:
-		case SN_ERR_INTERNAL:
+		case SF_ERR_PRXCOND:
+		case SF_ERR_RESOURCE:
+		case SF_ERR_INTERNAL:
 			conn->flags |= CO_FL_ERROR;
 			chk_report_conn_err(conn, 0, 0);
 			break;
@@ -2001,9 +2026,9 @@ static struct task *process_chk_conn(struct task *t)
 
 		ret = connect_conn_chk(t);
 		switch (ret) {
-		case SN_ERR_UP:
+		case SF_ERR_UP:
 			return t;
-		case SN_ERR_NONE:
+		case SF_ERR_NONE:
 			/* we allow up to min(inter, timeout.connect) for a connection
 			 * to establish but only when timeout.check is set
 			 * as it may be to short for a full check otherwise
@@ -2020,14 +2045,14 @@ static struct task *process_chk_conn(struct task *t)
 
 			goto reschedule;
 
-		case SN_ERR_SRVTO: /* ETIMEDOUT */
-		case SN_ERR_SRVCL: /* ECONNREFUSED, ENETUNREACH, ... */
+		case SF_ERR_SRVTO: /* ETIMEDOUT */
+		case SF_ERR_SRVCL: /* ECONNREFUSED, ENETUNREACH, ... */
 			conn->flags |= CO_FL_ERROR;
 			chk_report_conn_err(conn, errno, 0);
 			break;
-		case SN_ERR_PRXCOND:
-		case SN_ERR_RESOURCE:
-		case SN_ERR_INTERNAL:
+		case SF_ERR_PRXCOND:
+		case SF_ERR_RESOURCE:
+		case SF_ERR_INTERNAL:
 			conn->flags |= CO_FL_ERROR;
 			chk_report_conn_err(conn, 0, 0);
 			break;
@@ -2119,10 +2144,93 @@ static struct task *process_chk_conn(struct task *t)
 static struct task *process_chk(struct task *t)
 {
 	struct check *check = t->context;
+	struct server *s = check->server;
+	struct dns_resolution *resolution = s->resolution;
+
+	/* trigger name resolution */
+	if ((s->check.state & CHK_ST_ENABLED) && (resolution)) {
+		/* check if a no resolution is running for this server */
+		if (resolution->step == RSLV_STEP_NONE) {
+			/*
+			 * if there has not been any name resolution for a longer period than
+			 * hold.valid, let's trigger a new one.
+			 */
+			if (tick_is_expired(tick_add(resolution->last_resolution, resolution->resolvers->hold.valid), now_ms)) {
+				trigger_resolution(s);
+			}
+		}
+	}
 
 	if (check->type == PR_O2_EXT_CHK)
 		return process_chk_proc(t);
 	return process_chk_conn(t);
+
+}
+
+/*
+ * Initiates a new name resolution:
+ *  - generates a query id
+ *  - configure the resolution structure
+ *  - startup the resolvers task if required
+ *
+ * returns:
+ *  - 0 in case of error or if resolution already running
+ *  - 1 if everything started properly
+ */
+int trigger_resolution(struct server *s)
+{
+	struct dns_resolution *resolution;
+	struct dns_resolvers *resolvers;
+	int query_id;
+	int i;
+
+	resolution = s->resolution;
+	resolvers = resolution->resolvers;
+
+	/*
+	 * check if a resolution has already been started for this server
+	 * return directly to avoid resolution pill up
+	 */
+	if (resolution->step != RSLV_STEP_NONE)
+		return 0;
+
+	/* generates a query id */
+	i = 0;
+	do {
+		query_id = dns_rnd16();
+		/* we do try only 100 times to find a free query id */
+		if (i++ > 100) {
+			chunk_printf(&trash, "could not generate a query id for %s/%s, in resolvers %s",
+						s->proxy->id, s->id, resolvers->id);
+
+			send_log(s->proxy, LOG_NOTICE, "%s.\n", trash.str);
+			return 0;
+		}
+	} while (eb32_lookup(&resolvers->query_ids, query_id));
+
+	LIST_ADDQ(&resolvers->curr_resolution, &resolution->list);
+
+	/* now update resolution parameters */
+	resolution->query_id = query_id;
+	resolution->qid.key = query_id;
+	resolution->step = RSLV_STEP_RUNNING;
+	resolution->query_type = DNS_RTYPE_ANY;
+	resolution->try = 0;
+	resolution->try_cname = 0;
+	resolution->nb_responses = 0;
+	resolution->resolver_family_priority = s->resolver_family_priority;
+	eb32_insert(&resolvers->query_ids, &resolution->qid);
+
+	dns_send_query(resolution);
+
+	/* update wakeup date if this resolution is the only one in the FIFO list */
+	if (dns_check_resolution_queue(resolvers) == 1) {
+		/* update task timeout */
+		dns_update_resolvers_timeout(resolvers);
+		task_queue(resolvers->t);
+	}
+
+	return 1;
 }
 
 static int start_check_task(struct check *check, int mininter,
@@ -2359,7 +2467,7 @@ static int tcpcheck_get_step_id(struct check *check)
 	int i = 0;
 
 	/* not even started anything yet => step 0 = initial connect */
-	if (check->current_step)
+	if (!check->current_step)
 		return 0;
 
 	cur = check->last_started_step;
@@ -2378,11 +2486,46 @@ static int tcpcheck_get_step_id(struct check *check)
 	return i;
 }
 
+/*
+ * return the latest known comment before (including) the given stepid
+ * returns NULL if no comment found
+ */
+static char * tcpcheck_get_step_comment(struct check *check, int stepid)
+{
+	struct tcpcheck_rule *cur = NULL;
+	char *ret = NULL;
+	int i = 0;
+
+	/* not even started anything yet, return latest comment found before any action */
+	if (!check->current_step) {
+		list_for_each_entry(cur, check->tcpcheck_rules, list) {
+			if (cur->action == TCPCHK_ACT_COMMENT)
+				ret = cur->comment;
+			else
+				goto return_comment;
+		}
+	}
+
+	i = 1;
+	list_for_each_entry(cur, check->tcpcheck_rules, list) {
+		if (cur->comment)
+			ret = cur->comment;
+
+		if (i >= stepid)
+			goto return_comment;
+
+		++i;
+	}
+
+ return_comment:
+	return ret;
+}
+
 static void tcpcheck_main(struct connection *conn)
 {
-	char *contentptr;
-	struct tcpcheck_rule *cur, *next;
-	int done = 0, ret = 0;
+	char *contentptr, *comment;
+	struct tcpcheck_rule *next;
+	int done = 0, ret = 0, step = 0;
 	struct check *check = conn->owner;
 	struct server *s = check->server;
 	struct task *t = check->task;
@@ -2407,8 +2550,14 @@ static void tcpcheck_main(struct connection *conn)
 	 * wait for a connection to complete unless we're before and existing
 	 * step 1.
 	 */
+
+	/* find first rule and skip comments */
+	next = LIST_NEXT(head, struct tcpcheck_rule *, list);
+	while (&next->list != head && next->action == TCPCHK_ACT_COMMENT)
+		next = LIST_NEXT(&next->list, struct tcpcheck_rule *, list);
+
 	if ((!(conn->flags & CO_FL_CONNECTED) || (conn->flags & CO_FL_HANDSHAKE)) &&
-	    (check->current_step || LIST_ISEMPTY(head))) {
+	    (check->current_step || &next->list == head)) {
 		/* we allow up to min(inter, timeout.connect) for a connection
 		 * to establish but only when timeout.check is set
 		 * as it may be to short for a full check otherwise
@@ -2426,7 +2575,7 @@ static void tcpcheck_main(struct connection *conn)
 	}
 
 	/* special case: option tcp-check with no rule, a connect is enough */
-	if (LIST_ISEMPTY(head)) {
+	if (&next->list == head) {
 		set_server_check_status(check, HCHK_STATUS_L4OK, NULL);
 		goto out_end_tcpcheck;
 	}
@@ -2438,25 +2587,23 @@ static void tcpcheck_main(struct connection *conn)
 		check->bo->o = 0;
 		check->bi->p = check->bi->data;
 		check->bi->i = 0;
-		cur = check->current_step = LIST_ELEM(head->n, struct tcpcheck_rule *, list);
+		check->current_step = next;
 		t->expire = tick_add(now_ms, MS_TO_TICKS(check->inter));
 		if (s->proxy->timeout.check)
 			t->expire = tick_add_ifset(now_ms, s->proxy->timeout.check);
-	}
-	/* keep on processing step */
-	else {
-		cur = check->current_step;
 	}
 
 	/* It's only the rules which will enable send/recv */
 	__conn_data_stop_both(conn);
 
 	while (1) {
-		/* we have to try to flush the output buffer before reading, at the end,
-		 * or if we're about to send a string that does not fit in the remaining space.
+		/* We have to try to flush the output buffer before reading, at
+		 * the end, or if we're about to send a string that does not fit
+		 * in the remaining space. That explains why we break out of the
+		 * loop after this control.
 		 */
 		if (check->bo->o &&
-		    (&cur->list == head ||
+		    (&check->current_step->list == head ||
 		     check->current_step->action != TCPCHK_ACT_SEND ||
 		     check->current_step->string_len >= buffer_total_space(check->bo))) {
 
@@ -2466,19 +2613,23 @@ static void tcpcheck_main(struct connection *conn)
 					__conn_data_stop_both(conn);
 					goto out_end_tcpcheck;
 				}
-				goto out_need_io;
+				break;
 			}
 		}
 
-		/* did we reach the end ? If so, let's check that everything was sent */
-		if (&cur->list == head) {
-			if (check->bo->o)
-				goto out_need_io;
+		if (&check->current_step->list == head)
 			break;
-		}
 
-		/* have 'next' point to the next rule or NULL if we're on the last one */
-		next = (struct tcpcheck_rule *)cur->list.n;
+		/* have 'next' point to the next rule or NULL if we're on the
+		 * last one, connect() needs this.
+		 */
+		next = LIST_NEXT(&check->current_step->list, struct tcpcheck_rule *, list);
+
+		/* bypass all comment rules */
+		while (&next->list != head && next->action == TCPCHK_ACT_COMMENT)
+			next = LIST_NEXT(&next->list, struct tcpcheck_rule *, list);
+
+		/* NULL if we're on the last rule */
 		if (&next->list == head)
 			next = NULL;
 
@@ -2528,7 +2679,7 @@ static void tcpcheck_main(struct connection *conn)
 #endif /* USE_OPENSSL */
 			conn_prepare(conn, proto, xprt);
 
-			ret = SN_ERR_INTERNAL;
+			ret = SF_ERR_INTERNAL;
 			if (proto->connect)
 				ret = proto->connect(conn,
 						     1 /* I/O polling is always needed */,
@@ -2540,18 +2691,18 @@ static void tcpcheck_main(struct connection *conn)
 			}
 
 			/* It can return one of :
-			 *  - SN_ERR_NONE if everything's OK
-			 *  - SN_ERR_SRVTO if there are no more servers
-			 *  - SN_ERR_SRVCL if the connection was refused by the server
-			 *  - SN_ERR_PRXCOND if the connection has been limited by the proxy (maxconn)
-			 *  - SN_ERR_RESOURCE if a system resource is lacking (eg: fd limits, ports, ...)
-			 *  - SN_ERR_INTERNAL for any other purely internal errors
-			 * Additionnally, in the case of SN_ERR_RESOURCE, an emergency log will be emitted.
+			 *  - SF_ERR_NONE if everything's OK
+			 *  - SF_ERR_SRVTO if there are no more servers
+			 *  - SF_ERR_SRVCL if the connection was refused by the server
+			 *  - SF_ERR_PRXCOND if the connection has been limited by the proxy (maxconn)
+			 *  - SF_ERR_RESOURCE if a system resource is lacking (eg: fd limits, ports, ...)
+			 *  - SF_ERR_INTERNAL for any other purely internal errors
+			 * Additionnally, in the case of SF_ERR_RESOURCE, an emergency log will be emitted.
 			 * Note that we try to prevent the network stack from sending the ACK during the
 			 * connect() when a pure TCP check is used (without PROXY protocol).
 			 */
 			switch (ret) {
-			case SN_ERR_NONE:
+			case SF_ERR_NONE:
 				/* we allow up to min(inter, timeout.connect) for a connection
 				 * to establish but only when timeout.check is set
 				 * as it may be to short for a full check otherwise
@@ -2563,24 +2714,38 @@ static void tcpcheck_main(struct connection *conn)
 					t->expire = tick_first(t->expire, t_con);
 				}
 				break;
-			case SN_ERR_SRVTO: /* ETIMEDOUT */
-			case SN_ERR_SRVCL: /* ECONNREFUSED, ENETUNREACH, ... */
+			case SF_ERR_SRVTO: /* ETIMEDOUT */
+			case SF_ERR_SRVCL: /* ECONNREFUSED, ENETUNREACH, ... */
+				step = tcpcheck_get_step_id(check);
 				chunk_printf(&trash, "TCPCHK error establishing connection at step %d: %s",
-						tcpcheck_get_step_id(check), strerror(errno));
+						step, strerror(errno));
+				comment = tcpcheck_get_step_comment(check, step);
+				if (comment)
+					chunk_appendf(&trash, " comment: '%s'", comment);
 				set_server_check_status(check, HCHK_STATUS_L4CON, trash.str);
 				goto out_end_tcpcheck;
-			case SN_ERR_PRXCOND:
-			case SN_ERR_RESOURCE:
-			case SN_ERR_INTERNAL:
-				chunk_printf(&trash, "TCPCHK error establishing connection at step %d",
-						tcpcheck_get_step_id(check));
+			case SF_ERR_PRXCOND:
+			case SF_ERR_RESOURCE:
+			case SF_ERR_INTERNAL:
+				step = tcpcheck_get_step_id(check);
+				chunk_printf(&trash, "TCPCHK error establishing connection at step %d", step);
+				comment = tcpcheck_get_step_comment(check, step);
+				if (comment)
+					chunk_appendf(&trash, " comment: '%s'", comment);
 				set_server_check_status(check, HCHK_STATUS_SOCKERR, trash.str);
 				goto out_end_tcpcheck;
 			}
 
 			/* allow next rule */
-			cur = (struct tcpcheck_rule *)cur->list.n;
-			check->current_step = cur;
+			check->current_step = LIST_NEXT(&check->current_step->list, struct tcpcheck_rule *, list);
+
+			/* bypass all comment rules */
+			while (&check->current_step->list != head &&
+				check->current_step->action == TCPCHK_ACT_COMMENT)
+				check->current_step = LIST_NEXT(&check->current_step->list, struct tcpcheck_rule *, list);
+
+			if (&check->current_step->list == head)
+				break;
 
 			/* don't do anything until the connection is established */
 			if (!(conn->flags & CO_FL_CONNECTED)) {
@@ -2634,8 +2799,15 @@ static void tcpcheck_main(struct connection *conn)
 			*check->bo->p = '\0'; /* to make gdb output easier to read */
 
 			/* go to next rule and try to send */
-			cur = (struct tcpcheck_rule *)cur->list.n;
-			check->current_step = cur;
+			check->current_step = LIST_NEXT(&check->current_step->list, struct tcpcheck_rule *, list);
+
+			/* bypass all comment rules */
+			while (&check->current_step->list != head &&
+				check->current_step->action == TCPCHK_ACT_COMMENT)
+				check->current_step = LIST_NEXT(&check->current_step->list, struct tcpcheck_rule *, list);
+
+			if (&check->current_step->list == head)
+				break;
 		} /* end 'send' */
 		else if (check->current_step->action == TCPCHK_ACT_EXPECT) {
 			if (unlikely(check->result == CHK_RES_FAILED))
@@ -2655,7 +2827,7 @@ static void tcpcheck_main(struct connection *conn)
 					}
 				}
 				else
-					goto out_need_io;
+					break;
 			}
 
 			/* mark the step as started */
@@ -2681,46 +2853,61 @@ static void tcpcheck_main(struct connection *conn)
 					continue;
 
 				/* empty response */
-				chunk_printf(&trash, "TCPCHK got an empty response at step %d",
-						tcpcheck_get_step_id(check));
+				step = tcpcheck_get_step_id(check);
+				chunk_printf(&trash, "TCPCHK got an empty response at step %d", step);
+				comment = tcpcheck_get_step_comment(check, step);
+				if (comment)
+					chunk_appendf(&trash, " comment: '%s'", comment);
 				set_server_check_status(check, HCHK_STATUS_L7RSP, trash.str);
 
 				goto out_end_tcpcheck;
 			}
 
-			if (!done && (cur->string != NULL) && (check->bi->i < cur->string_len) )
+			if (!done && (check->current_step->string != NULL) && (check->bi->i < check->current_step->string_len) )
 				continue; /* try to read more */
 
 		tcpcheck_expect:
-			if (cur->string != NULL)
-				ret = my_memmem(contentptr, check->bi->i, cur->string, cur->string_len) != NULL;
-			else if (cur->expect_regex != NULL)
-				ret = regex_exec(cur->expect_regex, contentptr);
+			if (check->current_step->string != NULL)
+				ret = my_memmem(contentptr, check->bi->i, check->current_step->string, check->current_step->string_len) != NULL;
+			else if (check->current_step->expect_regex != NULL)
+				ret = regex_exec(check->current_step->expect_regex, contentptr);
 
 			if (!ret && !done)
 				continue; /* try to read more */
 
 			/* matched */
+			step = tcpcheck_get_step_id(check);
 			if (ret) {
 				/* matched but we did not want to => ERROR */
-				if (cur->inverse) {
+				if (check->current_step->inverse) {
 					/* we were looking for a string */
-					if (cur->string != NULL) {
+					if (check->current_step->string != NULL) {
 						chunk_printf(&trash, "TCPCHK matched unwanted content '%s' at step %d",
-								cur->string, tcpcheck_get_step_id(check));
+						             check->current_step->string, step);
 					}
 					else {
 					/* we were looking for a regex */
-						chunk_printf(&trash, "TCPCHK matched unwanted content (regex) at step %d",
-								tcpcheck_get_step_id(check));
+						chunk_printf(&trash, "TCPCHK matched unwanted content (regex) at step %d", step);
 					}
+					comment = tcpcheck_get_step_comment(check, step);
+					if (comment)
+						chunk_appendf(&trash, " comment: '%s'", comment);
 					set_server_check_status(check, HCHK_STATUS_L7RSP, trash.str);
 					goto out_end_tcpcheck;
 				}
 				/* matched and was supposed to => OK, next step */
 				else {
-					cur = (struct tcpcheck_rule*)cur->list.n;
-					check->current_step = cur;
+					/* allow next rule */
+					check->current_step = LIST_NEXT(&check->current_step->list, struct tcpcheck_rule *, list);
+
+					/* bypass all comment rules */
+					while (&check->current_step->list != head &&
+					       check->current_step->action == TCPCHK_ACT_COMMENT)
+						check->current_step = LIST_NEXT(&check->current_step->list, struct tcpcheck_rule *, list);
+
+					if (&check->current_step->list == head)
+						break;
+
 					if (check->current_step->action == TCPCHK_ACT_EXPECT)
 						goto tcpcheck_expect;
 					__conn_data_stop_recv(conn);
@@ -2729,9 +2916,18 @@ static void tcpcheck_main(struct connection *conn)
 			else {
 			/* not matched */
 				/* not matched and was not supposed to => OK, next step */
-				if (cur->inverse) {
-					cur = (struct tcpcheck_rule*)cur->list.n;
-					check->current_step = cur;
+				if (check->current_step->inverse) {
+					/* allow next rule */
+					check->current_step = LIST_NEXT(&check->current_step->list, struct tcpcheck_rule *, list);
+
+					/* bypass all comment rules */
+					while (&check->current_step->list != head &&
+					       check->current_step->action == TCPCHK_ACT_COMMENT)
+						check->current_step = LIST_NEXT(&check->current_step->list, struct tcpcheck_rule *, list);
+
+					if (&check->current_step->list == head)
+						break;
+
 					if (check->current_step->action == TCPCHK_ACT_EXPECT)
 						goto tcpcheck_expect;
 					__conn_data_stop_recv(conn);
@@ -2739,15 +2935,18 @@ static void tcpcheck_main(struct connection *conn)
 				/* not matched but was supposed to => ERROR */
 				else {
 					/* we were looking for a string */
-					if (cur->string != NULL) {
+					if (check->current_step->string != NULL) {
 						chunk_printf(&trash, "TCPCHK did not match content '%s' at step %d",
-								cur->string, tcpcheck_get_step_id(check));
+						             check->current_step->string, step);
 					}
 					else {
 					/* we were looking for a regex */
 						chunk_printf(&trash, "TCPCHK did not match content (regex) at step %d",
-								tcpcheck_get_step_id(check));
+								step);
 					}
+					comment = tcpcheck_get_step_comment(check, step);
+					if (comment)
+						chunk_appendf(&trash, " comment: '%s'", comment);
 					set_server_check_status(check, HCHK_STATUS_L7RSP, trash.str);
 					goto out_end_tcpcheck;
 				}
@@ -2755,14 +2954,20 @@ static void tcpcheck_main(struct connection *conn)
 		} /* end expect */
 	} /* end loop over double chained step list */
 
-	set_server_check_status(check, HCHK_STATUS_L7OKD, "(tcp-check)");
-	goto out_end_tcpcheck;
+	/* We're waiting for some I/O to complete, we've reached the end of the
+	 * rules, or both. Do what we have to do, otherwise we're done.
+	 */
+	if (&check->current_step->list == head && !check->bo->o) {
+		set_server_check_status(check, HCHK_STATUS_L7OKD, "(tcp-check)");
+		goto out_end_tcpcheck;
+	}
 
- out_need_io:
+	/* warning, current_step may now point to the head */
 	if (check->bo->o)
 		__conn_data_want_send(conn);
 
-	if (check->current_step->action == TCPCHK_ACT_EXPECT)
+	if (&check->current_step->list != head &&
+	    check->current_step->action == TCPCHK_ACT_EXPECT)
 		__conn_data_want_recv(conn);
 	return;
 
@@ -2778,7 +2983,6 @@ static void tcpcheck_main(struct connection *conn)
 		conn->flags |= CO_FL_ERROR;
 
 	__conn_data_stop_both(conn);
-
 	return;
 }
 
