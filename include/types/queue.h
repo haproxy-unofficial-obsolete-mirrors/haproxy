@@ -26,12 +26,11 @@
 #include <common/mini-clist.h>
 
 #include <types/server.h>
-
-struct stream;
+#include <types/session.h>
 
 struct pendconn {
 	struct list list;		/* chaining ... */
-	struct stream *strm;		/* the stream waiting for a connection */
+	struct session *sess;		/* the session waiting for a connection */
 	struct server *srv;		/* the server we are waiting for */
 };
 

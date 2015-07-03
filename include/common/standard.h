@@ -25,7 +25,6 @@
 #include <limits.h>
 #include <string.h>
 #include <time.h>
-#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -105,7 +104,6 @@ extern int strlcpy2(char *dst, const char *src, int size);
  */
 extern char itoa_str[][171];
 extern char *ultoa_r(unsigned long n, char *buffer, int size);
-extern char *sltoa_r(long n, char *buffer, int size);
 extern const char *ulltoh_r(unsigned long long n, char *buffer, int size);
 static inline const char *ultoa(unsigned long n)
 {
@@ -244,8 +242,6 @@ static inline int hex2i(int c)
 	return c;
 }
 
-/* rounds <i> down to the closest value having max 2 digits */
-unsigned int round_2dig(unsigned int i);
 
 /*
  * Checks <name> for invalid characters. Valid chars are [A-Za-z0-9_:.-]. If an
@@ -295,31 +291,6 @@ int cidr2dotted(int cidr, struct in_addr *mask);
  * Note: "addr" can also be a hostname. Returns 1 if OK, 0 if error.
  */
 int str2net(const char *str, int resolve, struct in_addr *addr, struct in_addr *mask);
-
-/* str2ip and str2ip2:
- *
- * converts <str> to a struct sockaddr_storage* provided by the caller. The
- * caller must have zeroed <sa> first, and may have set sa->ss_family to force
- * parse a specific address format. If the ss_family is 0 or AF_UNSPEC, then
- * the function tries to guess the address family from the syntax. If the
- * family is forced and the format doesn't match, an error is returned. The
- * string is assumed to contain only an address, no port. The address can be a
- * dotted IPv4 address, an IPv6 address, a host name, or empty or "*" to
- * indicate INADDR_ANY. NULL is returned if the host part cannot be resolved.
- * The return address will only have the address family and the address set,
- * all other fields remain zero. The string is not supposed to be modified.
- * The IPv6 '::' address is IN6ADDR_ANY.
- *
- * str2ip2:
- *
- * If <resolve> is set, this function try to resolve DNS, otherwise, it returns
- * NULL result.
- */
-struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, int resolve);
-static inline struct sockaddr_storage *str2ip(const char *str, struct sockaddr_storage *sa)
-{
-	return str2ip2(str, sa, 1);
-}
 
 /*
  * converts <str> to two struct in6_addr* which must be pre-allocated.
@@ -377,33 +348,6 @@ char *encode_chunk(char *start, char *stop,
                    const char escape, const fd_set *map,
                    const struct chunk *chunk);
 
-
-/* Check a string for using it in a CSV output format. If the string contains
- * one of the following four char <">, <,>, CR or LF, the string is
- * encapsulated between <"> and the <"> are escaped by a <""> sequence.
- * <str> is the input string to be escaped. The function assumes that
- * the input string is null-terminated.
- *
- * If <quote> is 0, the result is returned escaped but without double quote.
- * Is it useful if the escaped string is used between double quotes in the
- * format.
- *
- *    printf("..., \"%s\", ...\r\n", csv_enc(str, 0));
- *
- * If the <quote> is 1, the converter put the quotes only if any character is
- * escaped. If the <quote> is 2, the converter put always the quotes.
- *
- * <output> is a struct chunk used for storing the output string if any
- * change will be done.
- *
- * The function returns the converted string on this output. If an error
- * occurs, the function return an empty string. This type of output is useful
- * for using the function directly as printf() argument.
- *
- * If the output buffer is too short to conatin the input string, the result
- * is truncated.
- */
-const char *csv_enc(const char *str, int quote, struct chunk *output);
 
 /* Decode an URL-encoded string in-place. The resulting string might
  * be shorter. If some forbidden characters are found, the conversion is
@@ -969,42 +913,5 @@ static inline unsigned long caddr_clr_flags(unsigned long caddr, unsigned int da
 {
 	return caddr & ~(unsigned long)(data & 3);
 }
-
-/* UTF-8 decoder status */
-#define UTF8_CODE_OK       0x00
-#define UTF8_CODE_OVERLONG 0x10
-#define UTF8_CODE_INVRANGE 0x20
-#define UTF8_CODE_BADSEQ   0x40
-
-unsigned char utf8_next(const char *s, int len, unsigned int *c);
-
-static inline unsigned char utf8_return_code(unsigned int code)
-{
-	return code & 0xf0;
-}
-
-static inline unsigned char utf8_return_length(unsigned char code)
-{
-	return code & 0x0f;
-}
-
-/* returns a 64-bit a timestamp with the finest resolution available. The
- * unit is intentionally not specified. It's mostly used to compare dates.
- */
-#if defined(__i386__) || defined(__x86_64__)
-static inline unsigned long long rdtsc()
-{
-     unsigned int a, d;
-     asm volatile("rdtsc" : "=a" (a), "=d" (d));
-     return a + ((unsigned long long)d << 32);
-}
-#else
-static inline unsigned long long rdtsc()
-{
-	struct timeval tv;
-	gettimeofday(&tv, NULL);
-	return tv.tv_sec * 1000000 + tv.tv_usec;
-}
-#endif
 
 #endif /* _COMMON_STANDARD_H */

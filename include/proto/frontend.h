@@ -23,9 +23,9 @@
 #define _PROTO_FRONTEND_H
 
 #include <common/config.h>
-#include <types/stream.h>
+#include <types/session.h>
 
-int frontend_accept(struct stream *s);
+int frontend_accept(struct session *s);
 
 
 #endif /* _PROTO_FRONTEND_H */

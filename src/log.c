@@ -32,10 +32,8 @@
 #include <types/log.h>
 
 #include <proto/frontend.h>
-#include <proto/proto_http.h>
 #include <proto/log.h>
 #include <proto/sample.h>
-#include <proto/stream.h>
 #include <proto/stream_interface.h>
 #ifdef USE_OPENSSL
 #include <proto/ssl_sock.h>
@@ -109,11 +107,6 @@ static const struct logformat_type logformat_keywords[] = {
 	{ "hrl", LOG_FMT_HDRREQUESTLIST, PR_MODE_TCP, LW_REQHDR, NULL }, /* header request list */
 	{ "hs", LOG_FMT_HDRRESPONS, PR_MODE_TCP, LW_RSPHDR, NULL },  /* header response */
 	{ "hsl", LOG_FMT_HDRRESPONSLIST, PR_MODE_TCP, LW_RSPHDR, NULL },  /* header response list */
-	{ "HM", LOG_FMT_HTTP_METHOD, PR_MODE_HTTP, LW_REQ, NULL },  /* HTTP method */
-	{ "HP", LOG_FMT_HTTP_PATH, PR_MODE_HTTP, LW_REQ, NULL },  /* HTTP path */
-	{ "HU", LOG_FMT_HTTP_URI, PR_MODE_HTTP, LW_REQ, NULL },  /* HTTP full URI */
-	{ "HV", LOG_FMT_HTTP_VERSION, PR_MODE_HTTP, LW_REQ, NULL },  /* HTTP version */
-	{ "lc", LOG_FMT_LOGCNT, PR_MODE_TCP, LW_INIT, NULL }, /* log counter */
 	{ "ms", LOG_FMT_MS, PR_MODE_TCP, LW_INIT, NULL },       /* accept date millisecond */
 	{ "pid", LOG_FMT_PID, PR_MODE_TCP, LW_INIT, NULL }, /* log pid */
 	{ "r", LOG_FMT_REQ, PR_MODE_HTTP, LW_REQ, NULL },  /* request */
@@ -730,11 +723,10 @@ char *lf_port(char *dst, struct sockaddr *sockaddr, size_t size, struct logforma
 /* Re-generate the syslog header at the beginning of logline once a second and
  * return the pointer to the first character after the header.
  */
-static char *update_log_hdr(const char *log_tag)
+static char *update_log_hdr()
 {
 	static long tvsec;
 	static char *dataptr = NULL; /* backup of last end of header, NULL first time */
-	int tag_len;
 
 	if (unlikely(date.tv_sec != tvsec || dataptr == NULL)) {
 		/* this string is rebuild only once a second */
@@ -745,10 +737,11 @@ static char *update_log_hdr(const char *log_tag)
 		get_localtime(tvsec, &tm);
 
 		hdr_len = snprintf(logline, global.max_syslog_len,
-				   "<<<<>%s %2d %02d:%02d:%02d %s",
+				   "<<<<>%s %2d %02d:%02d:%02d %s%s[%d]: ",
 				   monthname[tm.tm_mon],
 				   tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
-				   global.log_send_hostname ? global.log_send_hostname : "");
+				   global.log_send_hostname ? global.log_send_hostname : "",
+				   global.log_tag, pid);
 		/* WARNING: depending upon implementations, snprintf may return
 		 * either -1 or the number of bytes that would be needed to store
 		 * the total message. In both cases, we must adjust it.
@@ -759,13 +752,7 @@ static char *update_log_hdr(const char *log_tag)
 		dataptr = logline + hdr_len;
 	}
 
-	dataptr[0] = 0; // ensure we get rid of any previous attempt
-
-	tag_len = snprintf(dataptr, logline + global.max_syslog_len - dataptr, "%s[%d]: ", log_tag, pid);
-	if (tag_len < 0 || tag_len > logline + global.max_syslog_len - dataptr)
-		tag_len = logline + global.max_syslog_len - dataptr;
-
-	return dataptr + tag_len;
+	return dataptr;
 }
 
 /*
@@ -781,7 +768,7 @@ void send_log(struct proxy *p, int level, const char *format, ...)
 	if (level < 0 || format == NULL || logline == NULL)
 		return;
 
-	dataptr = update_log_hdr(p && p->log_tag ? p->log_tag : global.log_tag); /* update log header and skip it */
+	dataptr = update_log_hdr(); /* update log header and skip it */
 	data_len = dataptr - logline;
 
 	va_start(argp, format);
@@ -922,21 +909,16 @@ const char sess_set_cookie[8] = "NPDIRU67";	/* No set-cookie, Set-cookie found a
  * not counting the trailing zero which is always added if the resulting size
  * is not zero.
  */
-int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list_format)
+int build_logline(struct session *s, char *dst, size_t maxsize, struct list *list_format)
 {
-	struct session *sess = strm_sess(s);
-	struct proxy *fe = sess->fe;
+	struct proxy *fe = s->fe;
 	struct proxy *be = s->be;
-	struct http_txn *txn = s->txn;
-	struct chunk chunk;
+	struct http_txn *txn = &s->txn;
 	char *uri;
-	char *spc;
-	char *end;
 	struct tm tm;
 	int t_request;
 	int hdr;
 	int last_isspace = 1;
-	int nspaces = 0;
 	char *tmplog;
 	char *ret;
 	int iret;
@@ -980,9 +962,9 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 			case LOG_FMT_EXPR: // sample expression, may be request or response
 				key = NULL;
 				if (tmp->options & LOG_OPT_REQ_CAP)
-					key = sample_fetch_string(be, sess, s, SMP_OPT_DIR_REQ|SMP_OPT_FINAL, tmp->expr);
+					key = sample_fetch_string(be, s, txn, SMP_OPT_DIR_REQ|SMP_OPT_FINAL, tmp->expr);
 				if (!key && (tmp->options & LOG_OPT_RES_CAP))
-					key = sample_fetch_string(be, sess, s, SMP_OPT_DIR_RES|SMP_OPT_FINAL, tmp->expr);
+					key = sample_fetch_string(be, s, txn, SMP_OPT_DIR_RES|SMP_OPT_FINAL, tmp->expr);
 				if (tmp->options & LOG_OPT_HTTP)
 					ret = encode_chunk(tmplog, dst + maxsize,
 					                   '%', http_encode_map, key ? &key->data.str : &empty);
@@ -995,7 +977,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_CLIENTIP:  // %ci
-				conn = objt_conn(sess->origin);
+				conn = objt_conn(s->req->prod->end);
 				if (conn)
 					ret = lf_ip(tmplog, (struct sockaddr *)&conn->addr.from, dst + maxsize - tmplog, tmp);
 				else
@@ -1007,10 +989,10 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_CLIENTPORT:  // %cp
-				conn = objt_conn(sess->origin);
+				conn = objt_conn(s->req->prod->end);
 				if (conn) {
 					if (conn->addr.from.ss_family == AF_UNIX) {
-						ret = ltoa_o(sess->listener->luid, tmplog, dst + maxsize - tmplog);
+						ret = ltoa_o(s->listener->luid, tmplog, dst + maxsize - tmplog);
 					} else {
 						ret = lf_port(tmplog, (struct sockaddr *)&conn->addr.from,
 						              dst + maxsize - tmplog, tmp);
@@ -1026,7 +1008,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_FRONTENDIP: // %fi
-				conn = objt_conn(sess->origin);
+				conn = objt_conn(s->req->prod->end);
 				if (conn) {
 					conn_get_to_addr(conn);
 					ret = lf_ip(tmplog, (struct sockaddr *)&conn->addr.to, dst + maxsize - tmplog, tmp);
@@ -1041,11 +1023,11 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case  LOG_FMT_FRONTENDPORT: // %fp
-				conn = objt_conn(sess->origin);
+				conn = objt_conn(s->req->prod->end);
 				if (conn) {
 					conn_get_to_addr(conn);
 					if (conn->addr.to.ss_family == AF_UNIX)
-						ret = ltoa_o(sess->listener->luid, tmplog, dst + maxsize - tmplog);
+						ret = ltoa_o(s->listener->luid, tmplog, dst + maxsize - tmplog);
 					else
 						ret = lf_port(tmplog, (struct sockaddr *)&conn->addr.to, dst + maxsize - tmplog, tmp);
 				}
@@ -1059,7 +1041,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_BACKENDIP:  // %bi
-				conn = objt_conn(s->si[1].end);
+				conn = objt_conn(s->req->cons->end);
 				if (conn)
 					ret = lf_ip(tmplog, (struct sockaddr *)&conn->addr.from, dst + maxsize - tmplog, tmp);
 				else
@@ -1072,7 +1054,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_BACKENDPORT:  // %bp
-				conn = objt_conn(s->si[1].end);
+				conn = objt_conn(s->req->cons->end);
 				if (conn)
 					ret = lf_port(tmplog, (struct sockaddr *)&conn->addr.from, dst + maxsize - tmplog, tmp);
 				else
@@ -1085,7 +1067,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_SERVERIP: // %si
-				conn = objt_conn(s->si[1].end);
+				conn = objt_conn(s->req->cons->end);
 				if (conn)
 					ret = lf_ip(tmplog, (struct sockaddr *)&conn->addr.to, dst + maxsize - tmplog, tmp);
 				else
@@ -1098,7 +1080,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_SERVERPORT: // %sp
-				conn = objt_conn(s->si[1].end);
+				conn = objt_conn(s->req->cons->end);
 				if (conn)
 					ret = lf_port(tmplog, (struct sockaddr *)&conn->addr.to, dst + maxsize - tmplog, tmp);
 				else
@@ -1192,7 +1174,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 					goto out;
 				tmplog += iret;
 #ifdef USE_OPENSSL
-				if (sess->listener->xprt == &ssl_sock)
+				if (s->listener->xprt == &ssl_sock)
 					LOGCHAR('~');
 #endif
 				if (tmp->options & LOG_OPT_QUOTE)
@@ -1202,9 +1184,9 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 #ifdef USE_OPENSSL
 			case LOG_FMT_SSL_CIPHER: // %sslc
 				src = NULL;
-				conn = objt_conn(sess->origin);
+				conn = objt_conn(s->si[0].end);
 				if (conn) {
-					if (sess->listener->xprt == &ssl_sock)
+					if (s->listener->xprt == &ssl_sock)
 						src = ssl_sock_get_cipher_name(conn);
 				}
 				ret = lf_text(tmplog, src, dst + maxsize - tmplog, tmp);
@@ -1216,9 +1198,9 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 
 			case LOG_FMT_SSL_VERSION: // %sslv
 				src = NULL;
-				conn = objt_conn(sess->origin);
+				conn = objt_conn(s->si[0].end);
 				if (conn) {
-					if (sess->listener->xprt == &ssl_sock)
+					if (s->listener->xprt == &ssl_sock)
 						src = ssl_sock_get_proto_version(conn);
 				}
 				ret = lf_text(tmplog, src, dst + maxsize - tmplog, tmp);
@@ -1346,15 +1328,15 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_TERMSTATE: // %ts
-				LOGCHAR(sess_term_cond[(s->flags & SF_ERR_MASK) >> SF_ERR_SHIFT]);
-				LOGCHAR(sess_fin_state[(s->flags & SF_FINST_MASK) >> SF_FINST_SHIFT]);
+				LOGCHAR(sess_term_cond[(s->flags & SN_ERR_MASK) >> SN_ERR_SHIFT]);
+				LOGCHAR(sess_fin_state[(s->flags & SN_FINST_MASK) >> SN_FINST_SHIFT]);
 				*tmplog = '\0';
 				last_isspace = 0;
 				break;
 
 			case LOG_FMT_TERMSTATE_CK: // %tsc, same as TS with cookie state (for mode HTTP)
-				LOGCHAR(sess_term_cond[(s->flags & SF_ERR_MASK) >> SF_ERR_SHIFT]);
-				LOGCHAR(sess_fin_state[(s->flags & SF_FINST_MASK) >> SF_FINST_SHIFT]);
+				LOGCHAR(sess_term_cond[(s->flags & SN_ERR_MASK) >> SN_ERR_SHIFT]);
+				LOGCHAR(sess_fin_state[(s->flags & SN_FINST_MASK) >> SN_FINST_SHIFT]);
 				LOGCHAR((be->ck_opts & PR_CK_ANY) ? sess_cookie[(txn->flags & TX_CK_MASK) >> TX_CK_SHIFT] : '-');
 				LOGCHAR((be->ck_opts & PR_CK_ANY) ? sess_set_cookie[(txn->flags & TX_SCK_MASK) >> TX_SCK_SHIFT] : '-');
 				last_isspace = 0;
@@ -1395,10 +1377,10 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_RETRIES:  // %rq
-				if (s->flags & SF_REDISP)
+				if (s->flags & SN_REDISP)
 					LOGCHAR('+');
-				ret = ltoa_o((s->si[1].conn_retries>0) ?
-				                (be->conn_retries - s->si[1].conn_retries) :
+				ret = ltoa_o((s->req->cons->conn_retries>0) ?
+				                (be->conn_retries - s->req->cons->conn_retries) :
 				                be->conn_retries, tmplog, dst + maxsize - tmplog);
 				if (ret == NULL)
 					goto out;
@@ -1424,16 +1406,16 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 
 			case LOG_FMT_HDRREQUEST: // %hr
 				/* request header */
-				if (fe->nb_req_cap && s->req_cap) {
+				if (fe->nb_req_cap && txn->req.cap) {
 					if (tmp->options & LOG_OPT_QUOTE)
 						LOGCHAR('"');
 					LOGCHAR('{');
 					for (hdr = 0; hdr < fe->nb_req_cap; hdr++) {
 						if (hdr)
 							LOGCHAR('|');
-						if (s->req_cap[hdr] != NULL) {
+						if (txn->req.cap[hdr] != NULL) {
 							ret = encode_string(tmplog, dst + maxsize,
-									       '#', hdr_encode_map, s->req_cap[hdr]);
+									       '#', hdr_encode_map, txn->req.cap[hdr]);
 							if (ret == NULL || *ret != '\0')
 								goto out;
 							tmplog = ret;
@@ -1448,15 +1430,15 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 
 			case LOG_FMT_HDRREQUESTLIST: // %hrl
 				/* request header list */
-				if (fe->nb_req_cap && s->req_cap) {
+				if (fe->nb_req_cap && txn->req.cap) {
 					for (hdr = 0; hdr < fe->nb_req_cap; hdr++) {
 						if (hdr > 0)
 							LOGCHAR(' ');
 						if (tmp->options & LOG_OPT_QUOTE)
 							LOGCHAR('"');
-						if (s->req_cap[hdr] != NULL) {
+						if (txn->req.cap[hdr] != NULL) {
 							ret = encode_string(tmplog, dst + maxsize,
-									       '#', hdr_encode_map, s->req_cap[hdr]);
+									       '#', hdr_encode_map, txn->req.cap[hdr]);
 							if (ret == NULL || *ret != '\0')
 								goto out;
 							tmplog = ret;
@@ -1472,16 +1454,16 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 
 			case LOG_FMT_HDRRESPONS: // %hs
 				/* response header */
-				if (fe->nb_rsp_cap && s->res_cap) {
+				if (fe->nb_rsp_cap && txn->rsp.cap) {
 					if (tmp->options & LOG_OPT_QUOTE)
 						LOGCHAR('"');
 					LOGCHAR('{');
 					for (hdr = 0; hdr < fe->nb_rsp_cap; hdr++) {
 						if (hdr)
 							LOGCHAR('|');
-						if (s->res_cap[hdr] != NULL) {
+						if (txn->rsp.cap[hdr] != NULL) {
 							ret = encode_string(tmplog, dst + maxsize,
-							                    '#', hdr_encode_map, s->res_cap[hdr]);
+							                    '#', hdr_encode_map, txn->rsp.cap[hdr]);
 							if (ret == NULL || *ret != '\0')
 								goto out;
 							tmplog = ret;
@@ -1496,15 +1478,15 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 
 			case LOG_FMT_HDRRESPONSLIST: // %hsl
 				/* response header list */
-				if (fe->nb_rsp_cap && s->res_cap) {
+				if (fe->nb_rsp_cap && txn->rsp.cap) {
 					for (hdr = 0; hdr < fe->nb_rsp_cap; hdr++) {
 						if (hdr > 0)
 							LOGCHAR(' ');
 						if (tmp->options & LOG_OPT_QUOTE)
 							LOGCHAR('"');
-						if (s->res_cap[hdr] != NULL) {
+						if (txn->rsp.cap[hdr] != NULL) {
 							ret = encode_string(tmplog, dst + maxsize,
-							                    '#', hdr_encode_map, s->res_cap[hdr]);
+							                    '#', hdr_encode_map, txn->rsp.cap[hdr]);
 							if (ret == NULL || *ret != '\0')
 								goto out;
 							tmplog = ret;
@@ -1532,161 +1514,6 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				last_isspace = 0;
 				break;
 
-			case LOG_FMT_HTTP_PATH: // %HP
-				uri = txn->uri ? txn->uri : "<BADREQ>";
-
-				if (tmp->options & LOG_OPT_QUOTE)
-					LOGCHAR('"');
-
-				end = uri + strlen(uri);
-				// look for the first whitespace character
-				while (uri < end && !HTTP_IS_SPHT(*uri))
-					uri++;
-
-				// keep advancing past multiple spaces
-				while (uri < end && HTTP_IS_SPHT(*uri)) {
-					uri++; nspaces++;
-				}
-
-				// look for first space or question mark after url
-				spc = uri;
-				while (spc < end && *spc != '?' && !HTTP_IS_SPHT(*spc))
-					spc++;
-
-				if (!txn->uri || nspaces == 0) {
-					chunk.str = "<BADREQ>";
-					chunk.len = strlen("<BADREQ>");
-				} else {
-					chunk.str = uri;
-					chunk.len = spc - uri;
-				}
-
-				ret = encode_chunk(tmplog, dst + maxsize, '#', url_encode_map, &chunk);
-				if (ret == NULL || *ret != '\0')
-					goto out;
-
-				tmplog = ret;
-				if (tmp->options & LOG_OPT_QUOTE)
-					LOGCHAR('"');
-
-				last_isspace = 0;
-				break;
-
-			case LOG_FMT_HTTP_URI: // %HU
-				uri = txn->uri ? txn->uri : "<BADREQ>";
-
-				if (tmp->options & LOG_OPT_QUOTE)
-					LOGCHAR('"');
-
-				end = uri + strlen(uri);
-				// look for the first whitespace character
-				while (uri < end && !HTTP_IS_SPHT(*uri))
-					uri++;
-
-				// keep advancing past multiple spaces
-				while (uri < end && HTTP_IS_SPHT(*uri)) {
-					uri++; nspaces++;
-				}
-
-				// look for first space after url
-				spc = uri;
-				while (spc < end && !HTTP_IS_SPHT(*spc))
-					spc++;
-
-				if (!txn->uri || nspaces == 0) {
-					chunk.str = "<BADREQ>";
-					chunk.len = strlen("<BADREQ>");
-				} else {
-					chunk.str = uri;
-					chunk.len = spc - uri;
-				}
-
-				ret = encode_chunk(tmplog, dst + maxsize, '#', url_encode_map, &chunk);
-				if (ret == NULL || *ret != '\0')
-					goto out;
-
-				tmplog = ret;
-				if (tmp->options & LOG_OPT_QUOTE)
-					LOGCHAR('"');
-
-				last_isspace = 0;
-				break;
-
-			case LOG_FMT_HTTP_METHOD: // %HM
-				uri = txn->uri ? txn->uri : "<BADREQ>";
-				if (tmp->options & LOG_OPT_QUOTE)
-					LOGCHAR('"');
-
-				end = uri + strlen(uri);
-				// look for the first whitespace character
-				spc = uri;
-				while (spc < end && !HTTP_IS_SPHT(*spc))
-					spc++;
-
-				if (spc == end) { // odd case, we have txn->uri, but we only got a verb
-					chunk.str = "<BADREQ>";
-					chunk.len = strlen("<BADREQ>");
-				} else {
-					chunk.str = uri;
-					chunk.len = spc - uri;
-				}
-
-				ret = encode_chunk(tmplog, dst + maxsize, '#', url_encode_map, &chunk);
-				if (ret == NULL || *ret != '\0')
-					goto out;
-
-				tmplog = ret;
-				if (tmp->options & LOG_OPT_QUOTE)
-					LOGCHAR('"');
-
-				last_isspace = 0;
-				break;
-
-			case LOG_FMT_HTTP_VERSION: // %HV
-				uri = txn->uri ? txn->uri : "<BADREQ>";
-				if (tmp->options & LOG_OPT_QUOTE)
-					LOGCHAR('"');
-
-				end = uri + strlen(uri);
-				// look for the first whitespace character
-				while (uri < end && !HTTP_IS_SPHT(*uri))
-					uri++;
-
-				// keep advancing past multiple spaces
-				while (uri < end && HTTP_IS_SPHT(*uri)) {
-					uri++; nspaces++;
-				}
-
-				// look for the next whitespace character
-				while (uri < end && !HTTP_IS_SPHT(*uri))
-					uri++;
-
-				// keep advancing past multiple spaces
-				while (uri < end && HTTP_IS_SPHT(*uri))
-					uri++;
-
-				if (!txn->uri || nspaces == 0) {
-					chunk.str = "<BADREQ>";
-					chunk.len = strlen("<BADREQ>");
-				} else if (uri == end) {
-					chunk.str = "HTTP/0.9";
-					chunk.len = strlen("HTTP/0.9");
-				} else {
-					chunk.str = uri;
-					chunk.len = end - uri;
-				}
-
-				ret = encode_chunk(tmplog, dst + maxsize, '#', url_encode_map, &chunk);
-				if (ret == NULL || *ret != '\0')
-					goto out;
-
-				tmplog = ret;
-				if (tmp->options & LOG_OPT_QUOTE)
-					LOGCHAR('"');
-
-				last_isspace = 0;
-				break;
-
 			case LOG_FMT_COUNTER: // %rt
 				if (tmp->options & LOG_OPT_HEXA) {
 					iret = snprintf(tmplog, dst + maxsize - tmplog, "%04X", s->uniq_id);
@@ -1696,22 +1523,6 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 					tmplog += iret;
 				} else {
 					ret = ltoa_o(s->uniq_id, tmplog, dst + maxsize - tmplog);
-					if (ret == NULL)
-						goto out;
-					tmplog = ret;
-					last_isspace = 0;
-				}
-				break;
-
-			case LOG_FMT_LOGCNT: // %lc
-				if (tmp->options & LOG_OPT_HEXA) {
-					iret = snprintf(tmplog, dst + maxsize - tmplog, "%04X", fe->log_count);
-					if (iret < 0 || iret > dst + maxsize - tmplog)
-						goto out;
-					last_isspace = 0;
-					tmplog += iret;
-				} else {
-					ret = ultoa_o(fe->log_count, tmplog, dst + maxsize - tmplog);
 					if (ret == NULL)
 						goto out;
 					tmplog = ret;
@@ -1765,26 +1576,25 @@ out:
 }
 
 /*
- * send a log for the stream when we have enough info about it.
+ * send a log for the session when we have enough info about it.
  * Will not log if the frontend has no log defined.
  */
-void strm_log(struct stream *s)
+void sess_log(struct session *s)
 {
-	struct session *sess = s->sess;
 	char *tmplog;
 	int size, err, level;
 
 	/* if we don't want to log normal traffic, return now */
-	err = (s->flags & SF_REDISP) ||
-              ((s->flags & SF_ERR_MASK) > SF_ERR_LOCAL) ||
-	      (((s->flags & SF_ERR_MASK) == SF_ERR_NONE) &&
-	       (s->si[1].conn_retries != s->be->conn_retries)) ||
-	      ((sess->fe->mode == PR_MODE_HTTP) && s->txn && s->txn->status >= 500);
+	err = (s->flags & SN_REDISP) ||
+              ((s->flags & SN_ERR_MASK) > SN_ERR_LOCAL) ||
+	      (((s->flags & SN_ERR_MASK) == SN_ERR_NONE) &&
+	       (s->req->cons->conn_retries != s->be->conn_retries)) ||
+	      ((s->fe->mode == PR_MODE_HTTP) && s->txn.status >= 500);
 
-	if (!err && (sess->fe->options2 & PR_O2_NOLOGNORM))
+	if (!err && (s->fe->options2 & PR_O2_NOLOGNORM))
 		return;
 
-	if (LIST_ISEMPTY(&sess->fe->logsrvs))
+	if (LIST_ISEMPTY(&s->fe->logsrvs))
 		return;
 
 	if (s->logs.level) { /* loglevel was overridden */
@@ -1796,22 +1606,21 @@ void strm_log(struct stream *s)
 	}
 	else {
 		level = LOG_INFO;
-		if (err && (sess->fe->options2 & PR_O2_LOGERRORS))
+		if (err && (s->fe->options2 & PR_O2_LOGERRORS))
 			level = LOG_ERR;
 	}
 
 	/* if unique-id was not generated */
-	if (!s->unique_id && !LIST_ISEMPTY(&sess->fe->format_unique_id)) {
+	if (!s->unique_id && !LIST_ISEMPTY(&s->fe->format_unique_id)) {
 		if ((s->unique_id = pool_alloc2(pool2_uniqueid)) != NULL)
-			build_logline(s, s->unique_id, UNIQUEID_LEN, &sess->fe->format_unique_id);
+			build_logline(s, s->unique_id, UNIQUEID_LEN, &s->fe->format_unique_id);
 	}
 
-	tmplog = update_log_hdr(sess->fe->log_tag ? sess->fe->log_tag : global.log_tag);
+	tmplog = update_log_hdr();
 	size = tmplog - logline;
-	size += build_logline(s, tmplog, global.max_syslog_len - size, &sess->fe->logformat);
+	size += build_logline(s, tmplog, global.max_syslog_len - size, &s->fe->logformat);
 	if (size > 0) {
-		sess->fe->log_count++;
-		__send_log(sess->fe, level, logline, size + 1);
+		__send_log(s->fe, level, logline, size + 1);
 		s->logs.logwait = 0;
 	}
 }

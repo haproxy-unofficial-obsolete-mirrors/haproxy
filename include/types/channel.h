@@ -2,7 +2,7 @@
  * include/types/channel.h
  * Channel management definitions, macros and inline functions.
  *
- * Copyright (C) 2000-2014 Willy Tarreau - w@1wt.eu
+ * Copyright (C) 2000-2012 Willy Tarreau - w@1wt.eu
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -23,7 +23,9 @@
 #define _TYPES_CHANNEL_H
 
 #include <common/config.h>
+#include <common/chunk.h>
 #include <common/buffer.h>
+#include <types/stream_interface.h>
 
 /* The CF_* macros designate Channel Flags, which may be ORed in the bit field
  * member 'flags' in struct channel. Here we have several types of flags :
@@ -116,8 +118,7 @@
 #define CF_NEVER_WAIT     0x08000000  /* never wait for sending data (permanent) */
 
 #define CF_WAKE_ONCE      0x10000000  /* pretend there is activity on this channel (one-shoot) */
-/* unused: 0x20000000, 0x40000000 */
-#define CF_ISRESP         0x80000000  /* 0 = request channel, 1 = response channel */
+/* unused: 0x20000000, 0x40000000, 0x80000000 */
 
 /* Masks which define input events for stream analysers */
 #define CF_MASK_ANALYSER  (CF_READ_ATTACHED|CF_READ_ACTIVITY|CF_READ_TIMEOUT|CF_ANA_TIMEOUT|CF_WRITE_ACTIVITY|CF_WAKE_ONCE)
@@ -136,18 +137,17 @@
 /* unused: 0x00000001 */
 #define AN_REQ_INSPECT_FE       0x00000002  /* inspect request contents in the frontend */
 #define AN_REQ_WAIT_HTTP        0x00000004  /* wait for an HTTP request */
-#define AN_REQ_HTTP_BODY        0x00000008  /* wait for HTTP request body */
-#define AN_REQ_HTTP_PROCESS_FE  0x00000010  /* process the frontend's HTTP part */
-#define AN_REQ_SWITCHING_RULES  0x00000020  /* apply the switching rules */
-#define AN_REQ_INSPECT_BE       0x00000040  /* inspect request contents in the backend */
-#define AN_REQ_HTTP_PROCESS_BE  0x00000080  /* process the backend's HTTP part */
-#define AN_REQ_SRV_RULES        0x00000100  /* use-server rules */
-#define AN_REQ_HTTP_INNER       0x00000200  /* inner processing of HTTP request */
-#define AN_REQ_HTTP_TARPIT      0x00000400  /* wait for end of HTTP tarpit */
+#define AN_REQ_HTTP_PROCESS_FE  0x00000008  /* process the frontend's HTTP part */
+#define AN_REQ_SWITCHING_RULES  0x00000010  /* apply the switching rules */
+#define AN_REQ_INSPECT_BE       0x00000020  /* inspect request contents in the backend */
+#define AN_REQ_HTTP_PROCESS_BE  0x00000040  /* process the backend's HTTP part */
+#define AN_REQ_SRV_RULES        0x00000080  /* use-server rules */
+#define AN_REQ_HTTP_INNER       0x00000100  /* inner processing of HTTP request */
+#define AN_REQ_HTTP_TARPIT      0x00000200  /* wait for end of HTTP tarpit */
+#define AN_REQ_HTTP_BODY        0x00000400  /* inspect HTTP request body */
 #define AN_REQ_STICKING_RULES   0x00000800  /* table persistence matching */
 #define AN_REQ_PRST_RDP_COOKIE  0x00001000  /* persistence on rdp cookie */
 #define AN_REQ_HTTP_XFER_BODY   0x00002000  /* forward request body */
-#define AN_REQ_ALL              0x00003ffe  /* all of the request analysers */
 
 /* response analysers */
 #define AN_RES_INSPECT          0x00010000  /* content inspection */
@@ -161,11 +161,15 @@
 /* Magic value to forward infinite size (TCP, ...), used with ->to_forward */
 #define CHN_INFINITE_FORWARD    MAX_RANGE(unsigned int)
 
+/* needed for a declaration below */
+struct session;
 
 struct channel {
 	unsigned int flags;             /* CF_* */
 	unsigned int analysers;         /* bit field indicating what to do on the channel */
 	struct buffer *buf;		/* buffer attached to the channel, always present but may move */
+	struct stream_interface *cons;  /* consumer attached to this channel */
+	struct stream_interface *prod;  /* producer attached to this channel */
 	struct pipe *pipe;		/* non-NULL only when data present */
 	unsigned int to_forward;        /* number of bytes to forward after out without a wake-up */
 	unsigned short last_read;       /* 16 lower bits of last read date (max pause=65s) */

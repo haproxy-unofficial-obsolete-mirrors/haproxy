@@ -22,6 +22,8 @@
 #include <types/global.h>
 
 #include <proto/fd.h>
+#include <proto/signal.h>
+#include <proto/task.h>
 
 
 static fd_set *fd_evts[2];
@@ -74,6 +76,8 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 			else if ((en & ~eo) & FD_EV_POLLED_W)
 				FD_SET(fd, fd_evts[DIR_WR]);
 		}
+
+		fd_alloc_or_release_cache_entry(fd, en);
 	}
 	fd_nbupdt = 0;
 
@@ -81,17 +85,19 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 	delta.tv_sec  = 0;
 	delta.tv_usec = 0;
 
-	if (!exp) {
-		delta_ms      = MAX_DELAY_MS;
-		delta.tv_sec  = (MAX_DELAY_MS / 1000);
-		delta.tv_usec = (MAX_DELAY_MS % 1000) * 1000;
-	}
-	else if (!tick_is_expired(exp, now_ms)) {
-		delta_ms = TICKS_TO_MS(tick_remain(now_ms, exp)) + SCHEDULER_RESOLUTION;
-		if (delta_ms > MAX_DELAY_MS)
-			delta_ms = MAX_DELAY_MS;
-		delta.tv_sec  = (delta_ms / 1000);
-		delta.tv_usec = (delta_ms % 1000) * 1000;
+	if (!fd_cache_num && !run_queue && !signal_queue_len) {
+		if (!exp) {
+			delta_ms      = MAX_DELAY_MS;
+			delta.tv_sec  = (MAX_DELAY_MS / 1000);
+			delta.tv_usec = (MAX_DELAY_MS % 1000) * 1000;
+		}
+		else if (!tick_is_expired(exp, now_ms)) {
+			delta_ms = TICKS_TO_MS(tick_remain(now_ms, exp)) + SCHEDULER_RESOLUTION;
+			if (delta_ms > MAX_DELAY_MS)
+				delta_ms = MAX_DELAY_MS;
+			delta.tv_sec  = (delta_ms / 1000);
+			delta.tv_usec = (delta_ms % 1000) * 1000;
+		}
 	}
 
 	/* let's restore fdset state */
@@ -142,11 +148,7 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 			if (FD_ISSET(fd, tmp_evts[DIR_WR]))
 				fdtab[fd].ev |= FD_POLL_OUT;
 
-			if (fdtab[fd].ev & (FD_POLL_IN | FD_POLL_HUP | FD_POLL_ERR))
-				fd_may_recv(fd);
-
-			if (fdtab[fd].ev & (FD_POLL_OUT | FD_POLL_ERR))
-				fd_may_send(fd);
+			fd_process_polled_events(fd);
 		}
 	}
 }

@@ -32,7 +32,6 @@
 #include <common/ticks.h>
 #include <eb32tree.h>
 
-#include <types/global.h>
 #include <types/task.h>
 
 /* Principle of the wait queue.
@@ -86,7 +85,6 @@ extern unsigned int nb_tasks_cur;
 extern unsigned int niced_tasks;  /* number of niced tasks in the run queue */
 extern struct pool_head *pool2_task;
 extern struct eb32_node *last_timer;   /* optimization: last queued timer */
-extern struct eb32_node *rq_next;    /* optimization: next task except if delete/insert */
 
 /* return 0 if task is in run queue, otherwise non-zero */
 static inline int task_in_rq(struct task *t)
@@ -134,9 +132,8 @@ static inline struct task *task_unlink_wq(struct task *t)
 /*
  * Unlink the task from the run queue. The run_queue size and number of niced
  * tasks are updated too. A pointer to the task itself is returned. The task
- * *must* already be in the run queue before calling this function. If unsure,
- * use the safer task_unlink_rq() function. Note that the pointer to the next
- * run queue entry is neither checked nor updated.
+ * *must* already be in the wait queue before calling this function. If unsure,
+ * use the safer task_unlink_rq() function.
  */
 static inline struct task *__task_unlink_rq(struct task *t)
 {
@@ -147,16 +144,10 @@ static inline struct task *__task_unlink_rq(struct task *t)
 	return t;
 }
 
-/* This function unlinks task <t> from the run queue if it is in it. It also
- * takes care of updating the next run queue task if it was this task.
- */
 static inline struct task *task_unlink_rq(struct task *t)
 {
-	if (likely(task_in_rq(t))) {
-		if (&t->rq == rq_next)
-			rq_next = eb32_next(rq_next);
+	if (likely(task_in_rq(t)))
 		__task_unlink_rq(t);
-	}
 	return t;
 }
 
@@ -208,8 +199,6 @@ static inline struct task *task_new(void)
 static inline void task_free(struct task *t)
 {
 	pool_free2(pool2_task, t);
-	if (unlikely(stopping))
-		pool_flush2(pool2_task);
 	nb_tasks--;
 }
 
@@ -259,13 +248,13 @@ static inline void task_schedule(struct task *task, int when)
  *   - return the date of next event in <next> or eternity.
  */
 
-void process_runnable_tasks();
+void process_runnable_tasks(int *next);
 
 /*
  * Extract all expired timers from the timer queue, and wakes up all
  * associated tasks. Returns the date of next event (or eternity).
  */
-int wake_expired_tasks();
+void wake_expired_tasks(int *next);
 
 /* Perform minimal initializations, report 0 in case of error, 1 if OK. */
 int init_task();

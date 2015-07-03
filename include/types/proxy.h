@@ -46,6 +46,7 @@
 #include <types/obj_type.h>
 #include <types/proto_http.h>
 #include <types/sample.h>
+#include <types/session.h>
 #include <types/server.h>
 #include <types/stick_table.h>
 
@@ -79,19 +80,18 @@ enum pr_mode {
 /* unused: 0x04, 0x08, 0x10 */
 #define PR_O_PREF_LAST  0x00000020      /* prefer last server */
 #define PR_O_DISPATCH   0x00000040      /* use dispatch mode */
-#define PR_O_FORCED_ID  0x00000080      /* proxy's ID was forced in the configuration */
+/* unused: 0x00000080 */
 #define PR_O_FWDFOR     0x00000100      /* conditionally insert x-forwarded-for with client address */
 #define PR_O_IGNORE_PRB 0x00000200      /* ignore empty requests (aborts and timeouts) */
 #define PR_O_NULLNOLOG  0x00000400      /* a connect without request will not be logged */
-#define PR_O_WREQ_BODY  0x00000800      /* always wait for the HTTP request body */
-/* unused: 0x1000 */
+/* unused: 0x0800, 0x1000 */
 #define PR_O_FF_ALWAYS  0x00002000      /* always set x-forwarded-for */
 #define PR_O_PERSIST    0x00004000      /* server persistence stays effective even when server is down */
-#define PR_O_LOGASAP    0x00008000      /* log as soon as possible, without waiting for the stream to complete */
+#define PR_O_LOGASAP    0x00008000      /* log as soon as possible, without waiting for the session to complete */
 /* unused: 0x00010000 */
 #define PR_O_CHK_CACHE  0x00020000      /* require examination of cacheability of the 'set-cookie' field */
-#define PR_O_TCP_CLI_KA 0x00040000      /* enable TCP keep-alive on client-side streams */
-#define PR_O_TCP_SRV_KA 0x00080000      /* enable TCP keep-alive on server-side streams */
+#define PR_O_TCP_CLI_KA 0x00040000      /* enable TCP keep-alive on client-side sessions */
+#define PR_O_TCP_SRV_KA 0x00080000      /* enable TCP keep-alive on server-side sessions */
 #define PR_O_USE_ALL_BK 0x00100000      /* load-balance between backup servers */
 /* unused: 0x00020000 */
 #define PR_O_TCP_NOLING 0x00400000      /* disable lingering on client and server connections */
@@ -107,7 +107,7 @@ enum pr_mode {
 #define PR_O_HTTP_MODE  0x07000000      /* MASK to retrieve the HTTP mode */
 #define PR_O_TCPCHK_SSL 0x08000000	/* at least one TCPCHECK connect rule requires SSL */
 #define PR_O_CONTSTATS	0x10000000	/* continous counters */
-#define PR_O_HTTP_PROXY 0x20000000	/* Enable stream to use HTTP proxy operations */
+#define PR_O_HTTP_PROXY 0x20000000	/* Enable session to use HTTP proxy operations */
 #define PR_O_DISABLE404 0x40000000      /* Disable a server on a 404 response to a health-check */
 #define PR_O_ORGTO      0x80000000      /* insert x-original-to with destination address */
 
@@ -164,8 +164,7 @@ enum pr_mode {
 #define PR_O2_SSL3_CHK  0x70000000      /* use SSLv3 CLIENT_HELLO packets for server health */
 #define PR_O2_LB_AGENT_CHK 0x80000000   /* use a TCP connection to obtain a metric of server health */
 #define PR_O2_TCPCHK_CHK 0x90000000     /* use TCPCHK check for server health */
-#define PR_O2_EXT_CHK   0xA0000000      /* use external command for server health */
-/* unused: 0xB0000000 to 0xF000000, reserved for health checks */
+/* unused: 0xA0000000 to 0xF000000, reserved for health checks */
 #define PR_O2_CHK_ANY   0xF0000000      /* Mask to cover any check */
 /* end of proxy->options2 */
 
@@ -186,17 +185,15 @@ enum pr_mode {
 #define STK_IS_STORE	0x00000002	/* store on request fetch */
 #define STK_ON_RSP	0x00000004	/* store on response fetch */
 
-struct stream;
-
 struct error_snapshot {
 	struct timeval when;		/* date of this event, (tv_sec == 0) means "never" */
 	unsigned int len;		/* original length of the last invalid request/response */
 	unsigned int pos;		/* position of the first invalid character */
-	unsigned int sid;		/* ID of the faulty stream */
+	unsigned int sid;		/* ID of the faulty session */
 	unsigned int ev_id;		/* event number (counter incremented for each capture) */
 	unsigned int state;		/* message state before the error (when saved) */
 	unsigned int b_flags;		/* buffer flags */
-	unsigned int s_flags;		/* stream flags */
+	unsigned int s_flags;		/* session flags */
 	unsigned int t_flags;		/* transaction flags */
 	unsigned int m_flags;		/* message flags */
 	unsigned int b_out;		/* pending output bytes */
@@ -210,25 +207,12 @@ struct error_snapshot {
 	char buf[BUFSIZE];		/* copy of the beginning of the message */
 };
 
-struct email_alert {
-	struct list list;
-	struct list tcpcheck_rules;
-};
-
-struct email_alertq {
-	struct list email_alerts;
-	struct check check;		/* Email alerts are implemented using existing check
-					 * code even though they are not checks. This structure
-					 * is as a parameter to the check code.
-					 * Each check corresponds to a mailer */
-};
-
 struct proxy {
 	enum obj_type obj_type;                 /* object type == OBJ_TYPE_PROXY */
 	enum pr_state state;                    /* proxy state, one of PR_* */
 	enum pr_mode mode;                      /* mode = PR_MODE_TCP, PR_MODE_HTTP or PR_MODE_HEALTH */
 	char cap;                               /* supported capabilities (PR_CAP_*) */
-	unsigned int maxconn;                   /* max # of active streams on the frontend */
+	unsigned int maxconn;                   /* max # of active sessions on the frontend */
 
 	int options;				/* PR_O_REDISP, PR_O_TRANSP, ... */
 	int options2;				/* PR_O2_* */
@@ -268,8 +252,8 @@ struct proxy {
 	int  cookie_len;			/* strlen(cookie_name), computed only once */
 	unsigned int cookie_maxidle;		/* max idle time for this cookie */
 	unsigned int cookie_maxlife;		/* max life time for this cookie */
-	int  rdp_cookie_len;			/* strlen(rdp_cookie_name), computed only once */
 	char *rdp_cookie_name;			/* name of the RDP cookie to look for */
+	int  rdp_cookie_len;			/* strlen(rdp_cookie_name), computed only once */
 	char *url_param_name;			/* name of the URL parameter used for hashing */
 	int  url_param_len;			/* strlen(url_param_name), computed only once */
 	int  uri_len_limit;			/* character limit for uri balancing algorithm */
@@ -286,9 +270,8 @@ struct proxy {
 	int  capture_namelen;			/* length of the cookie name to match */
 	int  capture_len;			/* length of the string to be captured */
 	struct uri_auth *uri_auth;		/* if non-NULL, the (list of) per-URI authentications */
-	int max_ka_queue;			/* 1+maximum requests in queue accepted for reusing a K-A conn (0=none) */
-	int monitor_uri_len;			/* length of the string above. 0 if unused */
 	char *monitor_uri;			/* a special URI to which we respond with HTTP/200 OK */
+	int monitor_uri_len;			/* length of the string above. 0 if unused */
 	struct list mon_fail_cond;              /* list of conditions to fail monitoring requests (chained) */
 	struct {				/* WARNING! check proxy_reset_timeouts() in proxy.h !!! */
 		int client;                     /* client I/O timeout (in ticks) */
@@ -308,7 +291,8 @@ struct proxy {
 	struct list pendconns;			/* pending connections with no server assigned yet */
 	int nbpend;				/* number of pending connections with no server assigned yet */
 	int totpend;				/* total number of pending connections on this instance (for stats) */
-	unsigned int feconn, beconn;		/* # of active frontend and backends streams */
+	int max_ka_queue;			/* 1+maximum requests in queue accepted for reusing a K-A conn (0=none) */
+	unsigned int feconn, beconn;		/* # of active frontend and backends sessions */
 	struct freq_ctr fe_req_per_sec;		/* HTTP requests per second on the frontend */
 	struct freq_ctr fe_conn_per_sec;	/* received connections per second on the frontend */
 	struct freq_ctr fe_sess_per_sec;	/* accepted sessions per second on the frontend (after tcp rules) */
@@ -319,25 +303,22 @@ struct proxy {
 	struct in_addr except_to;		/* don't x-original-to for this address. */
 	struct in_addr except_mask_to;		/* the netmask for except_to. */
 	char *fwdfor_hdr_name;			/* header to use - default: "x-forwarded-for" */
-	char *orgto_hdr_name;			/* header to use - default: "x-original-to" */
 	int fwdfor_hdr_len;			/* length of "x-forwarded-for" header */
+	char *orgto_hdr_name;			/* header to use - default: "x-original-to" */
 	int orgto_hdr_len;			/* length of "x-original-to" header */
 	char *server_id_hdr_name;                   /* the header to use to send the server id (name) */
 	int server_id_hdr_len;                      /* the length of the id (name) header... name */
-	int conn_retries;			/* maximum number of connect retries */
-	int redispatch_after;			/* number of retries before redispatch */
+
 	unsigned down_trans;			/* up-down transitions */
 	unsigned down_time;			/* total time the proxy was down */
 	time_t last_change;			/* last time, when the state was changed */
-	int (*accept)(struct stream *s);       /* application layer's accept() */
-	struct conn_src conn_src;               /* connection source settings */
-	enum obj_type *default_target;		/* default target to use for accepted streams or NULL */
-	struct proxy *next;
 
-	unsigned int log_count;			/* number of logs produced by the frontend */
+	int conn_retries;			/* maximum number of connect retries */
+	int (*accept)(struct session *s);       /* application layer's accept() */
+	struct conn_src conn_src;               /* connection source settings */
+	struct proxy *next;
 	struct list logsrvs;
 	struct list logformat; 			/* log_format linked list */
-	char *log_tag;                          /* override default syslog tag */
 	char *header_unique_id; 		/* unique-id header */
 	struct list format_unique_id;		/* unique-id format */
 	int to_log;				/* things to be logged (LW_*) */
@@ -347,22 +328,20 @@ struct proxy {
 	int nb_req_cap, nb_rsp_cap;		/* # of headers to be captured */
 	struct cap_hdr *req_cap;		/* chained list of request headers to be captured */
 	struct cap_hdr *rsp_cap;		/* chained list of response headers to be captured */
-	struct pool_head *req_cap_pool,		/* pools of pre-allocated char ** used to build the streams */
+	struct pool_head *req_cap_pool,		/* pools of pre-allocated char ** used to build the sessions */
 	                 *rsp_cap_pool;
 	struct list req_add, rsp_add;           /* headers to be added */
 	struct pxcounters be_counters;		/* backend statistics counters */
 	struct pxcounters fe_counters;		/* frontend statistics counters */
 
 	struct list listener_queue;		/* list of the temporarily limited listeners because of lack of a proxy resource */
-	struct stktable table;			/* table for storing sticking streams */
+	struct stktable table;			/* table for storing sticking sessions */
 
 	struct task *task;			/* the associated task, mandatory to manage rate limiting, stopping and resource shortage, NULL if disabled */
-	struct list tcpcheck_rules;		/* tcp-check send / expect rules */
 	int grace;				/* grace time after stop request */
-	int check_len;				/* Length of the HTTP or SSL3 request */
+	struct list tcpcheck_rules;		/* tcp-check send / expect rules */
 	char *check_req;			/* HTTP or SSL request to use for PR_O_HTTP_CHK|PR_O_SSL3_CHK */
-	char *check_command;			/* Command to use for external agent checks */
-	char *check_path;			/* PATH environment to use for external agent checks */
+	int check_len;				/* Length of the HTTP or SSL3 request */
 	char *expect_str;			/* http-check expected content : string or text version of the regex */
 	struct my_regex *expect_regex;		/* http-check expected content */
 	struct chunk errmsg[HTTP_ERR_SIZE];	/* default or customized error messages for known errors */
@@ -391,26 +370,12 @@ struct proxy {
 		char *logformat_string;		/* log format string */
 		char *lfs_file;                 /* file name where the logformat string appears (strdup) */
 		int   lfs_line;                 /* file name where the logformat string appears */
-		int   uif_line;                 /* file name where the unique-id-format string appears */
-		char *uif_file;                 /* file name where the unique-id-format string appears (strdup) */
 		char *uniqueid_format_string;	/* unique-id format string */
+		char *uif_file;                 /* file name where the unique-id-format string appears (strdup) */
+		int   uif_line;                 /* file name where the unique-id-format string appears */
 	} conf;					/* config information */
 	void *parent;				/* parent of the proxy when applicable */
 	struct comp *comp;			/* http compression */
-
-	struct {
-		union {
-			struct mailers *m;	/* Mailer to send email alerts via */
-			char *name;
-		} mailers;
-		char *from;			/* Address to send email alerts from */
-		char *to;			/* Address(es) to send email alerts to */
-		char *myhostname;		/* Identity to use in HELO command sent to mailer */
-		int level;			/* Maximum syslog level of messages to send
-						 * email alerts for */
-		int set;			/* True if email_alert settings are present */
-		struct email_alertq *queues;	/* per-mailer alerts queues */
-	} email_alert;
 };
 
 struct switching_rule {

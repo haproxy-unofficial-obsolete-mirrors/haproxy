@@ -73,37 +73,7 @@ enum {
 	HCHK_STATUS_L7OKCD,		/* L7 check conditionally passed */
 	HCHK_STATUS_L7STS,		/* L7 response error, for example HTTP 5xx */
 
-	HCHK_STATUS_PROCERR,		/* External process check failure */
-	HCHK_STATUS_PROCTOUT,		/* External process check timeout */
-	HCHK_STATUS_PROCOK,		/* External process check passed */
-
 	HCHK_STATUS_SIZE
-};
-
-/* environment variables memory requirement for different types of data */
-#define EXTCHK_SIZE_EVAL_INIT 0		/* size determined during the init phase,
-					 * such environment variables are not updatable. */
-#define EXTCHK_SIZE_ULONG     20	/* max string length for an unsigned long value */
-
-/* external checks environment variables */
-enum {
-	EXTCHK_PATH = 0,
-
-	/* Proxy specific environment variables */
-	EXTCHK_HAPROXY_PROXY_NAME,	/* the backend name */
-	EXTCHK_HAPROXY_PROXY_ID,	/* the backend id */
-	EXTCHK_HAPROXY_PROXY_ADDR,	/* the first bind address if available (or empty) */
-	EXTCHK_HAPROXY_PROXY_PORT,	/* the first bind port if available (or empty) */
-
-	/* Server specific environment variables */
-	EXTCHK_HAPROXY_SERVER_NAME,	/* the server name */
-	EXTCHK_HAPROXY_SERVER_ID,	/* the server id */
-	EXTCHK_HAPROXY_SERVER_ADDR,	/* the server address */
-	EXTCHK_HAPROXY_SERVER_PORT,	/* the server port if available (or empty) */
-	EXTCHK_HAPROXY_SERVER_MAXCONN,	/* the server max connections */
-	EXTCHK_HAPROXY_SERVER_CURCONN,	/* the current number of connections on the server */
-
-	EXTCHK_SIZE
 };
 
 
@@ -166,7 +136,6 @@ struct check {
 	char desc[HCHK_DESC_LEN];		/* health check description */
 	int use_ssl;				/* use SSL for health checks */
 	int send_proxy;				/* send a PROXY protocol header with checks */
-	struct list *tcpcheck_rules;		/* tcp-check send / expect rules */
 	struct tcpcheck_rule *current_step;     /* current step when using tcpcheck */
 	struct tcpcheck_rule *last_started_step;/* pointer to latest tcpcheck rule started */
 	int inter, fastinter, downinter;        /* checks: time in milliseconds */
@@ -177,21 +146,12 @@ struct check {
 	int rise, fall;				/* time in iterations */
 	int type;				/* Check type, one of PR_O2_*_CHK */
 	struct server *server;			/* back-pointer to server */
-	char **argv;				/* the arguments to use if running a process-based check */
-	char **envp;				/* the environment to use if running a process-based check */
-	struct pid_list *curpid;		/* entry in pid_list used for current process-based test, or -1 if not in test */
-	struct sockaddr_storage addr;   	/* the address to check */
 };
 
 struct check_status {
 	short result;			/* one of SRV_CHK_* */
 	char *info;			/* human readable short info */
 	char *desc;			/* long description */
-};
-
-struct extcheck_env {
-	char *name;	/* environment variable name */
-	int vmaxlen;	/* value maximum length, used to determine the required memory allocation */
 };
 
 struct analyze_status {
@@ -204,7 +164,6 @@ enum {
 	TCPCHK_ACT_SEND        = 0,             /* send action, regular string format */
 	TCPCHK_ACT_EXPECT,                      /* expect action, either regular or binary string */
 	TCPCHK_ACT_CONNECT,                     /* connect action, to probe a new port */
-	TCPCHK_ACT_COMMENT,                     /* no action, simply a comment used for logs */
 };
 
 /* flags used by tcpcheck_rule->conn_opts */
@@ -215,7 +174,6 @@ enum {
 struct tcpcheck_rule {
 	struct list list;                       /* list linked to from the proxy */
 	int action;                             /* action: send or expect */
-	char *comment;				/* comment to be used in the logs and on the stats socket */
 	/* match type uses NON-NULL pointer from either string or expect_regex below */
 	/* sent string is string */
 	char *string;                           /* sent or expected string */

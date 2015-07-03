@@ -28,18 +28,12 @@
 #   USE_VSYSCALL         : enable vsyscall on Linux x86, bypassing libc
 #   USE_GETADDRINFO      : use getaddrinfo() to resolve IPv6 host names.
 #   USE_OPENSSL          : enable use of OpenSSL. Recommended, but see below.
-#   USE_LUA              : enable Lua support.
 #   USE_FUTEX            : enable use of futex on kernel 2.6. Automatic.
 #   USE_ACCEPT4          : enable use of accept4() on linux. Automatic.
 #   USE_MY_ACCEPT4       : use own implemention of accept4() if glibc < 2.10.
 #   USE_ZLIB             : enable zlib library support.
-#   USE_SLZ              : enable slz library instead of zlib (pick at most one).
 #   USE_CPU_AFFINITY     : enable pinning processes to CPU on Linux. Automatic.
 #   USE_TFO              : enable TCP fast open. Supported on Linux >= 3.7.
-#   USE_NS               : enable network namespace support. Supported on Linux >= 2.6.24.
-#   USE_DL               : enable it if your system requires -ldl. Automatic on Linux.
-#   USE_DEVICEATLAS      : enable DeviceAtlas api.
-#   USE_51DEGREES        : enable third party device detection library from 51degrees
 #
 # Options can be forced by specifying "USE_xxx=1" or can be disabled by using
 # "USE_xxx=" (empty string).
@@ -79,10 +73,6 @@
 #   PCRE_INC       : force the include path to libpcre ($PCREDIR/inc)
 #   SSL_LIB        : force the lib path to libssl/libcrypto
 #   SSL_INC        : force the include path to libssl/libcrypto
-#   LUA_LIB        : force the lib path to lua
-#   LUA_INC        : force the include path to lua
-#   LUA_LIB_NAME   : force the lib name (or automatically evaluated, by order of
-#                                        priority : lua5.3, lua53, lua).
 #   IGNOREGIT      : ignore GIT commit versions if set.
 #   VERSION        : force haproxy version reporting.
 #   SUBVERS        : add a sub-version (eg: platform, model, ...).
@@ -127,7 +117,7 @@ DEBUG_CFLAGS = -g
 #### Compiler-specific flags that may be used to disable some negative over-
 # optimization or to silence some warnings. -fno-strict-aliasing is needed with
 # gcc >= 4.4.
-SPEC_CFLAGS = -fno-strict-aliasing -Wdeclaration-after-statement
+SPEC_CFLAGS = -fno-strict-aliasing
 
 #### Memory usage tuning
 # If small memory footprint is required, you can reduce the buffer size. There
@@ -227,7 +217,6 @@ ifeq ($(TARGET),linux22)
   USE_POLL        = implicit
   USE_TPROXY      = implicit
   USE_LIBCRYPT    = implicit
-  USE_DL          = implicit
 else
 ifeq ($(TARGET),linux24)
   # This is for standard Linux 2.4 with netfilter but without epoll()
@@ -236,7 +225,6 @@ ifeq ($(TARGET),linux24)
   USE_POLL        = implicit
   USE_TPROXY      = implicit
   USE_LIBCRYPT    = implicit
-  USE_DL          = implicit
 else
 ifeq ($(TARGET),linux24e)
   # This is for enhanced Linux 2.4 with netfilter and epoll() patch > 0.21
@@ -247,7 +235,6 @@ ifeq ($(TARGET),linux24e)
   USE_MY_EPOLL    = implicit
   USE_TPROXY      = implicit
   USE_LIBCRYPT    = implicit
-  USE_DL          = implicit
 else
 ifeq ($(TARGET),linux26)
   # This is for standard Linux 2.6 with netfilter and standard epoll()
@@ -259,7 +246,6 @@ ifeq ($(TARGET),linux26)
   USE_LIBCRYPT    = implicit
   USE_FUTEX       = implicit
   EXTRA          += haproxy-systemd-wrapper
-  USE_DL          = implicit
 else
 ifeq ($(TARGET),linux2628)
   # This is for standard Linux >= 2.6.28 with netfilter, epoll, tproxy and splice
@@ -276,7 +262,6 @@ ifeq ($(TARGET),linux2628)
   USE_CPU_AFFINITY= implicit
   ASSUME_SPLICE_WORKS= implicit
   EXTRA          += haproxy-systemd-wrapper
-  USE_DL          = implicit
 else
 ifeq ($(TARGET),solaris)
   # This is for Solaris 8
@@ -378,7 +363,7 @@ ifeq ($(IGNOREGIT),)
 VERSION := $(shell [ -d .git/. ] && ref=`(git describe --tags --match 'v*' --abbrev=0) 2>/dev/null` && ref=$${ref%-g*} && echo "$${ref\#v}")
 ifneq ($(VERSION),)
 # OK git is there and works.
-SUBVERS := $(shell comms=`git log --format=oneline --no-merges v$(VERSION).. 2>/dev/null | wc -l | tr -dc '0-9'`; commit=`(git log -1 --pretty=%h --abbrev=6) 2>/dev/null`; [ $$comms -gt 0 ] && echo "-$$commit-$$comms")
+SUBVERS := $(shell comms=`git log --format=oneline --no-merges v$(VERSION).. 2>/dev/null | wc -l | tr -dc '0-9'`; [ $$comms -gt 0 ] && echo "-$$comms")
 VERDATE := $(shell git log -1 --pretty=format:%ci | cut -f1 -d' ' | tr '-' '/')
 endif
 endif
@@ -449,15 +434,6 @@ endif
 ifneq ($(USE_GETADDRINFO),)
 OPTIONS_CFLAGS  += -DUSE_GETADDRINFO
 BUILD_OPTIONS   += $(call ignore_implicit,USE_GETADDRINFO)
-endif
-
-ifneq ($(USE_SLZ),)
-# Use SLZ_INC and SLZ_LIB to force path to zlib.h and libz.{a,so} if needed.
-SLZ_INC =
-SLZ_LIB =
-OPTIONS_CFLAGS  += -DUSE_SLZ $(if $(SLZ_INC),-I$(SLZ_INC))
-BUILD_OPTIONS   += $(call ignore_implicit,USE_SLZ)
-OPTIONS_LDFLAGS += $(if $(SLZ_LIB),-L$(SLZ_LIB)) -lslz
 endif
 
 ifneq ($(USE_ZLIB),)
@@ -538,11 +514,6 @@ OPTIONS_CFLAGS += -DCONFIG_REGPARM=3
 BUILD_OPTIONS  += $(call ignore_implicit,USE_REGPARM)
 endif
 
-ifneq ($(USE_DL),)
-BUILD_OPTIONS   += $(call ignore_implicit,USE_DL)
-OPTIONS_LDFLAGS += -ldl
-endif
-
 # report DLMALLOC_SRC only if explicitly specified
 ifneq ($(DLMALLOC_SRC),)
 BUILD_OPTIONS += DLMALLOC_SRC=$(DLMALLOC_SRC)
@@ -583,47 +554,6 @@ OPTIONS_CFLAGS  += -DUSE_SYSCALL_FUTEX
 endif
 endif
 endif
-endif
-
-ifneq ($(USE_LUA),)
-check_lua_lib = $(shell echo "int main(){}" | $(CC) -o /dev/null -x c - $(2) -l$(1) 2>/dev/null && echo $(1))
-
-OPTIONS_CFLAGS  += -DUSE_LUA $(if $(LUA_INC),-I$(LUA_INC))
-LUA_LD_FLAGS := $(if $(LUA_LIB),-L$(LUA_LIB))
-ifeq ($(LUA_LIB_NAME),)
-# Try to automatically detect the Lua library
-LUA_LIB_NAME := $(firstword $(foreach lib,lua5.3 lua53 lua,$(call check_lua_lib,$(lib),$(LUA_LD_FLAGS))))
-ifeq ($(LUA_LIB_NAME),)
-$(error unable to automatically detect the Lua library name, you can enforce its name with LUA_LIB_NAME=<name> (where <name> can be lua5.3, lua53, lua, ...))
-endif
-endif
-
-OPTIONS_LDFLAGS += $(LUA_LD_FLAGS) -l$(LUA_LIB_NAME) -lm
-OPTIONS_OBJS    += src/hlua.o
-endif
-
-ifneq ($(USE_DEVICEATLAS),)
-# Use DEVICEATLAS_SRC and possibly DEVICEATLAS_INC and DEVICEATLAS_LIB to force path
-# to 51degrees headers and libraries if needed.
-DEVICEATLAS_SRC =
-DEVICEATLAS_INC = $(DEVICEATLAS_SRC)
-DEVICEATLAS_LIB = $(DEVICEATLAS_SRC)
-OPTIONS_OBJS	+= $(DEVICEATLAS_LIB)/json.o
-OPTIONS_OBJS	+= $(DEVICEATLAS_LIB)/dac.o
-OPTIONS_OBJS	+= src/da.o
-OPTIONS_CFLAGS += -DUSE_DEVICEATLAS $(if $(DEVICEATLAS_INC),-I$(DEVICEATLAS_INC))
-BUILD_OPTIONS  += $(call ignore_implicit,USE_DEVICEATLAS)
-endif
-
-ifneq ($(USE_51DEGREES),)
-# Use 51DEGREES_SRC and possibly 51DEGREES_INC and 51DEGREES_LIB to force path
-# to 51degrees headers and libraries if needed.
-51DEGREES_SRC =
-51DEGREES_INC = $(51DEGREES_SRC)
-51DEGREES_LIB = $(51DEGREES_SRC)
-OPTIONS_CFLAGS  += -DUSE_51DEGREES $(if $(51DEGREES_INC),-I$(51DEGREES_INC))
-BUILD_OPTIONS   += $(call ignore_implicit,USE_51DEGREES)
-OPTIONS_LDFLAGS += $(if $(51DEGREES_LIB),-L$(51DEGREES_LIB)) -lz
 endif
 
 ifneq ($(USE_PCRE)$(USE_STATIC_PCRE)$(USE_PCRE_JIT),)
@@ -687,11 +617,6 @@ TRACE_COPTS := $(filter-out -O0 -O1 -O2 -pg -finstrument-functions,$(COPTS)) -O3
 COPTS += -finstrument-functions
 endif
 
-ifneq ($(USE_NS),)
-OPTIONS_CFLAGS += -DCONFIG_HAP_NS
-BUILD_OPTIONS  += $(call ignore_implicit,USE_NS)
-endif
-
 #### Global link options
 # These options are added at the end of the "ld" command line. Use LDFLAGS to
 # add options at the beginning of the "ld" command line if needed.
@@ -723,17 +648,16 @@ endif
 
 OBJS = src/haproxy.o src/sessionhash.o src/base64.o src/protocol.o \
        src/uri_auth.o src/standard.o src/buffer.o src/log.o src/task.o \
-       src/chunk.o src/channel.o src/listener.o src/lru.o src/xxhash.o \
+       src/chunk.o src/channel.o src/listener.o \
        src/time.o src/fd.o src/pipe.o src/regex.o src/cfgparse.o src/server.o \
        src/checks.o src/queue.o src/frontend.o src/proxy.o src/peers.o \
        src/arg.o src/stick_table.o src/proto_uxst.o src/connection.o \
        src/proto_http.o src/raw_sock.o src/appsession.o src/backend.o \
        src/lb_chash.o src/lb_fwlc.o src/lb_fwrr.o src/lb_map.o src/lb_fas.o \
-       src/stream_interface.o src/dumpstats.o src/proto_tcp.o src/applet.o \
-       src/session.o src/stream.o src/hdr_idx.o src/ev_select.o src/signal.o \
-       src/acl.o src/sample.o src/memory.o src/freq_ctr.o src/auth.o src/proto_udp.o \
-       src/compression.o src/payload.o src/hash.o src/pattern.o src/map.o \
-       src/namespace.o src/mailers.o src/dns.o src/vars.o
+       src/stream_interface.o src/dumpstats.o src/proto_tcp.o \
+       src/session.o src/hdr_idx.o src/ev_select.o src/signal.o \
+       src/acl.o src/sample.o src/memory.o src/freq_ctr.o src/auth.o \
+       src/compression.o src/payload.o src/hash.o src/pattern.o src/map.o
 
 EBTREE_OBJS = $(EBTREE_DIR)/ebtree.o \
               $(EBTREE_DIR)/eb32tree.o $(EBTREE_DIR)/eb64tree.o \
@@ -742,10 +666,6 @@ EBTREE_OBJS = $(EBTREE_DIR)/ebtree.o \
 
 ifneq ($(TRACE),)
 OBJS += src/trace.o
-endif
-
-ifneq ($(USE_51DEGREES),)
-OBJS += $(51DEGREES_SRC)/51Degrees.o
 endif
 
 WRAPPER_OBJS = src/haproxy-systemd-wrapper.o
@@ -805,15 +725,6 @@ install-bin: haproxy haproxy-systemd-wrapper
 	install haproxy-systemd-wrapper "$(DESTDIR)$(SBINDIR)"
 
 install: install-bin install-man install-doc
-
-uninstall:
-	rm -f "$(DESTDIR)$(MANDIR)"/man1/haproxy.1
-	for x in configuration architecture haproxy-en haproxy-fr; do \
-		rm -f "$(DESTDIR)$(DOCDIR)"/$$x.txt ; \
-	done
-	-rmdir "$(DESTDIR)$(DOCDIR)"
-	rm -f "$(DESTDIR)$(SBINDIR)"/haproxy
-	rm -f "$(DESTDIR)$(SBINDIR)"/haproxy-systemd-wrapper
 
 clean:
 	rm -f *.[oas] src/*.[oas] ebtree/*.[oas] haproxy test

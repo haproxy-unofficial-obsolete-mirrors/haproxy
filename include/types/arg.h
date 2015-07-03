@@ -28,20 +28,6 @@
 #include <common/chunk.h>
 #include <common/mini-clist.h>
 
-#include <types/vars.h>
-
-/* encoding of each arg type : up to 31 types are supported */
-#define ARGT_BITS      5
-#define ARGT_NBTYPES   (1 << ARGT_BITS)
-#define ARGT_MASK      (ARGT_NBTYPES - 1)
-
-/* encoding of the arg count : up to 5 args are possible. 4 bits are left
- * unused at the top.
- */
-#define ARGM_MASK      ((1 << ARGM_BITS) - 1)
-#define ARGM_BITS      3
-#define ARGM_NBARGS    (32 - ARGM_BITS) / sizeof(int)
-
 enum {
 	ARGT_STOP = 0, /* end of the arg list */
 	ARGT_UINT,     /* unsigned integer, which is a positive integer without any sign */
@@ -59,8 +45,7 @@ enum {
 	ARGT_SRV,      /* a pointer to a server */
 	ARGT_USR,      /* a pointer to a user list */
 	ARGT_MAP,      /* a pointer to a map descriptor */
-	ARGT_REG,      /* a pointer to a regex */
-	ARGT_VAR,      /* contains a variable description. */
+	ARGT_NBTYPES   /* no more values past 15 */
 };
 
 /* context where arguments are used, in order to help error reporting */
@@ -76,15 +61,10 @@ enum {
 	ARGC_CAP,      /* capture rule */
 };
 
-/* flags used when compiling and executing regex */
-#define ARGF_REG_ICASE 1
-#define ARGF_REG_GLOB  2
-
 /* some types that are externally defined */
 struct proxy;
 struct server;
 struct userlist;
-struct my_regex;
 
 union arg_data {
 	unsigned int uint; /* used for uint, time, size */
@@ -96,14 +76,11 @@ union arg_data {
 	struct server *srv;
 	struct userlist *usr;
 	struct map_descriptor *map;
-	struct my_regex *reg;
-	struct var_desc var;
 };
 
 struct arg {
 	unsigned char type;       /* argument type, ARGT_* */
 	unsigned char unresolved; /* argument contains a string in <str> that must be resolved and freed */
-	unsigned char type_flags; /* type-specific extra flags (eg: case sensitivity for regex), ARGF_* */
 	union arg_data data;      /* argument data */
 };
 

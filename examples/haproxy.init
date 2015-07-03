@@ -32,28 +32,22 @@ if [ -L $0 ]; then
   BASENAME=`basename $BASENAME`
 fi
 
-BIN=/usr/sbin/$BASENAME
-
-CFG=/etc/$BASENAME/$BASENAME.cfg
-[ -f $CFG ] || exit 1
-
-PIDFILE=/var/run/$BASENAME.pid
-LOCKFILE=/var/lock/subsys/$BASENAME
+[ -f /etc/$BASENAME/$BASENAME.cfg ] || exit 1
 
 RETVAL=0
 
 start() {
-  quiet_check
+  /usr/sbin/$BASENAME -c -q -f /etc/$BASENAME/$BASENAME.cfg
   if [ $? -ne 0 ]; then
     echo "Errors found in configuration file, check it with '$BASENAME check'."
     return 1
   fi
 
   echo -n "Starting $BASENAME: "
-  daemon $BIN -D -f $CFG -p $PIDFILE
+  daemon /usr/sbin/$BASENAME -D -f /etc/$BASENAME/$BASENAME.cfg -p /var/run/$BASENAME.pid
   RETVAL=$?
   echo
-  [ $RETVAL -eq 0 ] && touch $LOCKFILE
+  [ $RETVAL -eq 0 ] && touch /var/lock/subsys/$BASENAME
   return $RETVAL
 }
 
@@ -62,13 +56,13 @@ stop() {
   killproc $BASENAME -USR1
   RETVAL=$?
   echo
-  [ $RETVAL -eq 0 ] && rm -f $LOCKFILE
-  [ $RETVAL -eq 0 ] && rm -f $PIDFILE
+  [ $RETVAL -eq 0 ] && rm -f /var/lock/subsys/$BASENAME
+  [ $RETVAL -eq 0 ] && rm -f /var/run/$BASENAME.pid
   return $RETVAL
 }
 
 restart() {
-  quiet_check
+  /usr/sbin/$BASENAME -c -q -f /etc/$BASENAME/$BASENAME.cfg
   if [ $? -ne 0 ]; then
     echo "Errors found in configuration file, check it with '$BASENAME check'."
     return 1
@@ -78,24 +72,16 @@ restart() {
 }
 
 reload() {
-  if ! [ -s $PIDFILE ]; then
-    return 0
-  fi
-
-  quiet_check
+  /usr/sbin/$BASENAME -c -q -f /etc/$BASENAME/$BASENAME.cfg
   if [ $? -ne 0 ]; then
     echo "Errors found in configuration file, check it with '$BASENAME check'."
     return 1
   fi
-  $BIN -D -f $CFG -p $PIDFILE -sf $(cat $PIDFILE)
+  /usr/sbin/$BASENAME -D -f /etc/$BASENAME/$BASENAME.cfg -p /var/run/$BASENAME.pid -sf $(cat /var/run/$BASENAME.pid)
 }
 
 check() {
-  $BIN -c -q -V -f $CFG
-}
-
-quiet_check()
-  $BIN -c -q -f $CFG
+  /usr/sbin/$BASENAME -c -q -V -f /etc/$BASENAME/$BASENAME.cfg
 }
 
 rhstatus() {
@@ -103,7 +89,7 @@ rhstatus() {
 }
 
 condrestart() {
-  [ -e $LOCKFILE ] && restart || :
+  [ -e /var/lock/subsys/$BASENAME ] && restart || :
 }
 
 # See how we were called.

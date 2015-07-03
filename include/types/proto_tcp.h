@@ -26,7 +26,7 @@
 #include <common/mini-clist.h>
 
 #include <types/acl.h>
-#include <types/stream.h>
+#include <types/session.h>
 
 /* Layer4 accept/reject rules */
 enum {
@@ -39,8 +39,6 @@ enum {
 	TCP_ACT_TRK_SCMAX = TCP_ACT_TRK_SC0 + MAX_SESS_STKCTR - 1,
 	TCP_ACT_CLOSE, /* close at the sender's */
 	TCP_ACT_CAPTURE, /* capture a fetched sample */
-	TCP_ACT_CUSTOM, /* Use for custom registered keywords. */
-	TCP_ACT_CUSTOM_CONT, /* Use for custom registered keywords. */
 };
 
 struct capture_prm {
@@ -52,26 +50,10 @@ struct tcp_rule {
 	struct list list;
 	struct acl_cond *cond;
 	int action;
-	int (*action_ptr)(struct tcp_rule *rule, struct proxy *px,
-	                  struct stream *s);
 	union {
 		struct track_ctr_prm trk_ctr;
 		struct capture_prm cap;
-		void *data[4];
 	} act_prm;
-};
-
-struct tcp_action_kw {
-	const char *kw;
-	int (*parse)(const char **args, int *cur_arg, struct proxy *px,
-	             struct tcp_rule *rule, char **err);
-	int match_pfx;
-};
-
-struct tcp_action_kw_list {
-	const char *scope;
-	struct list list;
-	struct tcp_action_kw kw[VAR_ARRAY];
 };
 
 #endif /* _TYPES_PROTO_TCP_H */

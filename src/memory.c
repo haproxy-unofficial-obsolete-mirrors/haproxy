@@ -79,42 +79,28 @@ struct pool_head *create_pool(char *name, unsigned int size, unsigned int flags)
 	return pool;
 }
 
-/* Allocates new entries for pool <pool> until there are at least <avail> + 1
- * available, then returns the last one for immediate use, so that at least
- * <avail> are left available in the pool upon return. NULL is returned if the
- * last entry could not be allocated. It's important to note that at least one
- * allocation is always performed even if there are enough entries in the pool.
- * A call to the garbage collector is performed at most once in case malloc()
- * returns an error, before returning NULL.
+/* Allocate a new entry for pool <pool>, and return it for immediate use.
+ * NULL is returned if no memory is available for a new creation. A call
+ * to the garbage collector is performed before returning NULL.
  */
-void *pool_refill_alloc(struct pool_head *pool, unsigned int avail)
+void *pool_refill_alloc(struct pool_head *pool)
 {
-	void *ptr = NULL;
-	int failed = 0;
+	void *ret;
 
-	/* stop point */
-	avail += pool->used;
-
-	while (1) {
-		if (pool->limit && pool->allocated >= pool->limit)
+	if (pool->limit && (pool->allocated >= pool->limit))
+		return NULL;
+	ret = CALLOC(1, pool->size);
+	if (!ret) {
+		pool_gc2();
+		ret = CALLOC(1, pool->size);
+		if (!ret)
 			return NULL;
-
-		ptr = MALLOC(pool->size);
-		if (!ptr) {
-			if (failed)
-				return NULL;
-			failed++;
-			pool_gc2();
-			continue;
-		}
-		if (++pool->allocated > avail)
-			break;
-
-		*(void **)ptr = (void *)pool->free_list;
-		pool->free_list = ptr;
 	}
+	if (mem_poison_byte)
+		memset(ret, mem_poison_byte, pool->size);
+	pool->allocated++;
 	pool->used++;
-	return ptr;
+	return ret;
 }
 
 /*

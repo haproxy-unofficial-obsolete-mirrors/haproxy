@@ -85,7 +85,6 @@ enum srv_admin {
 #define SRV_F_BACKUP       0x0001        /* this server is a backup server */
 #define SRV_F_MAPPORTS     0x0002        /* this server uses mapped ports */
 #define SRV_F_NON_STICK    0x0004        /* never add connections allocated to this server to a stick table */
-#define SRV_F_USE_NS_FROM_PP 0x0008      /* use namespace associated with connection if present */
 
 /* configured server options for send-proxy (server->pp_opts) */
 #define SRV_PP_V1          0x0001        /* proxy protocol version 1 */
@@ -122,16 +121,7 @@ enum srv_admin {
 #define SRV_SSL_O_USE_TLSV12   0x0080 /* force TLSv1.2 */
 /* 0x00F0 reserved for 'force' protocol version options */
 #define SRV_SSL_O_NO_TLS_TICKETS 0x0100 /* disable session resumption tickets */
-#define SRV_SSL_O_NO_REUSE     0x200  /* disable session reuse */
 #endif
-
-struct pid_list {
-	struct list list;
-	pid_t pid;
-	struct task *t;
-	int status;
-	int exited;
-};
 
 /* A tree occurrence is a descriptor of a place in a tree, with a pointer back
  * to the server itself.
@@ -193,22 +183,22 @@ struct server {
 	unsigned lb_nodes_now;                  /* number of lb_nodes placed in the tree (C-HASH) */
 	struct tree_occ *lb_nodes;              /* lb_nodes_tot * struct tree_occ */
 
-	const struct netns_entry *netns;        /* contains network namespace name or NULL. Network namespace comes from configuration */
 	/* warning, these structs are huge, keep them at the bottom */
 	struct sockaddr_storage addr;		/* the address to connect to */
+	struct protocol *proto;	                /* server address protocol */
 	struct xprt_ops *xprt;                  /* transport-layer operations */
 	unsigned down_time;			/* total time the server was down */
 	time_t last_change;			/* last time, when the state was changed */
 
 	int puid;				/* proxy-unique server ID, used for SNMP, and "first" LB algo */
 
+	struct {                                /* configuration  used by health-check and agent-check */
+		struct protocol *proto;	        /* server address protocol for health checks */
+		struct sockaddr_storage addr;   /* the address to check, if different from <addr> */
+	} check_common;
+
 	struct check check;                     /* health-check specific configuration */
 	struct check agent;                     /* agent specific configuration */
-
-	char *resolvers_id;			/* resolvers section used by this server */
-	char *hostname;				/* server hostname */
-	struct dns_resolution *resolution;	/* server name resolution */
-	int resolver_family_priority;		/* which IP family should the resolver use when both are returned */
 
 #ifdef USE_OPENSSL
 	int use_ssl;				/* ssl enabled */

@@ -33,7 +33,6 @@
 #include <proto/freq_ctr.h>
 #include <proto/log.h>
 #include <proto/sample.h>
-#include <proto/stream.h>
 #include <proto/task.h>
 
 /* List head of all known bind keywords */
@@ -171,7 +170,7 @@ int resume_listener(struct listener *l)
 	return 1;
 }
 
-/* Marks a ready listener as full so that the stream code tries to re-enable
+/* Marks a ready listener as full so that the session code tries to re-enable
  * it upon next close() using resume_listener().
  */
 void listener_full(struct listener *l)
@@ -468,7 +467,7 @@ void listener_accept(int fd)
 
 		ret = l->accept(l, cfd, &addr);
 		if (unlikely(ret <= 0)) {
-			/* The connection was closed by stream_accept(). Either
+			/* The connection was closed by session_accept(). Either
 			 * we just have to ignore it (ret == 0) or it's a critical
 			 * error due to a resource shortage, and we must stop the
 			 * listener (ret < 0).
@@ -591,19 +590,21 @@ void bind_dump_kws(char **out)
 
 /* set temp integer to the number of connexions to the same listening socket */
 static int
-smp_fetch_dconn(const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_dconn(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                const struct arg *args, struct sample *smp, const char *kw)
 {
 	smp->type = SMP_T_UINT;
-	smp->data.uint = smp->sess->listener->nbconn;
+	smp->data.uint = l4->listener->nbconn;
 	return 1;
 }
 
 /* set temp integer to the id of the socket (listener) */
 static int
-smp_fetch_so_id(const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_so_id(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                const struct arg *args, struct sample *smp, const char *kw)
 {
 	smp->type = SMP_T_UINT;
-	smp->data.uint = smp->sess->listener->luid;
+	smp->data.uint = l4->listener->luid;
 	return 1;
 }
 
