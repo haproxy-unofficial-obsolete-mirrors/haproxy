@@ -40,8 +40,6 @@ struct buffer {
 };
 
 extern struct pool_head *pool2_buffer;
-extern struct buffer buf_empty;
-extern struct buffer buf_wanted;
 
 int init_buffer();
 int buffer_replace2(struct buffer *b, char *pos, char *end, const char *str, int len);
@@ -171,14 +169,11 @@ static inline int buffer_empty(const struct buffer *buf)
  * space, and that the reserved space is always considered as not usable. This
  * information alone cannot be used as a general purpose free space indicator.
  * However it accurately indicates that too many data were fed in the buffer
- * for an analyzer for instance. See the channel_may_recv() function for a more
+ * for an analyzer for instance. See the channel_full() function for a more
  * generic function taking everything into account.
  */
 static inline int buffer_full(const struct buffer *b, unsigned int reserve)
 {
-	if (b == &buf_empty)
-		return 0;
-
 	return (b->i + reserve >= b->size);
 }
 
@@ -233,32 +228,6 @@ static inline int buffer_contig_space(const struct buffer *buf)
 	return right - left;
 }
 
-/* Returns the amount of byte that can be written starting from <p> into the
- * input buffer at once, including reserved space which may be overwritten.
- * This is used by Lua to insert data in the input side just before the other
- * data using buffer_replace(). The goal is to transfer these new data in the
- * output buffer.
- */
-static inline int bi_space_for_replace(const struct buffer *buf)
-{
-	const char *end;
-
-	/* If the input side data overflows, we cannot insert data contiguously. */
-	if (buf->p + buf->i >= buf->data + buf->size)
-		return 0;
-
-	/* Check the last byte used in the buffer, it may be a byte of the output
-	 * side if the buffer wraps, or its the end of the buffer.
-	 */
-	end = buffer_wrap_sub(buf, buf->p - buf->o);
-	if (end <= buf->p)
-		end = buf->data + buf->size;
-
-	/* Compute the amount of bytes which can be written. */
-	return end - (buf->p + buf->i);
-}
-
-
 /* Normalizes a pointer which is supposed to be relative to the beginning of a
  * buffer, so that wrapping is correctly handled. The intent is to use this
  * when increasing a pointer. Note that the wrapping test is only performed
@@ -311,10 +280,7 @@ static inline int buffer_work_area(const struct buffer *buf, const char *end)
 /* Return 1 if the buffer has less than 1/4 of its capacity free, otherwise 0 */
 static inline int buffer_almost_full(const struct buffer *buf)
 {
-	if (buf == &buf_empty)
-		return 0;
-
-	if (!buf->size || buffer_total_space(buf) < buf->size / 4)
+	if (buffer_total_space(buf) < buf->size / 4)
 		return 1;
 	return 0;
 }
@@ -380,10 +346,9 @@ static inline void bo_putchr(struct buffer *b, char c)
 }
 
 /* Tries to copy block <blk> into output data at buffer <b>. Supports wrapping.
- * Data are truncated if buffer is too short. It returns the number of bytes
- * copied.
+ * Data are truncated if buffer is too short.
  */
-static inline int bo_putblk(struct buffer *b, const char *blk, int len)
+static inline void bo_putblk(struct buffer *b, const char *blk, int len)
 {
 	int cur_len = buffer_len(b);
 	int half;
@@ -391,7 +356,7 @@ static inline int bo_putblk(struct buffer *b, const char *blk, int len)
 	if (len > b->size - cur_len)
 		len = (b->size - cur_len);
 	if (!len)
-		return 0;
+		return;
 
 	half = buffer_contig_space(b);
 	if (half > len)
@@ -404,122 +369,22 @@ static inline int bo_putblk(struct buffer *b, const char *blk, int len)
 		b->p = b_ptr(b, half);
 	}
 	b->o += len;
-	return len;
 }
 
 /* Tries to copy string <str> into output data at buffer <b>. Supports wrapping.
- * Data are truncated if buffer is too short. It returns the number of bytes
- * copied.
+ * Data are truncated if buffer is too short.
  */
-static inline int bo_putstr(struct buffer *b, const char *str)
+static inline void bo_putstr(struct buffer *b, const char *str)
 {
 	return bo_putblk(b, str, strlen(str));
 }
 
 /* Tries to copy chunk <chk> into output data at buffer <b>. Supports wrapping.
- * Data are truncated if buffer is too short. It returns the number of bytes
- * copied.
+ * Data are truncated if buffer is too short.
  */
-static inline int bo_putchk(struct buffer *b, const struct chunk *chk)
+static inline void bo_putchk(struct buffer *b, const struct chunk *chk)
 {
 	return bo_putblk(b, chk->str, chk->len);
-}
-
-/* Resets a buffer. The size is not touched. */
-static inline void b_reset(struct buffer *buf)
-{
-	buf->o = 0;
-	buf->i = 0;
-	buf->p = buf->data;
-}
-
-/* Allocates a buffer and replaces *buf with this buffer. If no memory is
- * available, &buf_wanted is used instead. No control is made to check if *buf
- * already pointed to another buffer. The allocated buffer is returned, or
- * NULL in case no memory is available.
- */
-static inline struct buffer *b_alloc(struct buffer **buf)
-{
-	struct buffer *b;
-
-	*buf = &buf_wanted;
-	b = pool_alloc_dirty(pool2_buffer);
-	if (likely(b)) {
-		b->size = pool2_buffer->size - sizeof(struct buffer);
-		b_reset(b);
-		*buf = b;
-	}
-	return b;
-}
-
-/* Allocates a buffer and replaces *buf with this buffer. If no memory is
- * available, &buf_wanted is used instead. No control is made to check if *buf
- * already pointed to another buffer. The allocated buffer is returned, or
- * NULL in case no memory is available. The difference with b_alloc() is that
- * this function only picks from the pool and never calls malloc(), so it can
- * fail even if some memory is available.
- */
-static inline struct buffer *b_alloc_fast(struct buffer **buf)
-{
-	struct buffer *b;
-
-	*buf = &buf_wanted;
-	b = pool_get_first(pool2_buffer);
-	if (likely(b)) {
-		b->size = pool2_buffer->size - sizeof(struct buffer);
-		b_reset(b);
-		*buf = b;
-	}
-	return b;
-}
-
-/* Releases buffer *buf (no check of emptiness) */
-static inline void __b_drop(struct buffer **buf)
-{
-	pool_free2(pool2_buffer, *buf);
-}
-
-/* Releases buffer *buf if allocated. */
-static inline void b_drop(struct buffer **buf)
-{
-	if (!(*buf)->size)
-		return;
-	__b_drop(buf);
-}
-
-/* Releases buffer *buf if allocated, and replaces it with &buf_empty. */
-static inline void b_free(struct buffer **buf)
-{
-	b_drop(buf);
-	*buf = &buf_empty;
-}
-
-/* Ensures that <buf> is allocated. If an allocation is needed, it ensures that
- * there are still at least <margin> buffers available in the pool after this
- * allocation so that we don't leave the pool in a condition where a session or
- * a response buffer could not be allocated anymore, resulting in a deadlock.
- * This means that we sometimes need to try to allocate extra entries even if
- * only one buffer is needed.
- */
-static inline struct buffer *b_alloc_margin(struct buffer **buf, int margin)
-{
-	struct buffer *next;
-
-	if ((*buf)->size)
-		return *buf;
-
-	/* fast path */
-	if ((pool2_buffer->allocated - pool2_buffer->used) > margin)
-		return b_alloc_fast(buf);
-
-	next = pool_refill_alloc(pool2_buffer, margin);
-	if (!next)
-		return next;
-
-	next->size = pool2_buffer->size - sizeof(struct buffer);
-	b_reset(next);
-	*buf = next;
-	return next;
 }
 
 #endif /* _COMMON_BUFFER_H */

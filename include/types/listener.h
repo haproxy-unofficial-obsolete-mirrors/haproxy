@@ -132,16 +132,8 @@ struct bind_conf {
 	int strict_sni;            /* refuse negotiation if sni doesn't match a certificate */
 	struct eb_root sni_ctx;    /* sni_ctx tree of all known certs full-names sorted by name */
 	struct eb_root sni_w_ctx;  /* sni_ctx tree of all known certs wildcards sorted by name */
-	struct tls_keys_ref *keys_ref; /* TLS ticket keys reference */
-
-	char *ca_sign_file;        /* CAFile used to generate and sign server certificates */
-	char *ca_sign_pass;        /* CAKey passphrase */
-
-	X509     *ca_sign_cert;    /* CA certificate referenced by ca_file */
-	EVP_PKEY *ca_sign_pkey;    /* CA private key referenced by ca_key */
 #endif
 	int is_ssl;                /* SSL is required for these listeners */
-	int generate_certs;        /* 1 if generate-certificates option is set, else 0 */
 	unsigned long bind_proc;   /* bitmask of processes allowed to use these listeners */
 	struct {                   /* UNIX socket permissions */
 		uid_t uid;         /* -1 to leave unchanged */
@@ -178,15 +170,12 @@ struct listener {
 	struct list proto_list;         /* list in the protocol header */
 	int (*accept)(struct listener *l, int fd, struct sockaddr_storage *addr); /* upper layer's accept() */
 	struct task * (*handler)(struct task *t); /* protocol handler. It is a task */
+	int  *timeout;                  /* pointer to client-side timeout */
 	struct proxy *frontend;		/* the frontend this listener belongs to, or NULL */
-	enum obj_type *default_target;  /* default target to use for accepted sessions or NULL */
 	struct list wait_queue;		/* link element to make the listener wait for something (LI_LIMITED)  */
 	unsigned int analysers;		/* bitmap of required protocol analysers */
 	int maxseg;			/* for TCP, advertised MSS */
-	int tcp_ut;                     /* for TCP, user timeout */
 	char *interface;		/* interface name or NULL */
-
-	const struct netns_entry *netns; /* network namespace of the listener*/
 
 	struct list by_fe;              /* chaining in frontend's list of listeners */
 	struct list by_bind;            /* chaining in bind_conf's list of listeners */

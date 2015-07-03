@@ -24,7 +24,6 @@
 #define _PROTO_DUMPSTATS_H
 
 #include <common/config.h>
-#include <types/applet.h>
 #include <types/stream_interface.h>
 
 /* Flags for applet.ctx.stats.flags */
@@ -54,7 +53,7 @@ enum {
 #define STAT_SCOPE_INPUT_NAME "scope" /* pattern form scope name <input> in html form */
 #define STAT_SCOPE_PATTERN    "?" STAT_SCOPE_INPUT_NAME "="
 
-extern struct applet http_stats_applet;
+extern struct si_applet http_stats_applet;
 
 void stats_io_handler(struct stream_interface *si);
 

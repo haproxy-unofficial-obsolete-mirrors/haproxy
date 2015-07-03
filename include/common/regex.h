@@ -29,12 +29,6 @@
 #ifdef USE_PCRE
 #include <pcre.h>
 #include <pcreposix.h>
-
-/* For pre-8.20 PCRE compatibility */
-#ifndef PCRE_STUDY_JIT_COMPILE
-#define PCRE_STUDY_JIT_COMPILE 0
-#endif
-
 #else /* no PCRE */
 #include <regex.h>
 #endif
@@ -60,6 +54,7 @@ struct my_regex {
 #define ACT_DENY	3	/* deny the request */
 #define ACT_PASS	4	/* pass this header without allowing or denying the request */
 #define ACT_TARPIT	5	/* tarpit the connection matching this request */
+#define ACT_SETBE	6	/* switch the backend */
 
 struct hdr_exp {
     struct hdr_exp *next;
@@ -127,21 +122,16 @@ static inline int regex_exec2(const struct my_regex *preg, char *subject, int le
 }
 
 int regex_exec_match(const struct my_regex *preg, const char *subject,
-                     size_t nmatch, regmatch_t pmatch[], int flags);
+                     size_t nmatch, regmatch_t pmatch[]);
 int regex_exec_match2(const struct my_regex *preg, char *subject, int length,
-                      size_t nmatch, regmatch_t pmatch[], int flags);
+                      size_t nmatch, regmatch_t pmatch[]);
 
 static inline void regex_free(struct my_regex *preg) {
 #if defined(USE_PCRE) || defined(USE_PCRE_JIT)
 	pcre_free(preg->reg);
-/* PCRE < 8.20 requires pcre_free() while >= 8.20 requires pcre_study_free(),
- * which is easily detected using PCRE_CONFIG_JIT.
- */
-#ifdef PCRE_CONFIG_JIT
+#ifdef USE_PCRE_JIT
 	pcre_free_study(preg->extra);
-#else /* PCRE_CONFIG_JIT */
-	pcre_free(preg->extra);
-#endif /* PCRE_CONFIG_JIT */
+#endif
 #else
 	regfree(&preg->regex);
 #endif

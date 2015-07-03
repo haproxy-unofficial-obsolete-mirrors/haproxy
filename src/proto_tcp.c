@@ -33,7 +33,6 @@
 #include <common/errors.h>
 #include <common/mini-clist.h>
 #include <common/standard.h>
-#include <common/namespace.h>
 
 #include <types/global.h>
 #include <types/capture.h>
@@ -51,7 +50,7 @@
 #include <proto/proto_tcp.h>
 #include <proto/proxy.h>
 #include <proto/sample.h>
-#include <proto/stream.h>
+#include <proto/session.h>
 #include <proto/stick_table.h>
 #include <proto/stream_interface.h>
 #include <proto/task.h>
@@ -62,11 +61,6 @@
 
 static int tcp_bind_listeners(struct protocol *proto, char *errmsg, int errlen);
 static int tcp_bind_listener(struct listener *listener, char *errmsg, int errlen);
-
-/* List head of all known action keywords for "tcp-request connection" */
-struct list tcp_req_conn_keywords = LIST_HEAD_INIT(tcp_req_conn_keywords);
-struct list tcp_req_cont_keywords = LIST_HEAD_INIT(tcp_req_cont_keywords);
-struct list tcp_res_cont_keywords = LIST_HEAD_INIT(tcp_res_cont_keywords);
 
 /* Note: must not be declared <const> as its list will be overwritten */
 static struct protocol proto_tcpv4 = {
@@ -114,86 +108,6 @@ static struct protocol proto_tcpv6 = {
 	.nb_listeners = 0,
 };
 
-/*
- * Register keywords.
- */
-void tcp_req_conn_keywords_register(struct tcp_action_kw_list *kw_list)
-{
-	LIST_ADDQ(&tcp_req_conn_keywords, &kw_list->list);
-}
-
-void tcp_req_cont_keywords_register(struct tcp_action_kw_list *kw_list)
-{
-	LIST_ADDQ(&tcp_req_cont_keywords, &kw_list->list);
-}
-
-void tcp_res_cont_keywords_register(struct tcp_action_kw_list *kw_list)
-{
-	LIST_ADDQ(&tcp_res_cont_keywords, &kw_list->list);
-}
-
-/*
- * Return the struct http_req_action_kw associated to a keyword.
- */
-static struct tcp_action_kw *tcp_req_conn_action(const char *kw)
-{
-	struct tcp_action_kw_list *kw_list;
-	int i;
-
-	if (LIST_ISEMPTY(&tcp_req_conn_keywords))
-		return NULL;
-
-	list_for_each_entry(kw_list, &tcp_req_conn_keywords, list) {
-		for (i = 0; kw_list->kw[i].kw != NULL; i++) {
-			if (kw_list->kw[i].match_pfx &&
-			    strncmp(kw, kw_list->kw[i].kw, strlen(kw_list->kw[i].kw)) == 0)
-				return &kw_list->kw[i];
-			if (!strcmp(kw, kw_list->kw[i].kw))
-				return &kw_list->kw[i];
-		}
-	}
-	return NULL;
-}
-
-static struct tcp_action_kw *tcp_req_cont_action(const char *kw)
-{
-	struct tcp_action_kw_list *kw_list;
-	int i;
-
-	if (LIST_ISEMPTY(&tcp_req_cont_keywords))
-		return NULL;
-
-	list_for_each_entry(kw_list, &tcp_req_cont_keywords, list) {
-		for (i = 0; kw_list->kw[i].kw != NULL; i++) {
-			if (kw_list->kw[i].match_pfx &&
-			    strncmp(kw, kw_list->kw[i].kw, strlen(kw_list->kw[i].kw)) == 0)
-				return &kw_list->kw[i];
-			if (!strcmp(kw, kw_list->kw[i].kw))
-				return &kw_list->kw[i];
-		}
-	}
-	return NULL;
-}
-
-static struct tcp_action_kw *tcp_res_cont_action(const char *kw)
-{
-	struct tcp_action_kw_list *kw_list;
-	int i;
-
-	if (LIST_ISEMPTY(&tcp_res_cont_keywords))
-		return NULL;
-
-	list_for_each_entry(kw_list, &tcp_res_cont_keywords, list) {
-		for (i = 0; kw_list->kw[i].kw != NULL; i++) {
-			if (kw_list->kw[i].match_pfx &&
-			    strncmp(kw, kw_list->kw[i].kw, strlen(kw_list->kw[i].kw)) == 0)
-				return &kw_list->kw[i];
-			if (!strcmp(kw, kw_list->kw[i].kw))
-				return &kw_list->kw[i];
-		}
-	}
-	return NULL;
-}
 
 /* Binds ipv4/ipv6 address <local> to socket <fd>, unless <flags> is set, in which
  * case we try to bind <remote>. <flags> is a 2-bit field consisting of :
@@ -333,20 +247,6 @@ int tcp_bind_socket(int fd, int flags, struct sockaddr_storage *local, struct so
 	return 0;
 }
 
-static int create_server_socket(struct connection *conn)
-{
-	const struct netns_entry *ns = NULL;
-
-#ifdef CONFIG_HAP_NS
-	if (objt_server(conn->target)) {
-		if (__objt_server(conn->target)->flags & SRV_F_USE_NS_FROM_PP)
-			ns = conn->proxy_netns;
-		else
-			ns = __objt_server(conn->target)->netns;
-	}
-#endif
-	return my_socketat(ns, conn->addr.to.ss_family, SOCK_STREAM, IPPROTO_TCP);
-}
 
 /*
  * This function initiates a TCP connection establishment to the target assigned
@@ -366,15 +266,15 @@ static int create_server_socket(struct connection *conn)
  * Note that a pending send_proxy message accounts for data.
  *
  * It can return one of :
- *  - SF_ERR_NONE if everything's OK
- *  - SF_ERR_SRVTO if there are no more servers
- *  - SF_ERR_SRVCL if the connection was refused by the server
- *  - SF_ERR_PRXCOND if the connection has been limited by the proxy (maxconn)
- *  - SF_ERR_RESOURCE if a system resource is lacking (eg: fd limits, ports, ...)
- *  - SF_ERR_INTERNAL for any other purely internal errors
- * Additionnally, in the case of SF_ERR_RESOURCE, an emergency log will be emitted.
+ *  - SN_ERR_NONE if everything's OK
+ *  - SN_ERR_SRVTO if there are no more servers
+ *  - SN_ERR_SRVCL if the connection was refused by the server
+ *  - SN_ERR_PRXCOND if the connection has been limited by the proxy (maxconn)
+ *  - SN_ERR_RESOURCE if a system resource is lacking (eg: fd limits, ports, ...)
+ *  - SN_ERR_INTERNAL for any other purely internal errors
+ * Additionnally, in the case of SN_ERR_RESOURCE, an emergency log will be emitted.
  *
- * The connection's fd is inserted only when SF_ERR_NONE is returned, otherwise
+ * The connection's fd is inserted only when SN_ERR_NONE is returned, otherwise
  * it's invalid and the caller has nothing to do.
  */
 
@@ -398,12 +298,10 @@ int tcp_connect_server(struct connection *conn, int data, int delack)
 		break;
 	default:
 		conn->flags |= CO_FL_ERROR;
-		return SF_ERR_INTERNAL;
+		return SN_ERR_INTERNAL;
 	}
 
-	fd = conn->t.sock.fd = create_server_socket(conn);
-
-	if (fd == -1) {
+	if ((fd = conn->t.sock.fd = socket(conn->addr.to.ss_family, SOCK_STREAM, IPPROTO_TCP)) == -1) {
 		qfprintf(stderr, "Cannot get a server socket.\n");
 
 		if (errno == ENFILE) {
@@ -432,7 +330,7 @@ int tcp_connect_server(struct connection *conn, int data, int delack)
 
 		/* this is a resource error */
 		conn->flags |= CO_FL_ERROR;
-		return SF_ERR_RESOURCE;
+		return SN_ERR_RESOURCE;
 	}
 
 	if (fd >= global.maxsock) {
@@ -443,7 +341,7 @@ int tcp_connect_server(struct connection *conn, int data, int delack)
 		close(fd);
 		conn->err_code = CO_ER_CONF_FDLIM;
 		conn->flags |= CO_FL_ERROR;
-		return SF_ERR_PRXCOND; /* it is a configuration limit */
+		return SN_ERR_PRXCOND; /* it is a configuration limit */
 	}
 
 	if ((fcntl(fd, F_SETFL, O_NONBLOCK)==-1) ||
@@ -452,7 +350,7 @@ int tcp_connect_server(struct connection *conn, int data, int delack)
 		close(fd);
 		conn->err_code = CO_ER_SOCK_ERR;
 		conn->flags |= CO_FL_ERROR;
-		return SF_ERR_INTERNAL;
+		return SN_ERR_INTERNAL;
 	}
 
 	if (be->options & PR_O_TCP_SRV_KA)
@@ -548,7 +446,7 @@ int tcp_connect_server(struct connection *conn, int data, int delack)
 					 be->id);
 			}
 			conn->flags |= CO_FL_ERROR;
-			return SF_ERR_RESOURCE;
+			return SN_ERR_RESOURCE;
 		}
 	}
 
@@ -587,7 +485,7 @@ int tcp_connect_server(struct connection *conn, int data, int delack)
 			close(fd);
 			send_log(be, LOG_ERR, "Connect() failed for backend %s: %s.\n", be->id, msg);
 			conn->flags |= CO_FL_ERROR;
-			return SF_ERR_RESOURCE;
+			return SN_ERR_RESOURCE;
 		} else if (errno == ETIMEDOUT) {
 			//qfprintf(stderr,"Connect(): ETIMEDOUT");
 			port_range_release_port(fdinfo[fd].port_range, fdinfo[fd].local_port);
@@ -595,7 +493,7 @@ int tcp_connect_server(struct connection *conn, int data, int delack)
 			close(fd);
 			conn->err_code = CO_ER_SOCK_ERR;
 			conn->flags |= CO_FL_ERROR;
-			return SF_ERR_SRVTO;
+			return SN_ERR_SRVTO;
 		} else {
 			// (errno == ECONNREFUSED || errno == ENETUNREACH || errno == EACCES || errno == EPERM)
 			//qfprintf(stderr,"Connect(): %d", errno);
@@ -604,7 +502,7 @@ int tcp_connect_server(struct connection *conn, int data, int delack)
 			close(fd);
 			conn->err_code = CO_ER_SOCK_ERR;
 			conn->flags |= CO_FL_ERROR;
-			return SF_ERR_SRVCL;
+			return SN_ERR_SRVCL;
 		}
 	}
 
@@ -621,13 +519,13 @@ int tcp_connect_server(struct connection *conn, int data, int delack)
 	if (conn_xprt_init(conn) < 0) {
 		conn_force_close(conn);
 		conn->flags |= CO_FL_ERROR;
-		return SF_ERR_RESOURCE;
+		return SN_ERR_RESOURCE;
 	}
 
 	if (data)
 		conn_data_want_send(conn);  /* prepare to send data if any */
 
-	return SF_ERR_NONE;  /* connection is OK */
+	return SN_ERR_NONE;  /* connection is OK */
 }
 
 
@@ -843,14 +741,10 @@ int tcp_bind_listener(struct listener *listener, char *errmsg, int errlen)
 	fd = listener->fd;
 	ext = (fd >= 0);
 
-	if (!ext) {
-		fd = my_socketat(listener->netns, listener->addr.ss_family, SOCK_STREAM, IPPROTO_TCP);
-
-		if (fd == -1) {
-			err |= ERR_RETRYABLE | ERR_ALERT;
-			msg = "cannot create listening socket";
-			goto tcp_return;
-		}
+	if (!ext && (fd = socket(listener->addr.ss_family, SOCK_STREAM, IPPROTO_TCP)) == -1) {
+		err |= ERR_RETRYABLE | ERR_ALERT;
+		msg = "cannot create listening socket";
+		goto tcp_return;
 	}
 
 	if (fd >= global.maxsock) {
@@ -940,15 +834,6 @@ int tcp_bind_listener(struct listener *listener, char *errmsg, int errlen)
 		if (setsockopt(fd, IPPROTO_TCP, TCP_MAXSEG,
 			       &listener->maxseg, sizeof(listener->maxseg)) == -1) {
 			msg = "cannot set MSS";
-			err |= ERR_WARN;
-		}
-	}
-#endif
-#if defined(TCP_USER_TIMEOUT)
-	if (listener->tcp_ut) {
-		if (setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT,
-			       &listener->tcp_ut, sizeof(listener->tcp_ut)) == -1) {
-			msg = "cannot set TCP User Timeout";
 			err |= ERR_WARN;
 		}
 	}
@@ -1096,15 +981,14 @@ int tcp_pause_listener(struct listener *l)
  * function may be called for frontend rules and backend rules. It only relies
  * on the backend pointer so this works for both cases.
  */
-int tcp_inspect_request(struct stream *s, struct channel *req, int an_bit)
+int tcp_inspect_request(struct session *s, struct channel *req, int an_bit)
 {
-	struct session *sess = s->sess;
 	struct tcp_rule *rule;
 	struct stksess *ts;
 	struct stktable *t;
 	int partial;
 
-	DPRINTF(stderr,"[%u] %s: stream=%p b=%p, exp(r,w)=%u,%u bf=%08x bh=%d analysers=%02x\n",
+	DPRINTF(stderr,"[%u] %s: session=%p b=%p, exp(r,w)=%u,%u bf=%08x bh=%d analysers=%02x\n",
 		now_ms, __FUNCTION__,
 		s,
 		req,
@@ -1129,24 +1013,11 @@ int tcp_inspect_request(struct stream *s, struct channel *req, int an_bit)
 	else
 		partial = 0;
 
-	/* If "the current_rule_list" match the executed rule list, we are in
-	 * resume condition. If a resume is needed it is always in the action
-	 * and never in the ACL or converters. In this case, we initialise the
-	 * current rule, and go to the action execution point.
-	 */
-	if (s->current_rule) {
-		rule = s->current_rule;
-		s->current_rule = NULL;
-		if (s->current_rule_list == &s->be->tcp_req.inspect_rules)
-			goto resume_execution;
-	}
-	s->current_rule_list = &s->be->tcp_req.inspect_rules;
-
 	list_for_each_entry(rule, &s->be->tcp_req.inspect_rules, list) {
 		enum acl_test_res ret = ACL_TEST_PASS;
 
 		if (rule->cond) {
-			ret = acl_exec_cond(rule->cond, s->be, sess, s, SMP_OPT_DIR_REQ | partial);
+			ret = acl_exec_cond(rule->cond, s->be, s, &s->txn, SMP_OPT_DIR_REQ | partial);
 			if (ret == ACL_TEST_MISS)
 				goto missing_data;
 
@@ -1156,22 +1027,21 @@ int tcp_inspect_request(struct stream *s, struct channel *req, int an_bit)
 		}
 
 		if (ret) {
-resume_execution:
 			/* we have a matching rule. */
 			if (rule->action == TCP_ACT_REJECT) {
 				channel_abort(req);
-				channel_abort(&s->res);
+				channel_abort(s->rep);
 				req->analysers = 0;
 
 				s->be->be_counters.denied_req++;
-				sess->fe->fe_counters.denied_req++;
-				if (sess->listener->counters)
-					sess->listener->counters->denied_req++;
+				s->fe->fe_counters.denied_req++;
+				if (s->listener->counters)
+					s->listener->counters->denied_req++;
 
-				if (!(s->flags & SF_ERR_MASK))
-					s->flags |= SF_ERR_PRXCOND;
-				if (!(s->flags & SF_FINST_MASK))
-					s->flags |= SF_FINST_R;
+				if (!(s->flags & SN_ERR_MASK))
+					s->flags |= SN_ERR_PRXCOND;
+				if (!(s->flags & SN_FINST_MASK))
+					s->flags |= SN_FINST_R;
 				return 0;
 			}
 			else if (rule->action >= TCP_ACT_TRK_SC0 && rule->action <= TCP_ACT_TRK_SCMAX) {
@@ -1185,25 +1055,25 @@ resume_execution:
 					continue;
 
 				t = rule->act_prm.trk_ctr.table.t;
-				key = stktable_fetch_key(t, s->be, sess, s, SMP_OPT_DIR_REQ | partial, rule->act_prm.trk_ctr.expr, &smp);
+				key = stktable_fetch_key(t, s->be, s, &s->txn, SMP_OPT_DIR_REQ | partial, rule->act_prm.trk_ctr.expr, &smp);
 
 				if ((smp.flags & SMP_F_MAY_CHANGE) && !(partial & SMP_OPT_FINAL))
 					goto missing_data; /* key might appear later */
 
 				if (key && (ts = stktable_get_entry(t, key))) {
-					stream_track_stkctr(&s->stkctr[tcp_trk_idx(rule->action)], t, ts);
+					session_track_stkctr(&s->stkctr[tcp_trk_idx(rule->action)], t, ts);
 					stkctr_set_flags(&s->stkctr[tcp_trk_idx(rule->action)], STKCTR_TRACK_CONTENT);
-					if (sess->fe != s->be)
+					if (s->fe != s->be)
 						stkctr_set_flags(&s->stkctr[tcp_trk_idx(rule->action)], STKCTR_TRACK_BACKEND);
 				}
 			}
 			else if (rule->action == TCP_ACT_CAPTURE) {
 				struct sample *key;
 				struct cap_hdr *h = rule->act_prm.cap.hdr;
-				char **cap = s->req_cap;
+				char **cap = s->txn.req.cap;
 				int len;
 
-				key = sample_fetch_string(s->be, sess, s, SMP_OPT_DIR_REQ | partial, rule->act_prm.cap.expr);
+				key = sample_fetch_string(s->be, s, &s->txn, SMP_OPT_DIR_REQ | partial, rule->act_prm.cap.expr);
 				if (!key)
 					continue;
 
@@ -1224,16 +1094,8 @@ resume_execution:
 				cap[h->index][len] = 0;
 			}
 			else {
-				/* Custom keywords. */
-				if (rule->action_ptr && !rule->action_ptr(rule, s->be, s)) {
-					s->current_rule = rule;
-					goto missing_data;
-				}
-
-				/* accept */
-				if (rule->action == TCP_ACT_CUSTOM)
-					break;
-				/* otherwise continue */
+				/* otherwise accept */
+				break;
 			}
 		}
 	}
@@ -1260,13 +1122,12 @@ resume_execution:
  * response. It relies on buffers flags, and updates s->rep->analysers. The
  * function may be called for backend rules.
  */
-int tcp_inspect_response(struct stream *s, struct channel *rep, int an_bit)
+int tcp_inspect_response(struct session *s, struct channel *rep, int an_bit)
 {
-	struct session *sess = s->sess;
 	struct tcp_rule *rule;
 	int partial;
 
-	DPRINTF(stderr,"[%u] %s: stream=%p b=%p, exp(r,w)=%u,%u bf=%08x bh=%d analysers=%02x\n",
+	DPRINTF(stderr,"[%u] %s: session=%p b=%p, exp(r,w)=%u,%u bf=%08x bh=%d analysers=%02x\n",
 		now_ms, __FUNCTION__,
 		s,
 		rep,
@@ -1290,24 +1151,11 @@ int tcp_inspect_response(struct stream *s, struct channel *rep, int an_bit)
 	else
 		partial = 0;
 
-	/* If "the current_rule_list" match the executed rule list, we are in
-	 * resume condition. If a resume is needed it is always in the action
-	 * and never in the ACL or converters. In this case, we initialise the
-	 * current rule, and go to the action execution point.
-	 */
-	if (s->current_rule) {
-		rule = s->current_rule;
-		s->current_rule = NULL;
-		if (s->current_rule_list == &s->be->tcp_rep.inspect_rules)
-			goto resume_execution;
-	}
-	s->current_rule_list = &s->be->tcp_rep.inspect_rules;
-
 	list_for_each_entry(rule, &s->be->tcp_rep.inspect_rules, list) {
 		enum acl_test_res ret = ACL_TEST_PASS;
 
 		if (rule->cond) {
-			ret = acl_exec_cond(rule->cond, s->be, sess, s, SMP_OPT_DIR_RES | partial);
+			ret = acl_exec_cond(rule->cond, s->be, s, &s->txn, SMP_OPT_DIR_RES | partial);
 			if (ret == ACL_TEST_MISS) {
 				/* just set the analyser timeout once at the beginning of the response */
 				if (!tick_isset(rep->analyse_exp) && s->be->tcp_rep.inspect_delay)
@@ -1321,42 +1169,32 @@ int tcp_inspect_response(struct stream *s, struct channel *rep, int an_bit)
 		}
 
 		if (ret) {
-resume_execution:
 			/* we have a matching rule. */
 			if (rule->action == TCP_ACT_REJECT) {
 				channel_abort(rep);
-				channel_abort(&s->req);
+				channel_abort(s->req);
 				rep->analysers = 0;
 
 				s->be->be_counters.denied_resp++;
-				sess->fe->fe_counters.denied_resp++;
-				if (sess->listener->counters)
-					sess->listener->counters->denied_resp++;
+				s->fe->fe_counters.denied_resp++;
+				if (s->listener->counters)
+					s->listener->counters->denied_resp++;
 
-				if (!(s->flags & SF_ERR_MASK))
-					s->flags |= SF_ERR_PRXCOND;
-				if (!(s->flags & SF_FINST_MASK))
-					s->flags |= SF_FINST_D;
+				if (!(s->flags & SN_ERR_MASK))
+					s->flags |= SN_ERR_PRXCOND;
+				if (!(s->flags & SN_FINST_MASK))
+					s->flags |= SN_FINST_D;
 				return 0;
 			}
 			else if (rule->action == TCP_ACT_CLOSE) {
-				chn_prod(rep)->flags |= SI_FL_NOLINGER | SI_FL_NOHALF;
-				si_shutr(chn_prod(rep));
-				si_shutw(chn_prod(rep));
+				rep->prod->flags |= SI_FL_NOLINGER | SI_FL_NOHALF;
+				si_shutr(rep->prod);
+				si_shutw(rep->prod);
 				break;
 			}
 			else {
-				/* Custom keywords. */
-				if (rule->action_ptr && !rule->action_ptr(rule, s->be, s)) {
-					channel_dont_close(rep);
-					s->current_rule = rule;
-					return 0;
-				}
-
-				/* accept */
-				if (rule->action == TCP_ACT_CUSTOM)
-					break;
-				/* otherwise continue */
+				/* otherwise accept */
+				break;
 			}
 		}
 	}
@@ -1375,23 +1213,23 @@ resume_execution:
  * matches or if no more rule matches. It can only use rules which don't need
  * any data. This only works on connection-based client-facing stream interfaces.
  */
-int tcp_exec_req_rules(struct session *sess)
+int tcp_exec_req_rules(struct session *s)
 {
 	struct tcp_rule *rule;
 	struct stksess *ts;
 	struct stktable *t = NULL;
-	struct connection *conn = objt_conn(sess->origin);
+	struct connection *conn = objt_conn(s->si[0].end);
 	int result = 1;
 	enum acl_test_res ret;
 
 	if (!conn)
 		return result;
 
-	list_for_each_entry(rule, &sess->fe->tcp_req.l4_rules, list) {
+	list_for_each_entry(rule, &s->fe->tcp_req.l4_rules, list) {
 		ret = ACL_TEST_PASS;
 
 		if (rule->cond) {
-			ret = acl_exec_cond(rule->cond, sess->fe, sess, NULL, SMP_OPT_DIR_REQ|SMP_OPT_FINAL);
+			ret = acl_exec_cond(rule->cond, s->fe, s, NULL, SMP_OPT_DIR_REQ|SMP_OPT_FINAL);
 			ret = acl_pass(ret);
 			if (rule->cond->pol == ACL_COND_UNLESS)
 				ret = !ret;
@@ -1400,10 +1238,14 @@ int tcp_exec_req_rules(struct session *sess)
 		if (ret) {
 			/* we have a matching rule. */
 			if (rule->action == TCP_ACT_REJECT) {
-				sess->fe->fe_counters.denied_conn++;
-				if (sess->listener->counters)
-					sess->listener->counters->denied_conn++;
+				s->fe->fe_counters.denied_conn++;
+				if (s->listener->counters)
+					s->listener->counters->denied_conn++;
 
+				if (!(s->flags & SN_ERR_MASK))
+					s->flags |= SN_ERR_PRXCOND;
+				if (!(s->flags & SN_FINST_MASK))
+					s->flags |= SN_FINST_R;
 				result = 0;
 				break;
 			}
@@ -1413,24 +1255,20 @@ int tcp_exec_req_rules(struct session *sess)
 				 */
 				struct stktable_key *key;
 
-				if (stkctr_entry(&sess->stkctr[tcp_trk_idx(rule->action)]))
+				if (stkctr_entry(&s->stkctr[tcp_trk_idx(rule->action)]))
 					continue;
 
 				t = rule->act_prm.trk_ctr.table.t;
-				key = stktable_fetch_key(t, sess->fe, sess, NULL, SMP_OPT_DIR_REQ|SMP_OPT_FINAL, rule->act_prm.trk_ctr.expr, NULL);
+				key = stktable_fetch_key(t, s->be, s, &s->txn, SMP_OPT_DIR_REQ|SMP_OPT_FINAL, rule->act_prm.trk_ctr.expr, NULL);
 
 				if (key && (ts = stktable_get_entry(t, key)))
-					stream_track_stkctr(&sess->stkctr[tcp_trk_idx(rule->action)], t, ts);
+					session_track_stkctr(&s->stkctr[tcp_trk_idx(rule->action)], t, ts);
 			}
 			else if (rule->action == TCP_ACT_EXPECT_PX) {
 				conn->flags |= CO_FL_ACCEPT_PROXY;
 				conn_sock_want_recv(conn);
 			}
 			else {
-				/* Custom keywords. */
-				if (rule->action_ptr)
-					rule->action_ptr(rule, sess->fe, NULL);
-
 				/* otherwise it's an accept */
 				break;
 			}
@@ -1465,18 +1303,10 @@ static int tcp_parse_response_rule(char **args, int arg, int section_type,
 		rule->action = TCP_ACT_CLOSE;
 	}
 	else {
-		struct tcp_action_kw *kw;
-		kw = tcp_res_cont_action(args[arg]);
-		if (kw) {
-			arg++;
-			if (!kw->parse((const char **)args, &arg, curpx, rule, err))
-				return -1;
-		} else {
-			memprintf(err,
-			          "'%s %s' expects 'accept', 'close', 'reject' or 'set-var' in %s '%s' (got '%s')",
-			          args[0], args[1], proxy_type_str(curpx), curpx->id, args[arg]);
-			return -1;
-		}
+		memprintf(err,
+		          "'%s %s' expects 'accept', 'close' or 'reject' in %s '%s' (got '%s')",
+		          args[0], args[1], proxy_type_str(curpx), curpx->id, args[arg]);
+		return -1;
 	}
 
 	if (strcmp(args[arg], "if") == 0 || strcmp(args[arg], "unless") == 0) {
@@ -1667,23 +1497,11 @@ static int tcp_parse_request_rule(char **args, int arg, int section_type,
 		rule->action = TCP_ACT_EXPECT_PX;
 	}
 	else {
-		struct tcp_action_kw *kw;
-		if (where & SMP_VAL_FE_CON_ACC)
-			kw = tcp_req_conn_action(args[arg]);
-		else
-			kw = tcp_req_cont_action(args[arg]);
-		if (kw) {
-			arg++;
-			if (!kw->parse((const char **)args, &arg, curpx, rule, err))
-				return -1;
-		} else {
-			memprintf(err,
-			          "'%s %s' expects 'accept', 'reject', 'track-sc0' ... 'track-sc%d', "
-			          " or 'set-var' in %s '%s' (got '%s')",
-			          args[0], args[1], MAX_SESS_STKCTR-1, proxy_type_str(curpx),
-			          curpx->id, args[arg]);
-			return -1;
-		}
+		memprintf(err,
+		          "'%s %s' expects 'accept', 'reject', 'track-sc0' ... 'track-sc%d' "
+		          " in %s '%s' (got '%s')",
+		          args[0], args[1], MAX_SESS_STKCTR-1, proxy_type_str(curpx), curpx->id, args[arg]);
+		return -1;
 	}
 
 	if (strcmp(args[arg], "if") == 0 || strcmp(args[arg], "unless") == 0) {
@@ -1976,9 +1794,10 @@ static int tcp_parse_tcp_req(char **args, int section_type, struct proxy *curpx,
 
 /* fetch the connection's source IPv4/IPv6 address */
 static int
-smp_fetch_src(const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_src(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+              const struct arg *args, struct sample *smp, const char *kw)
 {
-	struct connection *cli_conn = objt_conn(smp->sess->origin);
+	struct connection *cli_conn = objt_conn(l4->si[0].end);
 
 	if (!cli_conn)
 		return 0;
@@ -2002,9 +1821,10 @@ smp_fetch_src(const struct arg *args, struct sample *smp, const char *kw, void *
 
 /* set temp integer to the connection's source port */
 static int
-smp_fetch_sport(const struct arg *args, struct sample *smp, const char *k, void *private)
+smp_fetch_sport(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                const struct arg *args, struct sample *smp, const char *kw)
 {
-	struct connection *cli_conn = objt_conn(smp->sess->origin);
+	struct connection *cli_conn = objt_conn(l4->si[0].end);
 
 	if (!cli_conn)
 		return 0;
@@ -2019,9 +1839,10 @@ smp_fetch_sport(const struct arg *args, struct sample *smp, const char *k, void 
 
 /* fetch the connection's destination IPv4/IPv6 address */
 static int
-smp_fetch_dst(const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_dst(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+              const struct arg *args, struct sample *smp, const char *kw)
 {
-	struct connection *cli_conn = objt_conn(smp->sess->origin);
+	struct connection *cli_conn = objt_conn(l4->si[0].end);
 
 	if (!cli_conn)
 		return 0;
@@ -2047,9 +1868,10 @@ smp_fetch_dst(const struct arg *args, struct sample *smp, const char *kw, void *
 
 /* set temp integer to the frontend connexion's destination port */
 static int
-smp_fetch_dport(const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_dport(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                const struct arg *args, struct sample *smp, const char *kw)
 {
-	struct connection *cli_conn = objt_conn(smp->sess->origin);
+	struct connection *cli_conn = objt_conn(l4->si[0].end);
 
 	if (!cli_conn)
 		return 0;
@@ -2164,36 +1986,8 @@ static int bind_parse_mss(char **args, int cur_arg, struct proxy *px, struct bin
 }
 #endif
 
-#ifdef TCP_USER_TIMEOUT
-/* parse the "tcp-ut" bind keyword */
-static int bind_parse_tcp_ut(char **args, int cur_arg, struct proxy *px, struct bind_conf *conf, char **err)
-{
-	const char *ptr = NULL;
-	struct listener *l;
-	unsigned int timeout;
-
-	if (!*args[cur_arg + 1]) {
-		memprintf(err, "'%s' : missing TCP User Timeout value", args[cur_arg]);
-		return ERR_ALERT | ERR_FATAL;
-	}
-
-	ptr = parse_time_err(args[cur_arg + 1], &timeout, TIME_UNIT_MS);
-	if (ptr) {
-		memprintf(err, "'%s' : expects a positive delay in milliseconds", args[cur_arg]);
-		return ERR_ALERT | ERR_FATAL;
-	}
-
-	list_for_each_entry(l, &conf->listeners, by_bind) {
-		if (l->addr.ss_family == AF_INET || l->addr.ss_family == AF_INET6)
-			l->tcp_ut = timeout;
-	}
-
-	return 0;
-}
-#endif
-
 #ifdef SO_BINDTODEVICE
-/* parse the "interface" bind keyword */
+/* parse the "mss" bind keyword */
 static int bind_parse_interface(char **args, int cur_arg, struct proxy *px, struct bind_conf *conf, char **err)
 {
 	struct listener *l;
@@ -2209,34 +2003,6 @@ static int bind_parse_interface(char **args, int cur_arg, struct proxy *px, stru
 	}
 
 	global.last_checks |= LSTCHK_NETADM;
-	return 0;
-}
-#endif
-
-#ifdef CONFIG_HAP_NS
-/* parse the "namespace" bind keyword */
-static int bind_parse_namespace(char **args, int cur_arg, struct proxy *px, struct bind_conf *conf, char **err)
-{
-	struct listener *l;
-	char *namespace = NULL;
-
-	if (!*args[cur_arg + 1]) {
-		memprintf(err, "'%s' : missing namespace id", args[cur_arg]);
-		return ERR_ALERT | ERR_FATAL;
-	}
-	namespace = args[cur_arg + 1];
-
-	list_for_each_entry(l, &conf->listeners, by_bind) {
-		l->netns = netns_store_lookup(namespace, strlen(namespace));
-
-		if (l->netns == NULL)
-			l->netns = netns_store_insert(namespace);
-
-		if (l->netns == NULL) {
-			Alert("Cannot open namespace '%s'.\n", args[cur_arg + 1]);
-			return ERR_ALERT | ERR_FATAL;
-		}
-	}
 	return 0;
 }
 #endif
@@ -2290,9 +2056,6 @@ static struct bind_kw_list bind_kws = { "TCP", { }, {
 #ifdef TCP_MAXSEG
 	{ "mss",           bind_parse_mss,          1 }, /* set MSS of listening socket */
 #endif
-#ifdef TCP_USER_TIMEOUT
-	{ "tcp-ut",        bind_parse_tcp_ut,       1 }, /* set User Timeout on listening socket */
-#endif
 #ifdef TCP_FASTOPEN
 	{ "tfo",           bind_parse_tfo,          0 }, /* enable TCP_FASTOPEN of listening socket */
 #endif
@@ -2302,9 +2065,6 @@ static struct bind_kw_list bind_kws = { "TCP", { }, {
 #ifdef IPV6_V6ONLY
 	{ "v4v6",          bind_parse_v4v6,         0 }, /* force socket to bind to IPv4+IPv6 */
 	{ "v6only",        bind_parse_v6only,       0 }, /* force socket to bind to IPv6 only */
-#endif
-#ifdef CONFIG_HAP_NS
-	{ "namespace",     bind_parse_namespace,    1 },
 #endif
 	/* the versions with the NULL parse function*/
 	{ "defer-accept",  NULL,  0 },

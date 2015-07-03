@@ -25,7 +25,6 @@
 #include <common/config.h>
 #include <common/standard.h>
 #include <types/global.h>
-#include <proto/dns.h>
 #include <eb32tree.h>
 
 /* enough to store NB_ITOA_STR integers of :
@@ -408,22 +407,6 @@ char *ultoa_r(unsigned long n, char *buffer, int size)
 
 /*
  * This function simply returns a locally allocated string containing
- * the ascii representation for signed number 'n' in decimal.
- */
-char *sltoa_r(long n, char *buffer, int size)
-{
-	char *pos;
-
-	if (n >= 0)
-		return ultoa_r(n, buffer, size);
-
-	pos = ultoa_r(-n, buffer + 1, size - 1) - 1;
-	*pos = '-';
-	return pos;
-}
-
-/*
- * This function simply returns a locally allocated string containing
  * the ascii representation for number 'n' in decimal, formatted for
  * HTML output with tags to create visual grouping by 3 digits. The
  * output needs to support at least 171 characters.
@@ -521,18 +504,6 @@ int ishex(char s)
 	return 0;
 }
 
-/* rounds <i> down to the closest value having max 2 digits */
-unsigned int round_2dig(unsigned int i)
-{
-	unsigned int mul = 1;
-
-	while (i >= 100) {
-		i /= 10;
-		mul *= 10;
-	}
-	return i * mul;
-}
-
 /*
  * Checks <name> for invalid characters. Valid chars are [A-Za-z0-9_:.-]. If an
  * invalid character is found, a pointer to it is returned. If everything is
@@ -584,11 +555,9 @@ const char *invalid_domainchar(const char *name) {
  * indicate INADDR_ANY. NULL is returned if the host part cannot be resolved.
  * The return address will only have the address family and the address set,
  * all other fields remain zero. The string is not supposed to be modified.
- * The IPv6 '::' address is IN6ADDR_ANY. If <resolve> is non-zero, the hostname
- * is resolved, otherwise only IP addresses are resolved, and anything else
- * returns NULL.
+ * The IPv6 '::' address is IN6ADDR_ANY.
  */
-struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, int resolve)
+static struct sockaddr_storage *str2ip(const char *str, struct sockaddr_storage *sa)
 {
 	struct hostent *he;
 
@@ -621,12 +590,6 @@ struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, i
 		sa->ss_family = AF_INET;
 		return sa;
 	}
-
-	if (!resolve)
-		return NULL;
-
-	if (!dns_hostname_validation(str, NULL))
-		return NULL;
 
 #ifdef USE_GETADDRINFO
 	if (global.tune.options & GTUNE_USE_GAI) {
@@ -1330,70 +1293,6 @@ char *encode_chunk(char *start, char *stop,
 	return start;
 }
 
-/* Check a string for using it in a CSV output format. If the string contains
- * one of the following four char <">, <,>, CR or LF, the string is
- * encapsulated between <"> and the <"> are escaped by a <""> sequence.
- * <str> is the input string to be escaped. The function assumes that
- * the input string is null-terminated.
- *
- * If <quote> is 0, the result is returned escaped but without double quote.
- * Is it useful if the escaped string is used between double quotes in the
- * format.
- *
- *    printf("..., \"%s\", ...\r\n", csv_enc(str, 0));
- *
- * If the <quote> is 1, the converter put the quotes only if any character is
- * escaped. If the <quote> is 2, the converter put always the quotes.
- *
- * <output> is a struct chunk used for storing the output string if any
- * change will be done.
- *
- * The function returns the converted string on this output. If an error
- * occurs, the function return an empty string. This type of output is useful
- * for using the function directly as printf() argument.
- *
- * If the output buffer is too short to contain the input string, the result
- * is truncated.
- */
-const char *csv_enc(const char *str, int quote, struct chunk *output)
-{
-	char *end = output->str + output->size;
-	char *out = output->str + 1; /* +1 for reserving space for a first <"> */
-
-	while (*str && out < end - 2) { /* -2 for reserving space for <"> and \0. */
-		*out = *str;
-		if (*str == '"') {
-			if (quote == 1)
-				quote = 2;
-			out++;
-			if (out >= end - 2) {
-				out--;
-				break;
-			}
-			*out = '"';
-		}
-		if (quote == 1 && ( *str == '\r' || *str == '\n' || *str == ',') )
-			quote = 2;
-		out++;
-		str++;
-	}
-
-	if (quote == 1)
-		quote = 0;
-
-	if (!quote) {
-		*out = '\0';
-		return output->str + 1;
-	}
-
-	/* else quote == 2 */
-	*output->str = '"';
-	*out = '"';
-	out++;
-	*out = '\0';
-	return output->str;
-}
-
 /* Decode an URL-encoded string in-place. The resulting string might
  * be shorter. If some forbidden characters are found, the conversion is
  * aborted, the string is truncated before the issue and a negative value is
@@ -1744,9 +1643,6 @@ const char *parse_size_err(const char *text, unsigned *ret) {
 	default:
 		return text;
 	}
-
-	if (*text != '\0' && *++text != '\0')
-		return text;
 
 	*ret = value;
 	return NULL;
@@ -2635,126 +2531,6 @@ const char *strnistr(const char *str1, int len_str1, const char *str2, int len_s
 		}
 	}
 	return NULL;
-}
-
-/* This function read the next valid utf8 char.
- * <s> is the byte srray to be decode, <len> is its length.
- * The function returns decoded char encoded like this:
- * The 4 msb are the return code (UTF8_CODE_*), the 4 lsb
- * are the length read. The decoded character is stored in <c>.
- */
-unsigned char utf8_next(const char *s, int len, unsigned int *c)
-{
-	const unsigned char *p = (unsigned char *)s;
-	int dec;
-	unsigned char code = UTF8_CODE_OK;
-
-	if (len < 1)
-		return UTF8_CODE_OK;
-
-	/* Check the type of UTF8 sequence
-	 *
-	 * 0... ....  0x00 <= x <= 0x7f : 1 byte: ascii char
-	 * 10.. ....  0x80 <= x <= 0xbf : invalid sequence
-	 * 110. ....  0xc0 <= x <= 0xdf : 2 bytes
-	 * 1110 ....  0xe0 <= x <= 0xef : 3 bytes
-	 * 1111 0...  0xf0 <= x <= 0xf7 : 4 bytes
-	 * 1111 10..  0xf8 <= x <= 0xfb : 5 bytes
-	 * 1111 110.  0xfc <= x <= 0xfd : 6 bytes
-	 * 1111 111.  0xfe <= x <= 0xff : invalid sequence
-	 */
-	switch (*p) {
-	case 0x00 ... 0x7f:
-		*c = *p;
-		return UTF8_CODE_OK | 1;
-
-	case 0x80 ... 0xbf:
-		*c = *p;
-		return UTF8_CODE_BADSEQ | 1;
-
-	case 0xc0 ... 0xdf:
-		if (len < 2) {
-			*c = *p;
-			return UTF8_CODE_BADSEQ | 1;
-		}
-		*c = *p & 0x1f;
-		dec = 1;
-		break;
-
-	case 0xe0 ... 0xef:
-		if (len < 3) {
-			*c = *p;
-			return UTF8_CODE_BADSEQ | 1;
-		}
-		*c = *p & 0x0f;
-		dec = 2;
-		break;
-
-	case 0xf0 ... 0xf7:
-		if (len < 4) {
-			*c = *p;
-			return UTF8_CODE_BADSEQ | 1;
-		}
-		*c = *p & 0x07;
-		dec = 3;
-		break;
-
-	case 0xf8 ... 0xfb:
-		if (len < 5) {
-			*c = *p;
-			return UTF8_CODE_BADSEQ | 1;
-		}
-		*c = *p & 0x03;
-		dec = 4;
-		break;
-
-	case 0xfc ... 0xfd:
-		if (len < 6) {
-			*c = *p;
-			return UTF8_CODE_BADSEQ | 1;
-		}
-		*c = *p & 0x01;
-		dec = 5;
-		break;
-
-	case 0xfe ... 0xff:
-	default:
-		*c = *p;
-		return UTF8_CODE_BADSEQ | 1;
-	}
-
-	p++;
-
-	while (dec > 0) {
-
-		/* need 0x10 for the 2 first bits */
-		if ( ( *p & 0xc0 ) != 0x80 )
-			return UTF8_CODE_BADSEQ | ((p-(unsigned char *)s)&0xffff);
-
-		/* add data at char */
-		*c = ( *c << 6 ) | ( *p & 0x3f );
-
-		dec--;
-		p++;
-	}
-
-	/* Check ovelong encoding.
-	 * 1 byte  : 5 + 6         : 11 : 0x80    ... 0x7ff
-	 * 2 bytes : 4 + 6 + 6     : 16 : 0x800   ... 0xffff
-	 * 3 bytes : 3 + 6 + 6 + 6 : 21 : 0x10000 ... 0x1fffff
-	 */
-	if ((                 *c <= 0x7f     && (p-(unsigned char *)s) > 1) ||
-	    (*c >= 0x80    && *c <= 0x7ff    && (p-(unsigned char *)s) > 2) ||
-	    (*c >= 0x800   && *c <= 0xffff   && (p-(unsigned char *)s) > 3) ||
-	    (*c >= 0x10000 && *c <= 0x1fffff && (p-(unsigned char *)s) > 4))
-		code |= UTF8_CODE_OVERLONG;
-
-	/* Check invalid UTF8 range. */
-	if ((*c >= 0xd800 && *c <= 0xdfff) ||
-	    (*c >= 0xfffe && *c <= 0xffff))
-		code |= UTF8_CODE_INVRANGE;
-
-	return code | ((p-(unsigned char *)s)&0x0f);
 }
 
 /*

@@ -32,20 +32,4 @@ struct sni_ctx {
 	struct ebmb_node name;    /* node holding the servername value */
 };
 
-extern struct list tlskeys_reference;
-
-struct tls_sess_key {
-	unsigned char name[16];
-	unsigned char aes_key[16];
-	unsigned char hmac_key[16];
-} __attribute__((packed));
-
-struct tls_keys_ref {
-	struct list list; /* Used to chain refs. */
-	char *filename;
-	int unique_id; /* Each pattern reference have unique id. */
-	struct tls_sess_key *tlskeys;
-	int tls_ticket_enc_index;
-};
-
 #endif /* _TYPES_SSL_SOCK_H */

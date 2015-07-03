@@ -24,7 +24,7 @@
 
 /*
  * BUFSIZE defines the size of a read and write buffer. It is the maximum
- * amount of bytes which can be stored by the proxy for each stream. However,
+ * amount of bytes which can be stored by the proxy for each session. However,
  * when reading HTTP headers, the proxy needs some spare space to add or rewrite
  * headers if needed. The size of this spare is defined with MAXREWRITE. So it
  * is not possible to process headers longer than BUFSIZE-MAXREWRITE bytes. By
@@ -33,20 +33,6 @@
  */
 #ifndef BUFSIZE
 #define BUFSIZE	        16384
-#endif
-
-/* certain buffers may only be allocated for responses in order to avoid
- * deadlocks caused by request queuing. 2 buffers is the absolute minimum
- * acceptable to ensure that a request gaining access to a server can get
- * a response buffer even if it doesn't completely flush the request buffer.
- * The worst case is an applet making use of a request buffer that cannot
- * completely be sent while the server starts to respond, and all unreserved
- * buffers are allocated by request buffers from pending connections in the
- * queue waiting for this one to flush. Both buffers reserved buffers may
- * thus be used at the same time.
- */
-#ifndef RESERVED_BUFS
-#define RESERVED_BUFS   2
 #endif
 
 // reserved buffer space for header rewriting
@@ -95,11 +81,6 @@
 // max # of stick counters per session (at least 3 for sc0..sc2)
 #ifndef MAX_SESS_STKCTR
 #define MAX_SESS_STKCTR 3
-#endif
-
-// max # of extra stick-table data types that can be registred at runtime
-#ifndef STKTABLE_EXTRA_DATA_TYPES
-#define STKTABLE_EXTRA_DATA_TYPES 0
 #endif
 
 // max # of loops we can perform around a read() which succeeds.
@@ -151,7 +132,6 @@
 #define DEF_AGENT_FALLTIME    1
 #define DEF_AGENT_RISETIME    1
 #define DEF_CHECK_REQ   "OPTIONS / HTTP/1.0\r\n"
-#define DEF_CHECK_PATH  ""
 #define DEF_SMTP_CHECK_REQ   "HELO localhost\r\n"
 #define DEF_LDAP_CHECK_REQ   "\x30\x0c\x02\x01\x01\x60\x07\x02\x01\x03\x04\x00\x80\x00"
 #define DEF_REDIS_CHECK_REQ  "*1\r\n$4\r\nPING\r\n"
@@ -210,12 +190,8 @@
 
 /* Maximum host name length */
 #ifndef MAX_HOSTNAME_LEN
-#if MAXHOSTNAMELEN
-#define MAX_HOSTNAME_LEN	MAXHOSTNAMELEN
-#else
-#define MAX_HOSTNAME_LEN	64
-#endif // MAXHOSTNAMELEN
-#endif // MAX_HOSTNAME_LEN
+#define MAX_HOSTNAME_LEN	32
+#endif
 
 /* Maximum health check description length */
 #ifndef HCHK_DESC_LEN
@@ -247,34 +223,6 @@
 #define SSL_DEFAULT_DH_PARAM 0
 #endif
 
-/* max memory cost per SSL session */
-#ifndef SSL_SESSION_MAX_COST
-#define SSL_SESSION_MAX_COST (16*1024)    // measured
-#endif
-
-/* max memory cost per SSL handshake (on top of session) */
-#ifndef SSL_HANDSHAKE_MAX_COST
-#define SSL_HANDSHAKE_MAX_COST (76*1024)  // measured
-#endif
-
-#ifndef DEFAULT_SSL_CTX_CACHE
-#define DEFAULT_SSL_CTX_CACHE 1000
-#endif
-
-/* approximate stream size (for maxconn estimate) */
-#ifndef STREAM_MAX_COST
-#define STREAM_MAX_COST (sizeof(struct stream) + \
-                          2 * sizeof(struct channel) + \
-                          2 * sizeof(struct connection) + \
-                          REQURI_LEN + \
-                          2 * global.tune.cookie_len)
-#endif
-
-/* available memory estimate : count about 3% of overhead in various structures */
-#ifndef MEM_USABLE_RATIO
-#define MEM_USABLE_RATIO 0.97
-#endif
-
 /* Number of samples used to compute the times reported in stats. A power of
  * two is highly recommended, and this value multiplied by the largest response
  * time must not overflow and unsigned int. See freq_ctr.h for more information.
@@ -294,20 +242,4 @@
 #ifndef OCSP_MAX_RESPONSE_TIME_SKEW
 #define OCSP_MAX_RESPONSE_TIME_SKEW 300
 #endif
-
-/* Number of TLS tickets to check, used for rotation */
-#ifndef TLS_TICKETS_NO
-#define TLS_TICKETS_NO 3
-#endif
-
-/* pattern lookup default cache size, in number of entries :
- * 10k entries at 10k req/s mean 1% risk of a collision after 60 years, that's
- * already much less than the memory's reliability in most machines and more
- * durable than most admin's life expectancy. A collision will result in a
- * valid result to be returned for a different entry from the same list.
- */
-#ifndef DEFAULT_PAT_LRU_SIZE
-#define DEFAULT_PAT_LRU_SIZE 10000
-#endif
-
 #endif /* _COMMON_DEFAULTS_H */

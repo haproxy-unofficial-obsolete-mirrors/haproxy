@@ -153,16 +153,14 @@ const char *chain_regex(struct hdr_exp **head, struct my_regex *preg,
 /* This function apply regex. It take const null terminated char as input.
  * If the function doesn't match, it returns false, else it returns true.
  * When it is compiled with JIT, this function execute strlen on the subject.
- * Currently the only supported flag is REG_NOTBOL.
  */
 int regex_exec_match(const struct my_regex *preg, const char *subject,
-                     size_t nmatch, regmatch_t pmatch[], int flags) {
+                     size_t nmatch, regmatch_t pmatch[]) {
 #if defined(USE_PCRE) || defined(USE_PCRE_JIT)
 	int ret;
 	int matches[MAX_MATCH * 3];
 	int enmatch;
 	int i;
-	int options;
 
 	/* Silently limit the number of allowed matches. max
 	 * match i the maximum value for match, in fact this
@@ -171,10 +169,6 @@ int regex_exec_match(const struct my_regex *preg, const char *subject,
 	enmatch = nmatch;
 	if (enmatch > MAX_MATCH)
 		enmatch = MAX_MATCH;
-
-	options = 0;
-	if (flags & REG_NOTBOL)
-		options |= PCRE_NOTBOL;
 
 	/* The value returned by pcre_exec() is one more than the highest numbered
 	 * pair that has been set. For example, if two substrings have been captured,
@@ -185,7 +179,7 @@ int regex_exec_match(const struct my_regex *preg, const char *subject,
 	 * It seems that this function returns 0 if it detect more matches than avalaible
 	 * space in the matches array.
 	 */
-	ret = pcre_exec(preg->reg, preg->extra, subject, strlen(subject), 0, options, matches, enmatch * 3);
+	ret = pcre_exec(preg->reg, preg->extra, subject, strlen(subject), 0, 0, matches, enmatch * 3);
 	if (ret < 0)
 		return 0;
 
@@ -206,9 +200,7 @@ int regex_exec_match(const struct my_regex *preg, const char *subject,
 	return 1;
 #else
 	int match;
-
-	flags &= REG_NOTBOL;
-	match = regexec(&preg->regex, subject, nmatch, pmatch, flags);
+	match = regexec(&preg->regex, subject, nmatch, pmatch, 0);
 	if (match == REG_NOMATCH)
 		return 0;
 	return 1;
@@ -220,17 +212,15 @@ int regex_exec_match(const struct my_regex *preg, const char *subject,
  * match, it returns false, else it returns true.
  * When it is compiled with standard POSIX regex or PCRE, this function add
  * a temporary null chracters at the end of the <subject>. The <subject> must
- * have a real length of <length> + 1. Currently the only supported flag is
- * REG_NOTBOL.
+ * have a real length of <length> + 1.
  */
 int regex_exec_match2(const struct my_regex *preg, char *subject, int length,
-                      size_t nmatch, regmatch_t pmatch[], int flags) {
+                      size_t nmatch, regmatch_t pmatch[]) {
 #if defined(USE_PCRE) || defined(USE_PCRE_JIT)
 	int ret;
 	int matches[MAX_MATCH * 3];
 	int enmatch;
 	int i;
-	int options;
 
 	/* Silently limit the number of allowed matches. max
 	 * match i the maximum value for match, in fact this
@@ -239,10 +229,6 @@ int regex_exec_match2(const struct my_regex *preg, char *subject, int length,
 	enmatch = nmatch;
 	if (enmatch > MAX_MATCH)
 		enmatch = MAX_MATCH;
-
-	options = 0;
-	if (flags & REG_NOTBOL)
-		options |= PCRE_NOTBOL;
 
 	/* The value returned by pcre_exec() is one more than the highest numbered
 	 * pair that has been set. For example, if two substrings have been captured,
@@ -253,7 +239,7 @@ int regex_exec_match2(const struct my_regex *preg, char *subject, int length,
 	 * It seems that this function returns 0 if it detect more matches than avalaible
 	 * space in the matches array.
 	 */
-	ret = pcre_exec(preg->reg, preg->extra, subject, length, 0, options, matches, enmatch * 3);
+	ret = pcre_exec(preg->reg, preg->extra, subject, length, 0, 0, matches, enmatch * 3);
 	if (ret < 0)
 		return 0;
 
@@ -275,10 +261,8 @@ int regex_exec_match2(const struct my_regex *preg, char *subject, int length,
 #else
 	char old_char = subject[length];
 	int match;
-
-	flags &= REG_NOTBOL;
 	subject[length] = 0;
-	match = regexec(&preg->regex, subject, nmatch, pmatch, flags);
+	match = regexec(&preg->regex, subject, nmatch, pmatch, 0);
 	subject[length] = old_char;
 	if (match == REG_NOMATCH)
 		return 0;
@@ -304,12 +288,16 @@ int regex_comp(const char *str, struct my_regex *regex, int cs, int cap, char **
 		return 0;
 	}
 
+#ifdef USE_PCRE_JIT
 	regex->extra = pcre_study(regex->reg, PCRE_STUDY_JIT_COMPILE, &error);
 	if (!regex->extra && error != NULL) {
 		pcre_free(regex->reg);
 		memprintf(err, "failed to compile regex '%s' (error=%s)", str, error);
 		return 0;
 	}
+#else
+	regex->extra = NULL;
+#endif
 #else
 	int flags = REG_EXTENDED;
 

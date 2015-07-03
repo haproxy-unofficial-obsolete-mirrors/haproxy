@@ -33,8 +33,6 @@
 #define SYSLOG_PORT             514
 #define UNIQUEID_LEN            128
 
-/* The array containing the names of the log levels. */
-extern const char *log_levels[];
 
 /* lists of fields that can be logged */
 enum {
@@ -55,7 +53,6 @@ enum {
 	LOG_FMT_SERVERPORT,
 	LOG_FMT_SERVERIP,
 	LOG_FMT_COUNTER,
-	LOG_FMT_LOGCNT,
 	LOG_FMT_PID,
 	LOG_FMT_DATE,
 	LOG_FMT_DATEGMT,
@@ -93,10 +90,6 @@ enum {
 	LOG_FMT_HDRREQUESTLIST,
 	LOG_FMT_HDRRESPONSLIST,
 	LOG_FMT_REQ,
-	LOG_FMT_HTTP_METHOD,
-	LOG_FMT_HTTP_URI,
-	LOG_FMT_HTTP_PATH,
-	LOG_FMT_HTTP_VERSION,
 	LOG_FMT_HOSTNAME,
 	LOG_FMT_UNIQUEID,
 	LOG_FMT_SSL_CIPHER,

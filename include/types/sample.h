@@ -28,14 +28,12 @@
 
 #include <common/chunk.h>
 #include <common/mini-clist.h>
+#include <types/arg.h>
 #include <types/proto_http.h>
-
-struct arg;
 
 /* input and output sample types */
 enum {
-	SMP_T_ANY = 0,   /* any type */
-	SMP_T_BOOL,      /* boolean */
+	SMP_T_BOOL = 0,  /* boolean */
 	SMP_T_UINT,      /* unsigned 32bits integer type */
 	SMP_T_SINT,      /* signed 32bits integer type */
 	SMP_T_ADDR,      /* ipv4 or ipv6, only used for input type compatibility */
@@ -73,7 +71,7 @@ enum {
 	SMP_SRC_RQFIN,  /* final information about request buffer (eg: tot bytes) */
 	SMP_SRC_RSFIN,  /* final information about response buffer (eg: tot bytes) */
 	SMP_SRC_TXFIN,  /* final information about the transaction (eg: #comp rate) */
-	SMP_SRC_SSFIN,  /* final information about the stream (eg: #requests, final flags) */
+	SMP_SRC_SSFIN,  /* final information about the session (eg: #requests, final flags) */
 	SMP_SRC_ENTRIES /* nothing after this */
 };
 
@@ -82,7 +80,7 @@ enum {
  */
 enum {
 	SMP_CKP_FE_CON_ACC,  /* FE connection accept rules ("tcp request connection") */
-	SMP_CKP_FE_SES_ACC,  /* FE stream accept rules (to come soon) */
+	SMP_CKP_FE_SES_ACC,  /* FE session accept rules (to come soon) */
 	SMP_CKP_FE_REQ_CNT,  /* FE request content rules ("tcp request content") */
 	SMP_CKP_FE_HRQ_HDR,  /* FE HTTP request headers (rules, headers, monitor, stats, redirect) */
 	SMP_CKP_FE_HRQ_BDY,  /* FE HTTP request body */
@@ -99,7 +97,7 @@ enum {
 	SMP_CKP_FE_RES_CNT,  /* FE response content rules ("tcp response content") */
 	SMP_CKP_FE_HRS_HDR,  /* FE HTTP response headers (rules, headers) */
 	SMP_CKP_FE_HRS_BDY,  /* FE HTTP response body */
-	SMP_CKP_FE_LOG_END,  /* FE log at the end of the txn/stream */
+	SMP_CKP_FE_LOG_END,  /* FE log at the end of the txn/session */
 	SMP_CKP_ENTRIES /* nothing after this */
 };
 
@@ -132,7 +130,7 @@ enum {
 	SMP_USE_RQFIN = 1 << SMP_SRC_RQFIN,  /* final information about request buffer (eg: tot bytes) */
 	SMP_USE_RSFIN = 1 << SMP_SRC_RSFIN,  /* final information about response buffer (eg: tot bytes) */
 	SMP_USE_TXFIN = 1 << SMP_SRC_TXFIN,  /* final information about the transaction (eg: #comp rate) */
-	SMP_USE_SSFIN = 1 << SMP_SRC_SSFIN,  /* final information about the stream (eg: #requests, final flags) */
+	SMP_USE_SSFIN = 1 << SMP_SRC_SSFIN,  /* final information about the session (eg: #requests, final flags) */
 
 	/* This composite one is useful to detect if an hdr_idx needs to be allocated */
 	SMP_USE_HTTP_ANY = SMP_USE_HRQHV | SMP_USE_HRQHP | SMP_USE_HRQBO |
@@ -147,7 +145,7 @@ enum {
 enum {
 	SMP_VAL___________ = 0,        /* Just used as a visual marker */
 	SMP_VAL_FE_CON_ACC = 1 << SMP_CKP_FE_CON_ACC,  /* FE connection accept rules ("tcp request connection") */
-	SMP_VAL_FE_SES_ACC = 1 << SMP_CKP_FE_SES_ACC,  /* FE stream accept rules (to come soon) */
+	SMP_VAL_FE_SES_ACC = 1 << SMP_CKP_FE_SES_ACC,  /* FE session accept rules (to come soon) */
 	SMP_VAL_FE_REQ_CNT = 1 << SMP_CKP_FE_REQ_CNT,  /* FE request content rules ("tcp request content") */
 	SMP_VAL_FE_HRQ_HDR = 1 << SMP_CKP_FE_HRQ_HDR,  /* FE HTTP request headers (rules, headers, monitor, stats, redirect) */
 	SMP_VAL_FE_HRQ_BDY = 1 << SMP_CKP_FE_HRQ_BDY,  /* FE HTTP request body */
@@ -164,7 +162,7 @@ enum {
 	SMP_VAL_FE_RES_CNT = 1 << SMP_CKP_FE_RES_CNT,  /* FE response content rules ("tcp response content") */
 	SMP_VAL_FE_HRS_HDR = 1 << SMP_CKP_FE_HRS_HDR,  /* FE HTTP response headers (rules, headers) */
 	SMP_VAL_FE_HRS_BDY = 1 << SMP_CKP_FE_HRS_BDY,  /* FE HTTP response body */
-	SMP_VAL_FE_LOG_END = 1 << SMP_CKP_FE_LOG_END,  /* FE log at the end of the txn/stream */
+	SMP_VAL_FE_LOG_END = 1 << SMP_CKP_FE_LOG_END,  /* FE log at the end of the txn/session */
 
 	/* a few combinations to decide what direction to try to fetch (useful for logs) */
 	SMP_VAL_REQUEST    = SMP_VAL_FE_CON_ACC | SMP_VAL_FE_SES_ACC | SMP_VAL_FE_REQ_CNT |
@@ -210,7 +208,6 @@ enum {
 
 /* needed below */
 struct session;
-struct stream;
 
 /* a sample context might be used by any sample fetch function in order to
  * store information needed across multiple calls (eg: restart point for a
@@ -245,16 +242,6 @@ struct sample {
 		struct meth     meth;  /* used for http method */
 	} data;                        /* sample data */
 	union smp_ctx ctx;
-
-	/* Some sample analyzer (sample-fetch or converters) needs to
-	 * known the attached proxy, session and stream. The sample-fetches
-	 * and the converters function pointers cannot be called without
-	 * these 3 pointers filled.
-	 */
-	struct proxy *px;
-	struct session *sess;
-	struct stream *strm;
-	unsigned int opt; /* fetch options (SMP_OPT_*) */
 };
 
 /* Used to store sample constant */
@@ -274,8 +261,7 @@ struct sample_storage {
 struct sample_conv {
 	const char *kw;                           /* configuration keyword  */
 	int (*process)(const struct arg *arg_p,
-	               struct sample *smp,
-	               void *private);            /* process function */
+		       struct sample *smp);       /* process function */
 	unsigned int arg_mask;                    /* arguments (ARG*()) */
 	int (*val_args)(struct arg *arg_p,
 	                struct sample_conv *smp_conv,
@@ -283,7 +269,7 @@ struct sample_conv {
 			char **err_msg);          /* argument validation function */
 	unsigned int in_type;                     /* expected input sample type */
 	unsigned int out_type;                    /* output sample type */
-	void *private;                            /* private values. only used by maps and Lua */
+	unsigned int private;                     /* private values. only used by maps */
 };
 
 /* sample conversion expression */
@@ -296,17 +282,19 @@ struct sample_conv_expr {
 /* Descriptor for a sample fetch method */
 struct sample_fetch {
 	const char *kw;                           /* configuration keyword */
-	int (*process)(const struct arg *arg_p,
+	int (*process)(struct proxy *px,
+	               struct session *l4,
+	               void *l7,
+		       unsigned int opt,          /* fetch options (SMP_OPT_*) */
+		       const struct arg *arg_p,
 	               struct sample *smp,
-	               const char *kw,            /* fetch processing function */
-	               void *private);            /* private value. */
+	               const char *kw);           /* fetch processing function */
 	unsigned int arg_mask;                    /* arguments (ARG*()) */
 	int (*val_args)(struct arg *arg_p,
 			char **err_msg);          /* argument validation function */
 	unsigned long out_type;                   /* output sample type */
 	unsigned int use;                         /* fetch source (SMP_USE_*) */
 	unsigned int val;                         /* fetch validity (SMP_VAL_*) */
-	void *private;                            /* private values. only used by Lua */
 };
 
 /* sample expression */

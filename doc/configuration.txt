@@ -2,9 +2,9 @@
                                 HAProxy
                           Configuration Manual
                          ----------------------
-                              version 1.6
+                             version 1.5.12
                              willy tarreau
-                              2015/06/17
+                               2015/05/02
 
 
 This document covers the configuration language as implemented in the version
@@ -39,10 +39,8 @@ Summary
 
 2.    Configuring HAProxy
 2.1.      Configuration file format
-2.2.      Quoting and escaping
-2.3.      Environment variables
-2.4.      Time format
-2.5.      Examples
+2.2.      Time format
+2.3.      Examples
 
 3.    Global parameters
 3.1.      Process management and security
@@ -58,9 +56,6 @@ Summary
 5.    Bind and Server options
 5.1.      Bind options
 5.2.      Server and default-server options
-5.3.      Server DNS resolution
-5.3.1.      Global overview
-5.3.2.      The resolvers section
 
 6.    HTTP header manipulation
 
@@ -371,84 +366,12 @@ HAProxy's configuration process involves 3 major sources of parameters :
 
 The configuration file syntax consists in lines beginning with a keyword
 referenced in this manual, optionally followed by one or several parameters
-delimited by spaces.
+delimited by spaces. If spaces have to be entered in strings, then they must be
+preceded by a backslash ('\') to be escaped. Backslashes also have to be
+escaped by doubling them.
 
 
-2.2. Quoting and escaping
--------------------------
-
-HAProxy's configuration introduces a quoting and escaping system similar to
-many programming languages. The configuration file supports 3 types: escaping
-with a backslash, weak quoting with double quotes, and strong quoting with
-single quotes.
-
-If spaces have to be entered in strings, then they must be escaped by preceding
-them by a backslash ('\') or by quoting them. Backslashes also have to be
-escaped by doubling or strong quoting them.
-
-Escaping is achieved by preceding a special character by a backslash ('\'):
-
-  \    to mark a space and differentiate it from a delimiter
-  \#   to mark a hash and differentiate it from a comment
-  \\   to use a backslash
-  \'   to use a single quote and differentiate it from strong quoting
-  \"   to use a double quote and differentiate it from weak quoting
-
-Weak quoting is achieved by using double quotes (""). Weak quoting prevents
-the interpretation of:
-
-       space as a parameter separator
-  '    single quote as a strong quoting delimiter
-  #    hash as a comment start
-
-Weak quoting permits the interpretation of variables, if you want to use a non
--interpreted dollar within a double quoted string, you should escape it with a
-backslash ("\$"), it does not work outside weak quoting.
-
-Interpretation of escaping and special characters are not prevented by weak
-quoting.
-
-Strong quoting is achieved by using single quotes (''). Inside single quotes,
-nothing is interpreted, it's the efficient way to quote regexes.
-
-Quoted and escaped strings are replaced in memory by their interpreted
-equivalent, it allows you to perform concatenation.
-
-  Example:
-      # those are equivalents:
-      log-format %{+Q}o\ %t\ %s\ %{-Q}r
-      log-format "%{+Q}o %t %s %{-Q}r"
-      log-format '%{+Q}o %t %s %{-Q}r'
-      log-format "%{+Q}o %t"' %s %{-Q}r'
-      log-format "%{+Q}o %t"' %s'\ %{-Q}r
-
-      # those are equivalents:
-      reqrep "^([^\ :]*)\ /static/(.*)"     \1\ /\2
-      reqrep "^([^ :]*)\ /static/(.*)"     '\1 /\2'
-      reqrep "^([^ :]*)\ /static/(.*)"     "\1 /\2"
-      reqrep "^([^ :]*)\ /static/(.*)"     "\1\ /\2"
-
-
-2.3. Environment variables
---------------------------
-
-HAProxy's configuration supports environment variables. Those variables are
-interpreted only within double quotes. Variables are expanded during the
-configuration parsing. Variable names must be preceded by a dollar ("$") and
-optionally enclosed with braces ("{}") similarly to what is done in Bourne
-shell. Variable names can contain alphanumerical characters or the character
-underscore ("_") but should not start with a digit.
-
-  Example:
-
-      bind "fd@${FD_APP1}"
-
-      log "${LOCAL_SYSLOG}:514" local0 notice   # send to local server
-
-      user "$HAPROXY_USER"
-
-
-2.4. Time format
+2.2. Time format
 ----------------
 
 Some parameters involve values representing time, such as timeouts. These
@@ -465,7 +388,7 @@ for every keyword. Supported units are :
   - d  : days.    1d = 24h = 1440m = 86400s = 86400000ms
 
 
-2.4. Examples
+2.3. Examples
 -------------
 
     # Simple configuration for an HTTP proxy listening on port 80 on all
@@ -525,7 +448,6 @@ The following keywords are supported in the "global" section :
    - chroot
    - crt-base
    - daemon
-   - external-check
    - gid
    - group
    - log
@@ -540,9 +462,6 @@ The following keywords are supported in the "global" section :
    - node
    - description
    - unix-bind
-   - 51degrees-data-file
-   - 51degrees-property-name-list
-   - 51degrees-property-seperator
 
  * Performance tuning
    - max-spread-checks
@@ -566,14 +485,9 @@ The following keywords are supported in the "global" section :
    - tune.http.cookielen
    - tune.http.maxhdr
    - tune.idletimer
-   - tune.lua.forced-yield
-   - tune.lua.maxmem
-   - tune.lua.session-timeout
-   - tune.lua.task-timeout
    - tune.maxaccept
    - tune.maxpollevents
    - tune.maxrewrite
-   - tune.pattern.cache-size
    - tune.pipesize
    - tune.rcvbuf.client
    - tune.rcvbuf.server
@@ -584,11 +498,6 @@ The following keywords are supported in the "global" section :
    - tune.ssl.force-private-cache
    - tune.ssl.maxrecord
    - tune.ssl.default-dh-param
-   - tune.ssl.ssl-ctx-cache-size
-   - tune.vars.global-max-size
-   - tune.vars.reqres-max-size
-   - tune.vars.sess-max-size
-   - tune.vars.txn-max-size
    - tune.zlib.memlevel
    - tune.zlib.windowsize
 
@@ -638,23 +547,6 @@ daemon
   operation. It is equivalent to the command line "-D" argument. It can be
   disabled by the command line "-db" argument.
 
-deviceatlas-json-file <path>
-  Sets the path of the DeviceAtlas JSON data file to be loaded by the API.
-  The path must be a valid JSON data file and accessible by Haproxy process.
-
-deviceatlas-log-level <value>
-  Sets the level of informations returned by the API. This directive is
-  optional and set to 0 by default if not set.
-
-deviceatlas-separator <char>
-  Sets the character separator for the API properties results. This directive
-  is optional and set to | by default if not set.
-
-external-check
-  Allows the use of an external agent to perform health checks.
-  This is disabled by default as a security precaution.
-  See "option external-check".
-
 gid <number>
   Changes the process' group ID to <number>. It is recommended that the group
   ID is dedicated to HAProxy or to a small set of similar daemons. HAProxy must
@@ -687,8 +579,10 @@ log <address> [len <length>] <facility> [max level [min level]]
           the chroot) and uid/gid (be sure the path is appropriately
           writeable).
 
-        You may want to reference some environment variables in the address
-        parameter, see section 2.3 about environment variables.
+        Any part of the address string may reference any number of environment
+        variables by preceding their name with a dollar sign ('$') and
+        optionally enclosing them with braces ('{}'), similarly to what is done
+        in Bourne shell.
 
   <length> is an optional maximum line length. Log lines larger than this value
            will be truncated before being sent. The reason is that syslog
@@ -729,11 +623,7 @@ log-tag <string>
   Sets the tag field in the syslog header to this string. It defaults to the
   program name as launched from the command line, which usually is "haproxy".
   Sometimes it can be useful to differentiate between multiple processes
-  running on the same host. See also the per-proxy "log-tag" directive.
-
-lua-load <file>
-  This global directive loads and executes a Lua file. This directive can be
-  used multiple times.
+  running on the same host.
 
 nbproc <number>
   Creates <number> processes when going daemon. This requires the "daemon"
@@ -788,20 +678,6 @@ ssl-default-server-options [<option>]...
   This setting is only available when support for OpenSSL was built in. It sets
   default ssl-options to force on all "server" lines. Please check the "server"
   keyword to see available options.
-
-ssl-dh-param-file <file>
-  This setting is only available when support for OpenSSL was built in. It sets
-  the default DH parameters that are used during the SSL/TLS handshake when
-  ephemeral Diffie-Hellman (DHE) key exchange is used, for all "bind" lines
-  which do not explicitely define theirs. It will be overridden by custom DH
-  parameters found in a bind certificate file if any. If custom DH parameters
-  are not specified either by using ssl-dh-param-file or by setting them directly
-  in the certificate file, pre-generated DH parameters of the size specified
-  by tune.ssl.default-dh-param will be used. Custom parameters are known to be
-  more secure and therefore their use is recommended.
-  Custom DH parameters may be generated by using the OpenSSL command
-  "openssl dhparam <size>", where size should be at least 2048, as 1024-bit DH
-  parameters should not be considered secure anymore.
 
 ssl-server-verify [none|required]
   The default behavior for SSL verify on servers side. If specified to 'none',
@@ -871,28 +747,6 @@ description <text>
   and this text is inserted into a html page so you should avoid using
   "<" and ">" characters.
 
-51degrees-data-file <file path>
-  The path of the 51Degrees data file to provide device detection services. The
-  file should be unzipped and accessible by HAProxy with relevavnt permissions.
-
-  Please note that this options is only available when haproxy has been
-  compiled with USE_51DEGREES.
-
-51degrees-property-name-list [<string>]
-  A list of 51Degrees property names to be load from the dataset. A full list
-  of names is available on the 51Degrees website:
-  https://51degrees.com/resources/property-dictionary
-
-  Please note that this options is only available when haproxy has been
-  compiled with USE_51DEGREES.
-
-51degrees-property-seperator <char>
-  A char that will be appended to every property value in a response header
-  containing 51Degrees results. If not set that will be set as ','.
-
-  Please note that this options is only available when haproxy has been
-  compiled with USE_51DEGREES.
-
 
 3.2. Performance tuning
 -----------------------
@@ -915,11 +769,7 @@ maxconn <number>
   the "select" poller cannot reliably use more than 1024 file descriptors on
   some platforms. If your platform only supports select and reports "select
   FAILED" on startup, you need to reduce maxconn until it works (slightly
-  below 500 in general). If this value is not set, it will default to the value
-  set in DEFAULT_MAXCONN at build time (reported in haproxy -vv) if no memory
-  limit is enforced, or will be computed based on the memory limit, the buffer
-  size, memory allocated to compression, SSL cache size, and use or not of SSL
-  and the associated maxsslconn (which can also be automatic).
+  below 500 in general).
 
 maxconnrate <number>
   Sets the maximum per-process number of connections per second to <number>.
@@ -976,13 +826,6 @@ maxsslconn <number>
   (since it unfortunately does not reliably check for such conditions). Note
   that the limit applies both to incoming and outgoing connections, so one
   connection which is deciphered then ciphered accounts for 2 SSL connections.
-  If this value is not set, but a memory limit is enforced, this value will be
-  automatically computed based on the memory limit, maxconn,  the buffer size,
-  memory allocated to compression, SSL cache size, and use of SSL in either
-  frontends, backends or both. If neither maxconn nor maxsslconn are specified
-  when there is a memory limit, haproxy will automatically adjust these values
-  so that 100% of the connections can be made over SSL with no risk, and will
-  consider the sides where it is enabled (frontend, backend, both).
 
 maxsslrate <number>
   Sets the maximum per-process number of SSL sessions per second to <number>.
@@ -1042,29 +885,6 @@ spread-checks <0..50, in percent>
   and +/- 50%. A value between 2 and 5 seems to show good results. The
   default value remains at 0.
 
-tune.buffers.limit <number>
-  Sets a hard limit on the number of buffers which may be allocated per process.
-  The default value is zero which means unlimited. The minimum non-zero value
-  will always be greater than "tune.buffers.reserve" and should ideally always
-  be about twice as large. Forcing this value can be particularly useful to
-  limit the amount of memory a process may take, while retaining a sane
-  behaviour. When this limit is reached, sessions which need a buffer wait for
-  another one to be released by another session. Since buffers are dynamically
-  allocated and released, the waiting time is very short and not perceptible
-  provided that limits remain reasonable. In fact sometimes reducing the limit
-  may even increase performance by increasing the CPU cache's efficiency. Tests
-  have shown good results on average HTTP traffic with a limit to 1/10 of the
-  expected global maxconn setting, which also significantly reduces memory
-  usage. The memory savings come from the fact that a number of connections
-  will not allocate 2*tune.bufsize. It is best not to touch this value unless
-  advised to do so by an haproxy core developer.
-
-tune.buffers.reserve <number>
-  Sets the number of buffers which are pre-allocated and reserved for use only
-  during memory shortage conditions resulting in failed memory allocations. The
-  minimum value is 2 and is also the default. There is no reason a user would
-  want to change this value, it's mostly aimed at haproxy core developers.
-
 tune.bufsize <number>
   Sets the buffer size to this size (in bytes). Lower values allow more
   sessions to coexist in the same amount of RAM, and higher values allow some
@@ -1123,34 +943,6 @@ tune.idletimer <timeout>
   clicking). There should be not reason for changing this value. Please check
   tune.ssl.maxrecord below.
 
-tune.lua.forced-yield <number>
-  This directive forces the Lua engine to execute a yield each <number> of
-  instructions executed. This permits interruptng a long script and allows the
-  HAProxy scheduler to process other tasks like accepting connections or
-  forwarding traffic. The default value is 10000 instructions. If HAProxy often
-  executes some Lua code but more reactivity is required, this value can be
-  lowered. If the Lua code is quite long and its result is absolutely required
-  to process the data, the <number> can be increased.
-
-tune.lua.maxmem
-  Sets the maximum amount of RAM in megabytes per process usable by Lua. By
-  default it is zero which means unlimited. It is important to set a limit to
-  ensure that a bug in a script will not result in the system running out of
-  memory.
-
-tune.lua.session-timeout <timeout>
-  This is the execution timeout for the Lua sessions. This is useful for
-  preventing infinite loops or spending too much time in Lua. This timeout has a
-  priority over other timeouts. For example, if this timeout is set to 4s and
-  you run a 5s sleep, the code will be interrupted with an error after waiting
-  4s.
-
-tune.lua.task-timeout <timeout>
-  Purpose is the same as "tune.lua.session-timeout", but this timeout is
-  dedicated to the tasks. By default, this timeout isn't set because a task may
-  remain alive during of the lifetime of HAProxy. For example, a task used to
-  check servers.
-
 tune.maxaccept <number>
   Sets the maximum number of consecutive connections a process may accept in a
   row before switching to other work. In single process mode, higher numbers
@@ -1181,25 +973,6 @@ tune.maxrewrite <number>
   to about 1024. It is automatically readjusted to half of bufsize if it is
   larger than that. This means you don't have to worry about it when changing
   bufsize.
-
-tune.pattern.cache-size <number>
-  Sets the size of the pattern lookup cache to <number> entries. This is an LRU
-  cache which reminds previous lookups and their results. It is used by ACLs
-  and maps on slow pattern lookups, namely the ones using the "sub", "reg",
-  "dir", "dom", "end", "bin" match methods as well as the case-insensitive
-  strings. It applies to pattern expressions which means that it will be able
-  to memorize the result of a lookup among all the patterns specified on a
-  configuration line (including all those loaded from files). It automatically
-  invalidates entries which are updated using HTTP actions or on the CLI. The
-  default cache size is set to 10000 entries, which limits its footprint to
-  about 5 MB on 32-bit systems and 8 MB on 64-bit systems. There is a very low
-  risk of collision in this cache, which is in the order of the size of the
-  cache divided by 2^64. Typically, at 10000 requests per second with the
-  default cache size of 10000 entries, there's 1% chance that a brute force
-  attack could cause a single collision after 60 years, or 0.1% after 6 years.
-  This is considered much lower than the risk of a memory corruption caused by
-  aging components. If this is not acceptable, the cache can be disabled by
-  setting this parameter to 0.
 
 tune.pipesize <number>
   Sets the kernel pipe buffer size to this size (in bytes). By default, pipes
@@ -1283,29 +1056,7 @@ tune.ssl.default-dh-param <number>
   this maximum value. Default value if 1024. Only 1024 or higher values are
   allowed. Higher values will increase the CPU load, and values greater than
   1024 bits are not supported by Java 7 and earlier clients. This value is not
-  used if static Diffie-Hellman parameters are supplied either directly
-  in the certificate file or by using the ssl-dh-param-file parameter.
-
-tune.ssl.ssl-ctx-cache-size <number>
-  Sets the size of the cache used to store generated certificates to <number>
-  entries. This is a LRU cache. Because generating a SSL certificate
-  dynamically is expensive, they are cached. The default cache size is set to
-  1000 entries.
-
-tune.vars.global-max-size <size>
-tune.vars.reqres-max-size <size>
-tune.vars.sess-max-size <size>
-tune.vars.txn-max-size <size>
-  These four tunes helps to manage the allowed amount of memory used by the
-  variables system. "global" limits the memory for all the systems. "sess" limit
-  the memory by session, "txn" limits the memory by transaction and "reqres"
-  limits the memory for each request or response processing. during the
-  accounting, "sess" embbed "txn" and "txn" embed "reqres".
-
-  By example, we considers that "tune.vars.sess-max-size" is fixed to 100,
-  "tune.vars.txn-max-size" is fixed to 100, "tune.vars.reqres-max-size" is
-  also fixed to 100. If we create a variable "txn.var" that contains 100 bytes,
-  we cannot create any more variable in the other contexts.
+  used if static Diffie-Hellman parameters are supplied via the certificate file.
 
 tune.zlib.memlevel <number>
   Sets the memLevel parameter in zlib initialization for each session. It
@@ -1381,18 +1132,17 @@ user <username> [password|insecure-password <password>]
 
 3.5. Peers
 ----------
-It is possible to propagate entries of any data-types in stick-tables between
-several haproxy instances over TCP connections in a multi-master fashion. Each
-instance pushes its local updates and insertions to remote peers. The pushed
-values overwrite remote ones without aggregation. Interrupted exchanges are
-automatically detected and recovered from the last known point.
-In addition, during a soft restart, the old process connects to the new one
-using such a TCP connection to push all its entries before the new process
-tries to connect to other peers. That ensures very fast replication during a
-reload, it typically takes a fraction of a second even for large tables.
-Note that Server IDs are used to identify servers remotely, so it is important
-that configurations look similar or at least that the same IDs are forced on
-each server on all participants.
+It is possible to synchronize server entries in stick tables between several
+haproxy instances over TCP connections in a multi-master fashion. Each instance
+pushes its local updates and insertions to remote peers. Server IDs are used to
+identify servers remotely, so it is important that configurations look similar
+or at least that the same IDs are forced on each server on all participants.
+Interrupted exchanges are automatically detected and recovered from the last
+known point. In addition, during a soft restart, the old process connects to
+the new one using such a TCP connection to push all its entries before the new
+process tries to connect to other peers. That ensures very fast replication
+during a reload, it typically takes a fraction of a second even for large
+tables.
 
 peers <peersect>
   Creates a new peer list with name <peersect>. It is an independent section,
@@ -1422,8 +1172,9 @@ peer <peername> <ip>:<port>
   peer name. This makes it easier to maintain coherent configuration files
   across all peers.
 
-  You may want to reference some environment variables in the address
-  parameter, see section 2.3 about environment variables.
+  Any part of the address string may reference any number of environment
+  variables by preceding their name with a dollar sign ('$') and optionally
+  enclosing them with braces ('{}'), similarly to what is done in Bourne shell.
 
   Example:
     peers mypeers
@@ -1441,41 +1192,11 @@ peer <peername> <ip>:<port>
         server srv2 192.168.0.31:80
 
 
-3.6. Mailers
-------------
-It is possible to send email alerts when the state of servers changes.
-If configured email alerts are sent to each mailer that is configured
-in a mailers section. Email is sent to mailers using SMTP.
-
-mailer <mailersect>
-  Creates a new mailer list with the name <mailersect>. It is an
-  independent section which is referenced by one or more proxies.
-
-mailer <mailername> <ip>:<port>
-  Defines a mailer inside a mailers section.
-
-  Example:
-    mailers mymailers
-        mailer smtp1 192.168.0.1:587
-        mailer smtp2 192.168.0.2:587
-
-    backend mybackend
-        mode tcp
-        balance roundrobin
-
-        email-alert mailers mymailers
-        email-alert from test1@horms.org
-        email-alert to test2@horms.org
-
-        server srv1 192.168.0.30:80
-        server srv2 192.168.0.31:80
-
-
 4. Proxies
 ----------
 
 Proxy configuration can be located in a set of sections :
- - defaults [<name>]
+ - defaults <name>
  - frontend <name>
  - backend  <name>
  - listen   <name>
@@ -1586,17 +1307,11 @@ clitimeout                  (deprecated)  X          X         X         -
 compression                               X          X         X         X
 contimeout                  (deprecated)  X          -         X         X
 cookie                                    X          -         X         X
-declare capture                           -          X         X         -
 default-server                            X          -         X         X
 default_backend                           X          X         X         -
 description                               -          X         X         X
 disabled                                  X          X         X         X
 dispatch                                  -          -         X         X
-email-alert from                          X          X         X         X
-email-alert level                         X          X         X         X
-email-alert mailers                       X          X         X         X
-email-alert myhostname                    X          X         X         X
-email-alert to                            X          X         X         X
 enabled                                   X          X         X         X
 errorfile                                 X          X         X         X
 errorloc                                  X          X         X         X
@@ -1617,7 +1332,6 @@ id                                        -          X         X         X
 ignore-persist                            -          X         X         X
 log                                  (*)  X          X         X         X
 log-format                                X          X         X         -
-log-tag                                   X          X         X         X
 max-keep-alive-queue                      X          -         X         X
 maxconn                                   X          X         X         -
 mode                                      X          X         X         X
@@ -1636,7 +1350,6 @@ option dontlognull                   (*)  X          X         X         -
 option forceclose                    (*)  X          X         X         X
 -- keyword -------------------------- defaults - frontend - listen -- backend -
 option forwardfor                         X          X         X         X
-option http-buffer-request           (*)  X          X         X         X
 option http-ignore-probes            (*)  X          X         X         -
 option http-keep-alive               (*)  X          X         X         X
 option http-no-delay                 (*)  X          X         X         X
@@ -1650,7 +1363,6 @@ option httplog                            X          X         X         X
 option http_proxy                    (*)  X          X         X         X
 option independent-streams           (*)  X          X         X         X
 option ldap-check                         X          -         X         X
-option external-check                     X          -         X         X
 option log-health-checks             (*)  X          -         X         X
 option log-separate-errors           (*)  X          X         X         -
 option logasap                       (*)  X          X         X         -
@@ -1675,8 +1387,6 @@ option tcp-smart-connect             (*)  X          -         X         X
 option tcpka                              X          X         X         X
 option tcplog                             X          X         X         X
 option transparent                   (*)  X          -         X         X
-external-check command                    X          -         X         X
-external-check path                       X          -         X         X
 persist rdp-cookie                        X          -         X         X
 rate-limit sessions                       X          X         X         -
 redirect                                  -          X         X         X
@@ -1691,10 +1401,12 @@ reqidel                                   -          X         X         X
 reqideny                                  -          X         X         X
 reqipass                                  -          X         X         X
 reqirep                                   -          X         X         X
+reqisetbe                                 -          X         X         X
 reqitarpit                                -          X         X         X
 reqpass                                   -          X         X         X
 reqrep                                    -          X         X         X
 -- keyword -------------------------- defaults - frontend - listen -- backend -
+reqsetbe                                  -          X         X         X
 reqtarpit                                 -          X         X         X
 retries                                   X          -         X         X
 rspadd                                    -          X         X         X
@@ -2113,9 +1825,10 @@ bind /<path> [, ...] [param*]
                     - 'fd@<n>' -> use file descriptor <n> inherited from the
                       parent. The fd must be bound and may or may not already
                       be listening.
-                  You may want to reference some environment variables in the
-                  address parameter, see section 2.3 about environment
-                  variables.
+                  Any part of the address string may reference any number of
+                  environment variables by preceding their name with a dollar
+                  sign ('$') and optionally enclosing them with braces ('{}'),
+                  similarly to what is done in Bourne shell.
 
     <port_range>  is either a unique TCP port, or a port range for which the
                   proxy will accept connections for the IP address specified
@@ -2173,7 +1886,7 @@ bind /<path> [, ...] [param*]
             bind unix@ssl-frontend.sock user root mode 600 accept-proxy
 
         listen external_bind_app1
-            bind "fd@${FD_APP1}"
+            bind fd@${FD_APP1}
 
   See also : "source", "option forwardfor", "unix-bind" and the PROXY protocol
              documentation, and section 5 about bind options.
@@ -2432,28 +2145,19 @@ compression offload
     offload  makes haproxy work as a compression offloader only (see notes).
 
   The currently supported algorithms are :
-    identity     this is mostly for debugging, and it was useful for developing
-                 the compression feature. Identity does not apply any change on
-                 data.
+    identity  this is mostly for debugging, and it was useful for developing
+              the compression feature. Identity does not apply any change on
+              data.
 
-    gzip         applies gzip compression. This setting is only available when
-                 support for zlib was built in.
+    gzip      applies gzip compression. This setting is only available when
+              support for zlib was built in.
 
-    deflate      same as "gzip", but with deflate algorithm and zlib format.
-                 Note that this algorithm has ambiguous support on many
-                 browsers and no support at all from recent ones. It is
-                 strongly recommended not to use it for anything else than
-                 experimentation. This setting is only available when support
-                 for zlib was built in.
-
-    raw-deflate  same as "deflate" without the zlib wrapper, and used as an
-                 alternative when the browser wants "deflate". All major
-                 browsers understand it and despite violating the standards,
-                 it is known to work better than "deflate", at least on MSIE
-                 and some versions of Safari. Do not use it in conjunction
-                 with "deflate", use either one or the other since both react
-                 to the same Accept-Encoding token. This setting is only
-                 available when support for zlib was built in.
+    deflate   same as gzip, but with deflate algorithm and zlib format.
+              Note that this algorithm has ambiguous support on many browsers
+              and no support at all from recent ones. It is strongly
+              recommended not to use it for anything else than experimentation.
+              This setting is only available when support for zlib was built
+              in.
 
   Compression will be activated depending on the Accept-Encoding request
   header. With identity, it does not take care of that header.
@@ -2702,22 +2406,6 @@ cookie <name> [ rewrite | insert | prefix ] [ indirect ] [ nocache ]
              and "ignore-persist".
 
 
-declare capture [ request | response ] len <length>
-  Declares a capture slot.
-  May be used in sections :   defaults | frontend | listen | backend
-                                 no    |    yes   |   yes  |   no
-  Arguments:
-    <length> is the length allowed for the capture.
-
-  This declaration is only available in the frontend or listen section, but the
-  reserved slot can be used in the backends. The "request" keyword allocates a
-  capture slot for use in the request, and "response" allocates a capture slot
-  for use in the response.
-
-  See also: "capture-req", "capture-res" (sample converters),
-            "http-request capture" and "http-response capture".
-
-
 default-server [param*]
   Change default options for a server in a backend
   May be used in sections :   defaults | frontend | listen | backend
@@ -2752,7 +2440,7 @@ default_backend <backend>
         use_backend     static   if  url_css url_img extension_img
         default_backend dynamic
 
-  See also : "use_backend"
+  See also : "use_backend", "reqsetbe", "reqisetbe"
 
 
 description <string>
@@ -2825,8 +2513,7 @@ errorfile <code> <file>
                                  yes   |    yes   |   yes  |   yes
   Arguments :
     <code>    is the HTTP status code. Currently, HAProxy is capable of
-              generating codes 200, 400, 403, 405, 408, 429, 500, 502, 503, and
-              504.
+              generating codes 200, 400, 403, 408, 500, 502, 503, and 504.
 
     <file>    designates a file containing the full HTTP response. It is
               recommended to follow the common practice of appending ".http" to
@@ -2926,108 +2613,6 @@ errorloc303 <code> <url>
   it, but no such problem has been reported till now.
 
   See also : "errorfile", "errorloc", "errorloc302"
-
-
-email-alert from <emailaddr>
-  Declare the from email address to be used in both the envelope and header
-  of email alerts.  This is the address that email alerts are sent from.
-  May be used in sections:    defaults | frontend | listen | backend
-                                 yes   |    yes   |   yes  |   yes
-
-  Arguments :
-
-    <emailaddr> is the from email address to use when sending email alerts
-
-  Also requires "email-alert mailers" and "email-alert to" to be set
-  and if so sending email alerts is enabled for the proxy.
-
-  See also : "email-alert level", "email-alert mailers",
-             "email-alert myhostname", "email-alert to", section 3.6 about mailers.
-
-
-email-alert level <level>
-  Declare the maximum log level of messages for which email alerts will be
-  sent. This acts as a filter on the sending of email alerts.
-  May be used in sections:    defaults | frontend | listen | backend
-                                 yes   |    yes   |   yes  |   yes
-
-  Arguments :
-
-    <level> One of the 8 syslog levels:
-              emerg alert crit err warning notice info  debug
-            The above syslog levels are ordered from lowest to highest.
-
-  By default level is alert
-
-  Also requires "email-alert from", "email-alert mailers" and
-  "email-alert to" to be set and if so sending email alerts is enabled
-  for the proxy.
-
-  Alerts are sent when :
-
-  * An un-paused server is marked as down and <level> is alert or lower
-  * A paused server is marked as down and <level> is notice or lower
-  * A server is marked as up or enters the drain state and <level>
-    is notice or lower
-  * "option log-health-checks" is enabled, <level> is info or lower,
-     and a health check status update occurs
-
-  See also : "email-alert from", "email-alert mailers",
-             "email-alert myhostname", "email-alert to",
-             section 3.6 about mailers.
-
-
-email-alert mailers <mailersect>
-  Declare the mailers to be used when sending email alerts
-  May be used in sections:    defaults | frontend | listen | backend
-                                 yes   |    yes   |   yes  |   yes
-
-  Arguments :
-
-    <mailersect> is the name of the mailers section to send email alerts.
-
-  Also requires "email-alert from" and "email-alert to" to be set
-  and if so sending email alerts is enabled for the proxy.
-
-  See also : "email-alert from", "email-alert level", "email-alert myhostname",
-             "email-alert to", section 3.6 about mailers.
-
-
-email-alert myhostname <hostname>
-  Declare the to hostname address to be used when communicating with
-  mailers.
-  May be used in sections:    defaults | frontend | listen | backend
-                                 yes   |    yes   |   yes  |   yes
-
-  Arguments :
-
-    <emailaddr> is the to email address to use when sending email alerts
-
-  By default the systems hostname is used.
-
-  Also requires "email-alert from", "email-alert mailers" and
-  "email-alert to" to be set and if so sending email alerts is enabled
-  for the proxy.
-
-  See also : "email-alert from", "email-alert level", "email-alert mailers",
-             "email-alert to", section 3.6 about mailers.
-
-
-email-alert to <emailaddr>
-  Declare both the recipent address in the envelope and to address in the
-  header of email alerts. This is the address that email alerts are sent to.
-  May be used in sections:    defaults | frontend | listen | backend
-                                 yes   |    yes   |   yes  |   yes
-
-  Arguments :
-
-    <emailaddr> is the to email address to use when sending email alerts
-
-  Also requires "email-alert mailers" and "email-alert to" to be set
-  and if so sending email alerts is enabled for the proxy.
-
-  See also : "email-alert from", "email-alert level", "email-alert mailers",
-             "email-alert myhostname", section 3.6 about mailers.
 
 
 force-persist { if | unless } <condition>
@@ -3173,11 +2758,6 @@ hash-type <method> <function> <modifier>
               djb2+avalanche for consistent hashing or when hashing on numeric
               data such as a source IP address or a visitor identifier in a URL
               parameter.
-
-       crc32  this is the most common CRC32 implementation as used in Ethernet,
-              gzip, PNG, etc. It is slower than the other ones but may provide
-              a better distribution or less predictable results especially when
-              used on strings.
 
     <modifier> indicates an optional method applied after hashing the key :
 
@@ -3325,14 +2905,6 @@ http-check send-state
   checks on the total number before transition, just as appears in the stats
   interface. Next headers are in the form "<variable>=<value>", indicating in
   no specific order some values available in the stats interface :
-    - a variable "address", containing the address of the backend server.
-      This corresponds to the <address> field in the server declaration. For
-      unix domain sockets, it will read "unix".
-
-    - a variable "port", containing the port of the backend server. This
-      corresponds to the <port> field in the server declaration. For unix
-      domain sockets, it will read "unix".
-
     - a variable "name", containing the name of the backend followed by a slash
       ("/") then the name of the server. This can be used when a server is
       checked in multiple backends.
@@ -3360,19 +2932,14 @@ http-check send-state
 
 http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
               add-header <name> <fmt> | set-header <name> <fmt> |
-              capture <sample> [ len <length> | id <id> ] |
               del-header <name> | set-nice <nice> | set-log-level <level> |
               replace-header <name> <match-regex> <replace-fmt> |
               replace-value <name> <match-regex> <replace-fmt> |
-              set-method <fmt> | set-path <fmt> | set-query <fmt> |
-              set-uri <fmt> | set-tos <tos> | set-mark <mark> |
+              set-tos <tos> | set-mark <mark> |
               add-acl(<file name>) <key fmt> |
               del-acl(<file name>) <key fmt> |
               del-map(<file name>) <key fmt> |
-              set-map(<file name>) <key fmt> <value fmt> |
-              set-var(<var name>) <expr> |
-              { track-sc0 | track-sc1 | track-sc2 } <key> [table <table>] |
-              lua <function name>
+              set-map(<file name>) <key fmt> <value fmt>
              }
              [ { if | unless } <condition> ]
   Access control for Layer 7 requests
@@ -3477,42 +3044,6 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
 
         X-Forwarded-For: 172.16.10.1, 172.16.13.24, 10.0.0.37
 
-    - "set-method" rewrites the request method with the result of the
-      evaluation of format string <fmt>. There should be very few valid reasons
-      for having to do so as this is more likely to break something than to fix
-      it.
-
-    - "set-path" rewrites the request path with the result of the evaluation of
-      format string <fmt>. The query string, if any, is left intact. If a
-      scheme and authority is found before the path, they are left intact as
-      well. If the request doesn't have a path ("*"), this one is replaced with
-      the format. This can be used to prepend a directory component in front of
-      a path for example. See also "set-query" and "set-uri".
-
-      Example :
-          # prepend the host name before the path
-          http-request set-path /%[hdr(host)]%[path]
-
-    - "set-query" rewrites the request's query string which appears after the
-      first question mark ("?") with the result of the evaluation of format
-      string <fmt>. The part prior to the question mark is left intact. If the
-      request doesn't contain a question mark and the new value is not empty,
-      then one is added at the end of the URI, followed by the new value. If
-      a question mark was present, it will never be removed even if the value
-      is empty. This can be used to add or remove parameters from the query
-      string. See also "set-query" and "set-uri".
-
-      Example :
-          # replace "%3D" with "=" in the query string
-          http-request set-query %[query,regsub(%3D,=,g)]
-
-    - "set-uri" rewrites the request URI with the result of the evaluation of
-      format string <fmt>. The scheme, authority, path and query string are all
-      replaced at once. This can be used to rewrite hosts in front of proxies,
-      or to perform complex modifications to the URI such as moving parts
-      between the path and the query string. See also "set-path" and
-      "set-query".
-
     - "set-nice" sets the "nice" factor of the current request being processed.
       It only has effect against the other requests being processed at the same
       time. The default value is 0, unless altered by the "nice" setting on the
@@ -3580,89 +3111,6 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
       with large lists! It is the equivalent of the "set map" command from the
       stats socket, but can be triggered by an HTTP request.
 
-    - capture <sample> [ len <length> | id <id> ] :
-      captures sample expression <sample> from the request buffer, and converts
-      it to a string of at most <len> characters. The resulting string is
-      stored into the next request "capture" slot, so it will possibly appear
-      next to some captured HTTP headers. It will then automatically appear in
-      the logs, and it will be possible to extract it using sample fetch rules
-      to feed it into headers or anything. The length should be limited given
-      that this size will be allocated for each capture during the whole
-      session life. Please check section 7.3 (Fetching samples) and "capture
-      request header" for more information.
-
-      If the keyword "id" is used instead of "len", the action tries to store
-      the captured string in a previously declared capture slot. This is useful
-      to run captures in backends. The slot id can be declared by a previous
-      directive "http-request capture" or with the "declare capture" keyword.
-
-    - { track-sc0 | track-sc1 | track-sc2 } <key> [table <table>] :
-      enables tracking of sticky counters from current request. These rules
-      do not stop evaluation and do not change default action. Three sets of
-      counters may be simultaneously tracked by the same connection. The first
-      "track-sc0" rule executed enables tracking of the counters of the
-      specified table as the first set. The first "track-sc1" rule executed
-      enables tracking of the counters of the specified table as the second
-      set. The first "track-sc2" rule executed enables tracking of the
-      counters of the specified table as the third set. It is a recommended
-      practice to use the first set of counters for the per-frontend counters
-      and the second set for the per-backend ones. But this is just a
-      guideline, all may be used everywhere.
-
-      These actions take one or two arguments :
-        <key>   is mandatory, and is a sample expression rule as described
-                in section 7.3. It describes what elements of the incoming
-                request or connection will be analysed, extracted, combined,
-                and used to select which table entry to update the counters.
-
-        <table> is an optional table to be used instead of the default one,
-                which is the stick-table declared in the current proxy. All
-                the counters for the matches and updates for the key will
-                then be performed in that table until the session ends.
-
-      Once a "track-sc*" rule is executed, the key is looked up in the table
-      and if it is not found, an entry is allocated for it. Then a pointer to
-      that entry is kept during all the session's life, and this entry's
-      counters are updated as often as possible, every time the session's
-      counters are updated, and also systematically when the session ends.
-      Counters are only updated for events that happen after the tracking has
-      been started. As an exception, connection counters and request counters
-      are systematically updated so that they reflect useful information.
-
-      If the entry tracks concurrent connection counters, one connection is
-      counted for as long as the entry is tracked, and the entry will not
-      expire during that time. Tracking counters also provides a performance
-      advantage over just checking the keys, because only one table lookup is
-      performed for all ACL checks that make use of it.
-
-    - "lua" is used to run a Lua function if the action is executed. The single
-      parameter is the name of the function to run. The prototype of the
-      function is documented in the API documentation.
-
-    - set-var(<var-name>) <expr> :
-      Is used to set the contents of a variable. The variable is declared
-      inline.
-
-        <var-name> The name of the variable starts by an indication about its
-                   scope. The allowed scopes are:
-                     "sess" : the variable is shared with all the session,
-                     "txn"  : the variable is shared with all the transaction
-                              (request and response)
-                     "req"  : the variable is shared only during the request
-                              processing
-                     "res"  : the variable is shared only during the response
-                              processing.
-                   This prefix is followed by a name. The separator is a '.'.
-                   The name may only contain characters 'a-z', 'A-Z', '0-9',
-                   and '_'.
-
-         <expr>    Is a standard HAProxy expression formed by a sample-fetch
-                   followed by some converters.
-
-      Example:
-
-         http-request set-var(req.my_var) req.fhdr(user-agent),lower
-
   There is no limit to the number of http-request statements per instance.
 
   It is important to know that http-request rules are processed very early in
@@ -3719,7 +3167,6 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
              about ACL usage.
 
 http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
-                capture <sample> id <id> | redirect <rule> |
                 set-header <name> <fmt> | del-header <name> |
                 replace-header <name> <regex-match> <replace-fmt> |
                 replace-value <name> <regex-match> <replace-fmt> |
@@ -3727,9 +3174,7 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
                 add-acl(<file name>) <key fmt> |
                 del-acl(<file name>) <key fmt> |
                 del-map(<file name>) <key fmt> |
-                set-map(<file name>) <key fmt> <value fmt> |
-                set-var(<var-name>) <expr> |
-                lua <function name>
+                set-map(<file name>) <key fmt> <value fmt>
               }
               [ { if | unless } <condition> ]
   Access control for Layer 7 responses
@@ -3877,56 +3322,6 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
       with large lists! It is the equivalent of the "set map" command from the
       stats socket, but can be triggered by an HTTP response.
 
-    - "lua" is used to run a Lua function if the action is executed. The single
-      parameter is the name of the function to run. The prototype of the
-      function is documented in the API documentation.
-
-    - capture <sample> id <id> :
-      captures sample expression <sample> from the response buffer, and converts
-      it to a string. The resulting string is stored into the next request
-      "capture" slot, so it will possibly appear next to some captured HTTP
-      headers. It will then automatically appear in the logs, and it will be
-      possible to extract it using sample fetch rules to feed it into headers or
-      anything. Please check section 7.3 (Fetching samples) and "capture
-      response header" for more information.
-
-      The keyword "id" is the id of the capture slot which is used for storing
-      the string. The capture slot must be defined in an associated frontend.
-      This is useful to run captures in backends. The slot id can be declared by
-      a previous directive "http-response capture" or with the "declare capture"
-      keyword.
-
-    - "redirect" : this performs an HTTP redirection based on a redirect rule.
-      This supports a format string similarly to "http-request redirect" rules,
-      with the exception that only the "location" type of redirect is possible
-      on the response. See the "redirect" keyword for the rule's syntax. When
-      a redirect rule is applied during a response, connections to the server
-      are closed so that no data can be forwarded from the server to the client.
-
-    - set-var(<var-name>) expr:
-      Is used to set the contents of a variable. The variable is declared
-      inline.
-
-        <var-name> The name of the variable starts by an indication about its
-                   scope. The allowed scopes are:
-                     "sess" : the variable is shared with all the session,
-                     "txn"  : the variable is shared with all the transaction
-                              (request and response)
-                     "req"  : the variable is shared only during the request
-                              processing
-                     "res"  : the variable is shared only during the response
-                              processing.
-                   This prefix is followed by a name. The separator is a '.'.
-                   The name may only contain characters 'a-z', 'A-Z', '0-9',
-                   and '_'.
-
-         <expr>    Is a standard HAProxy expression formed by a sample-fetch
-                   followed by some converters.
-
-      Example:
-
-         http-response set-var(sess.last_redir) res.hdr(location)
-
   There is no limit to the number of http-response statements per instance.
 
   It is important to know that http-response rules are processed very early in
@@ -4041,8 +3436,10 @@ no log
                  inside the chroot) and uid/gid (be sure the path is
                  appropriately writeable).
 
-              You may want to reference some environment variables in the
-              address parameter, see section 2.3 about environment variables.
+               Any part of the address string may reference any number of
+               environment variables by preceding their name with a dollar
+               sign ('$') and optionally enclosing them with braces ('{}'),
+               similarly to what is done in Bourne shell.
 
     <length>   is an optional maximum line length. Log lines larger than this
                value will be truncated before being sent. The reason is that
@@ -4089,7 +3486,7 @@ no log
     log global
     log 127.0.0.1:514 local0 notice         # only send important events
     log 127.0.0.1:514 local0 notice notice  # same but limit output level
-    log "${LOCAL_SYSLOG}:514" local0 notice   # send to local server
+    log ${LOCAL_SYSLOG}:514 local0 notice   # send to local server
 
 
 log-format <string>
@@ -4103,20 +3500,6 @@ log-format <string>
   the same log format. Please see section 8.2.4 which covers the log format
   string in depth.
 
-log-tag <string>
-  Specifies the log tag to use for all outgoing logs
-  May be used in sections:    defaults | frontend | listen | backend
-                                 yes   |    yes   |   yes  |   yes
-
-  Sets the tag field in the syslog header to this string. It defaults to the
-  log-tag set in the global section, otherwise the program name as launched
-  from the command line, which usually is "haproxy". Sometimes it can be useful
-  to differentiate between multiple processes running on the same host, or to
-  differentiate customer instances running in the same process. In the backend,
-  logs about servers up/down will use this tag. As a hint, it can be convenient
-  to set a log-tag related to a hosted customer in a defaults section then put
-  all the frontends and backends for that customer, then start another customer
-  in a new defaults section. See also the global "log-tag" directive.
 
 max-keep-alive-queue <value>
   Set the maximum server queue size for maintaining keep-alive connections
@@ -4387,9 +3770,8 @@ no option accept-invalid-http-request
   ('`'), 123 ('{'), 124 ('|'), 125 ('}'), 127 (delete) and anything above are
   not allowed at all. Haproxy always blocks a number of them (0..32, 127). The
   remaining ones are blocked by default unless this option is enabled. This
-  option also relaxes the test on the HTTP version, it allows HTTP/0.9 requests
-  to pass through (no version specified) and multiple digits for both the major
-  and the minor version.
+  option also relaxes the test on the HTTP version format, it allows multiple
+  digits for both the major and the minor version.
 
   This option should never be enabled by default as it hides application bugs
   and open security breaches. It should only be deployed after a problem has
@@ -4709,28 +4091,6 @@ option forwardfor [ except <network> ] [ header <name> ] [ if-none ]
              "option forceclose", "option http-keep-alive"
 
 
-option http-buffer-request
-no option http-buffer-request
-  Enable or disable waiting for whole HTTP request body before proceeding
-  May be used in sections :   defaults | frontend | listen | backend
-                                 yes   |    yes   |   yes  |   yes
-  Arguments : none
-
-  It is sometimes desirable to wait for the body of an HTTP request before
-  taking a decision. This is what is being done by "balance url_param" for
-  example. The first use case is to buffer requests from slow clients before
-  connecting to the server. Another use case consists in taking the routing
-  decision based on the request body's contents. This option placed in a
-  frontend or backend forces the HTTP processing to wait until either the whole
-  body is received, or the request buffer is full, or the first chunk is
-  complete in case of chunked encoding. It can have undesired side effects with
-  some applications abusing HTTP by expecting unbufferred transmissions between
-  the frontend and the backend, so this should definitely not be used by
-  default.
-
-  See also : "option http-no-delay"
-
-
 option http-ignore-probes
 no option http-ignore-probes
   Enable or disable logging of null connections and request timeouts
@@ -4855,8 +4215,6 @@ no option http-no-delay
   is discovered. The impact of using this option is an increase of bandwidth
   usage and CPU usage, which may significantly lower performance in high
   latency environments.
-
-  See also : "option http-buffer-request"
 
 
 option http-pretend-keepalive
@@ -5228,20 +4586,6 @@ option ldap-check
   See also : "option httpchk"
 
 
-option external-check
-  Use external processes for server health checks
-  May be used in sections :   defaults | frontend | listen | backend
-                                 yes   |    no    |   yes  |   yes
-
-  It is possible to test the health of a server using an external command.
-  This is achieved by running the executable set using "external-check
-  command".
-
-  Requires the "external-check" global to be set.
-
-  See also : "external-check", "external-check command", "external-check path"
-
-
 option log-health-checks
 no option log-health-checks
   Enable or disable logging of health checks status updates
@@ -5527,22 +4871,11 @@ no option prefer-last-server
 
 
 option redispatch
-option redispatch <interval>
 no option redispatch
   Enable or disable session redistribution in case of connection failure
   May be used in sections:    defaults | frontend | listen | backend
                                  yes   |    no    |   yes  |   yes
-  Arguments :
-    <interval> The optional integer value that controls how often redispatches
-               occur when retrying connections. Positive value P indicates a
-               redispatch is desired on every Pth retry, and negative value
-               N indicate a redispath is desired on the Nth retry prior to the
-               last retry. For example, the default of -1 preserves the
-               historical behaviour of redispatching on the last retry, a
-               positive value of 1 would indicate a redispatch on every retry,
-               and a positive value of 3 would indicate a redispatch on every
-               third retry. You can disable redispatches with a value of 0.
-
+  Arguments : none
 
   In HTTP mode, if a server designated by a cookie is down, clients may
   definitely stick to it because they cannot flush the cookie, so they will not
@@ -5551,7 +4884,7 @@ no option redispatch
   Specifying "option redispatch" will allow the proxy to break their
   persistence and redistribute them to a working server.
 
-  It also allows to retry connections to another server in case of multiple
+  It also allows to retry last connection to another server in case of multiple
   connection failures. Of course, it requires having "retries" set to a nonzero
   value.
 
@@ -5815,47 +5148,34 @@ option tcp-check
       In this mode, many questions may be sent and many answers may be
       analysed.
 
-    A fifth mode can be used to insert comments in different steps of the
-    script.
-
-    For each tcp-check rule you create, you can add a "comment" directive,
-    followed by a string. This string will be reported in the log and stderr
-    in debug mode. It is useful to make user-friendly error reporting.
-    The "comment" is of course optional.
-
-
   Examples :
          # perform a POP check (analyse only server's banner)
          option tcp-check
-         tcp-check expect string +OK\ POP3\ ready comment POP\ protocol
+         tcp-check expect string +OK\ POP3\ ready
 
          # perform an IMAP check (analyse only server's banner)
          option tcp-check
-         tcp-check expect string *\ OK\ IMAP4\ ready comment IMAP\ protocol
+         tcp-check expect string *\ OK\ IMAP4\ ready
 
          # look for the redis master server after ensuring it speaks well
          # redis protocol, then it exits properly.
          # (send a command then analyse the response 3 times)
          option tcp-check
-         tcp-check comment PING\ phase
          tcp-check send PING\r\n
-         tcp-check expect +PONGe
-         tcp-check comment role\ check
+         tcp-check expect +PONG
          tcp-check send info\ replication\r\n
          tcp-check expect string role:master
-         tcp-check comment QUIT\ phase
          tcp-check send QUIT\r\n
          tcp-check expect string +OK
 
          forge a HTTP request, then analyse the response
          (send many headers before analyzing)
          option tcp-check
-         tcp-check comment forge\ and\ send\ HTTP\ request
          tcp-check send HEAD\ /\ HTTP/1.1\r\n
          tcp-check send Host:\ www.mydomain.com\r\n
          tcp-check send User-Agent:\ HAProxy\ tcpcheck\r\n
          tcp-check send \r\n
-         tcp-check expect rstring HTTP/1\..\ (2..|3..) comment check\ HTTP\ response
+         tcp-check expect rstring HTTP/1\..\ (2..|3..)
 
 
   See also : "tcp-check expect", "tcp-check send"
@@ -6000,82 +5320,6 @@ no option transparent
 
   See also: the "usesrc" argument of the "source" keyword, and the
             "transparent" option of the "bind" keyword.
-
-
-external-check command <command>
-  Executable to run when performing an external-check
-  May be used in sections :   defaults | frontend | listen | backend
-                                 yes   |    no    |   yes  |   yes
-
-  Arguments :
-    <command> is the external command to run
-
-  The arguments passed to the to the command are:
-
-  <proxy_address> <proxy_port> <server_address> <server_port>
-
-  The <proxy_address> and <proxy_port> are derived from the first listener
-  that is either IPv4, IPv6 or a UNIX socket. In the case of a UNIX socket
-  listener the proxy_address will be the path of the socket and the
-  <proxy_port> will be the string "NOT_USED". In a backend section, it's not
-  possible to determine a listener, and both <proxy_address> and <proxy_port>
-  will have the string value "NOT_USED".
-
-  Some values are also provided through environment variables.
-
-  Environment variables :
-    HAPROXY_PROXY_ADDR      The first bind address if available (or empty if not
-                            applicable, for example in a "backend" section).
-
-    HAPROXY_PROXY_ID        The backend id.
-
-    HAPROXY_PROXY_NAME      The backend name.
-
-    HAPROXY_PROXY_PORT      The first bind port if available (or empty if not
-                            applicable, for example in a "backend" section or
-                            for a UNIX socket).
-
-    HAPROXY_SERVER_ADDR     The server address.
-
-    HAPROXY_SERVER_CURCONN  The current number of connections on the server.
-
-    HAPROXY_SERVER_ID       The server id.
-
-    HAPROXY_SERVER_MAXCONN  The server max connections.
-
-    HAPROXY_SERVER_NAME     The server name.
-
-    HAPROXY_SERVER_PORT     The server port if available (or empty for a UNIX
-                            socket).
-
-    PATH                    The PATH environment variable used when executing
-                            the command may be set using "external-check path".
-
-  If the command executed and exits with a zero status then the check is
-  considered to have passed, otherwise the check is considered to have
-  failed.
-
-  Example :
-        external-check command /bin/true
-
-  See also : "external-check", "option external-check", "external-check path"
-
-
-external-check path <path>
-  The value of the PATH environment variable used when running an external-check
-  May be used in sections :   defaults | frontend | listen | backend
-                                 yes   |    no    |   yes  |   yes
-
-  Arguments :
-    <path> is the path used when executing external command to run
-
-  The default path is "".
-
-  Example :
-        external-check path "/usr/bin:/bin"
-
-  See also : "external-check", "option external-check",
-             "external-check command"
 
 
 persist rdp-cookie
@@ -6559,8 +5803,7 @@ retries <value>
   been established to a server, there will be no more retry.
 
   In order to avoid immediate reconnections to a server which is restarting,
-  a turn-around timer of min("timeout connect", one second) is applied before
-  a retry occurs.
+  a turn-around timer of 1 second is applied before a retry occurs.
 
   When "option redispatch" is set, the last retry may be performed on another
   server even if a cookie references a different server.
@@ -6730,9 +5973,10 @@ server <name> <address>[:[port]] [param*]
                     - 'ipv6@'  -> address is always IPv6
                     - 'unix@'  -> address is a path to a local unix socket
                     - 'abns@'  -> address is in abstract namespace (Linux only)
-              You may want to reference some environment variables in the
-              address parameter, see section 2.3 about environment
-              variables.
+              Any part of the address string may reference any number of
+              environment variables by preceding their name with a dollar
+              sign ('$') and optionally enclosing them with braces ('{}'),
+              similarly to what is done in Bourne shell.
 
     <port>    is an optional port specification. If set, all connections will
               be sent to this port. If unset, the same port the client
@@ -6748,9 +5992,9 @@ server <name> <address>[:[port]] [param*]
         server first  10.1.1.1:1080 cookie first  check inter 1000
         server second 10.1.1.2:1080 cookie second check inter 1000
         server transp ipv4@
-        server backup "${SRV_BACKUP}:1080" backup
-        server www1_dc1 "${LAN_DC1}.101:80"
-        server www1_dc2 "${LAN_DC2}.101:80"
+        server backup ${SRV_BACKUP}:1080 backup
+        server www1_dc1 ${LAN_DC1}.101:80
+        server www1_dc2 ${LAN_DC2}.101:80
 
   See also: "default-server", "http-send-name-header" and section 5 about
              server options
@@ -6776,8 +6020,10 @@ source <addr>[:<port>] [interface <name>]
                 - 'ipv6@' -> address is always IPv6
                 - 'unix@' -> address is a path to a local unix socket
                 - 'abns@' -> address is in abstract namespace (Linux only)
-              You may want to reference some environment variables in the address
-              parameter, see section 2.3 about environment variables.
+              Any part of the address string may reference any number of
+              environment variables by preceding their name with a dollar
+              sign ('$') and optionally enclosing them with braces ('{}'),
+              similarly to what is done in Bourne shell.
 
     <port>    is an optional port. It is normally not needed but may be useful
               in some very specific contexts. The default value of zero means
@@ -7665,8 +6911,7 @@ stick-table type {ip | integer | string [len <length>] | binary [len <length>]}
                automatically learned from the local peer (old process) during a
                soft restart.
 
-               NOTE : each peers section may be referenced only by tables
-                      belonging to the same unique process.
+               NOTE : peers can't be used in multi-process mode.
 
     <expire>   defines the maximum duration of an entry in the table since it
                was last created, refreshed or matched. The expiration delay is
@@ -8125,7 +7370,7 @@ tcp-request connection <action> [{if | unless} <condition>]
   accept the incoming connection. There is no specific limit to the number of
   rules which may be inserted.
 
-  Four types of actions are supported :
+  Five types of actions are supported :
     - accept :
         accepts the connection if the condition is true (when used with "if")
         or false (when used with "unless"). The first such rule executed ends
@@ -8163,12 +7408,12 @@ tcp-request connection <action> [{if | unless} <condition>]
         logs, and it will be possible to extract it using sample fetch rules to
         feed it into headers or anything. The length should be limited given
         that this size will be allocated for each capture during the whole
-        session life. Please check section 7.3 (Fetching samples) and "capture
-        request header" for more information.
+        session life. Since it applies to Please check section 7.3 (Fetching
+        samples) and "capture request header" for more information.
 
     - { track-sc0 | track-sc1 | track-sc2 } <key> [table <table>] :
         enables tracking of sticky counters from current connection. These
-        rules do not stop evaluation and do not change default action. 3 sets
+        rules do not stop evaluation and do not change default action. Two sets
         of counters may be simultaneously tracked by the same connection. The
         first "track-sc0" rule executed enables tracking of the counters of the
         specified table as the first set. The first "track-sc1" rule executed
@@ -8244,8 +7489,8 @@ tcp-request content <action> [{if | unless} <condition>]
   Arguments :
     <action>    defines the action to perform if the condition applies. Valid
                 actions include : "accept", "reject", "track-sc0", "track-sc1",
-                "track-sc2", "capture" and "lua". See "tcp-request connection"
-                above for their signification.
+                "track-sc2" and "capture". See "tcp-request connection" above
+                for their signification.
 
     <condition> is a standard layer 4-7 ACL-based condition (see section 7).
 
@@ -8278,8 +7523,6 @@ tcp-request content <action> [{if | unless} <condition>]
     - reject : the request is rejected and the connection is closed
     - capture : the specified sample expression is captured
     - { track-sc0 | track-sc1 | track-sc2 } <key> [table <table>]
-    - lua <function>
-    - set-var(<var-name>) <expr>
 
   They have the same meaning as their counter-parts in "tcp-request connection"
   so please refer to that section for a complete description.
@@ -8308,33 +7551,6 @@ tcp-request content <action> [{if | unless} <condition>]
   are present when the rule is processed. The rule processing engine is able to
   wait until the inspect delay expires when the data to be tracked is not yet
   available.
-
-  The "lua" keyword is followed by a Lua function name. It is used to run a Lua
-  function if the action is executed. The single parameter is the name of the
-  function to run. The prototype of the function is documented in the API
-  documentation.
-
-  The "set-var" is used to set the content of a variable. The variable is
-  declared inline.
-
-    <var-name> The name of the variable starts by an indication about its scope.
-               The allowed scopes are:
-                 "sess" : the variable is shared with all the session,
-                 "txn"  : the variable is shared with all the transaction
-                          (request and response)
-                 "req"  : the variable is shared only during the request
-                          processing
-                 "res"  : the variable is shared only during the response
-                          processing.
-               This prefix is followed by a name. The separator is a '.'.
-               The name may only contain characters 'a-z', 'A-Z', '0-9' and '_'.
-
-    <expr>     Is a standard HAProxy expression formed by a sample-fetch
-               followed by some converters.
-
-  Example:
-
-        tcp-request content set-var(sess.my_var) src
 
   Example:
         # Accept HTTP requests containing a Host header saying "example.com"
@@ -8445,7 +7661,7 @@ tcp-response content <action> [{if | unless} <condition>]
                                  no    |    no    |   yes  |   yes
   Arguments :
     <action>    defines the action to perform if the condition applies. Valid
-                actions include : "accept", "close", "reject", "lua".
+                actions include : "accept", "close", "reject".
 
     <condition> is a standard layer 4-7 ACL-based condition (see section 7).
 
@@ -8483,12 +7699,6 @@ tcp-response content <action> [{if | unless} <condition>]
         or false (when used with "unless"). The first such rule executed ends
         the rules evaluation. Rejected session are immediately closed.
 
-    - lua <function>
-        Executes Lua.
-
-    - set-var(<var-name>) <expr>
-        Sets a variable.
-
   Note that the "if/unless" condition is optional. If no condition is set on
   the action, it is simply performed unconditionally. That can be useful for
   for changing the default action to a reject.
@@ -8498,33 +7708,6 @@ tcp-response content <action> [{if | unless} <condition>]
   been buffered, otherwise no contents will match. In order to achieve this,
   the best solution involves detecting the HTTP protocol during the inspection
   period.
-
-  The "lua" keyword is followed by a Lua function name. It is used to run a Lua
-  function if the action is executed. The single parameter is the name of the
-  function to run. The prototype of the function is documented in the API
-  documentation.
-
-  The "set-var" is used to set the content of a variable. The variable is
-  declared inline.
-
-    <var-name> The name of the variable starts by an indication about its scope.
-               The allowed scopes are:
-                 "sess" : the variable is shared with all the session,
-                 "txn"  : the variable is shared with all the transaction
-                          (request and response)
-                 "req"  : the variable is shared only during the request
-                          processing
-                 "res"  : the variable is shared only during the response
-                          processing.
-               This prefix is followed by a name. The separator is a '.'.
-               The name may only contain characters 'a-z', 'A-Z', '0-9' and '_'.
-
-    <expr>     Is a standard HAProxy expression formed by a sample-fetch
-               followed by some converters.
-
-  Example:
-
-        tcp-request content set-var(sess.my_var) src
 
   See section 7 about ACL usage.
 
@@ -9171,19 +8354,6 @@ ca-ignore-err [all|<errorID>,...]
   If set to 'all', all errors are ignored. SSL handshake is not aborted if an
   error is ignored.
 
-ca-sign-file <cafile>
-  This setting is only available when support for OpenSSL was built in. It
-  designates a PEM file containing both the CA certificate and the CA private
-  key used to create and sign server's certificates. This is a mandatory
-  setting when the dynamic generation of certificates is enabled. See
-  'generate-certificates' for details.
-
-ca-sign-passphrase <passphrase>
-  This setting is only available when support for OpenSSL was built in. It is
-  the CA private key passphrase. This setting is optional and used only when
-  the dynamic generation of certificates is enabled. See
-  'generate-certificates' for details.
-
 ciphers <ciphers>
   This setting is only available when support for OpenSSL was built in. It sets
   the string describing the list of cipher algorithms ("cipher suite") that are
@@ -9209,13 +8379,13 @@ crt <cert>
 
   If a directory name is used instead of a PEM file, then all files found in
   that directory will be loaded in alphabetic order unless their name ends with
-  '.issuer', '.ocsp' or '.sctl' (reserved extensions). This directive may be
-  specified multiple times in order to load certificates from multiple files or
-  directories. The certificates will be presented to clients who provide a
-  valid TLS Server Name Indication field matching one of their CN or alt
-  subjects.  Wildcards are supported, where a wildcard character '*' is used
-  instead of the first hostname component (eg: *.example.org matches
-  www.example.org but not www.sub.example.org).
+  '.issuer' or '.ocsp' (reserved extensions). This directive may be specified
+  multiple times in order to load certificates from multiple files or
+  directories. The certificates will be presented to clients who provide a valid
+  TLS Server Name Indication field matching one of their CN or alt subjects.
+  Wildcards are supported, where a wildcard character '*' is used instead of the
+  first hostname component (eg: *.example.org matches www.example.org but not
+  www.sub.example.org).
 
   If no SNI is provided by the client or if the SSL library does not support
   TLS extensions, or if the client provides an SNI hostname which does not
@@ -9246,12 +8416,6 @@ crt <cert>
   necessary. If the issuer's certificate is not found in the PEM file, it will
   be loaded from a file at the same path as the PEM file suffixed by ".issuer"
   if it exists otherwise it will fail with an error.
-
-  For each PEM file, haproxy also checks for the presence of file at the same
-  path suffixed by ".sctl". If such file is found, support for Certificate
-  Transparency (RFC6962) TLS extension is enabled. The file must contain a
-  valid Signed Certificate Timestamp List, as described in RFC. File is parsed
-  to check basic syntax, but no signatures are verified.
 
 crt-ignore-err <errors>
   This setting is only available when support for OpenSSL was built in. Sets a
@@ -9308,24 +8472,6 @@ force-tlsv12
   This option enforces use of TLSv1.2 only on SSL connections instantiated from
   this listener. This option is also available on global statement
   "ssl-default-bind-options". See also "no-tlsv*", and "no-sslv3".
-
-generate-certificates
-  This setting is only available when support for OpenSSL was built in. It
-  enables the dynamic SSL certificates generation. A CA certificate and its
-  private key are necessary (see 'ca-sign-file'). When HAProxy is configured as
-  a transparent forward proxy, SSL requests generate errors because of a common
-  name mismatch on the certificate presented to the client. With this option
-  enabled, HAProxy will try to forge a certificate using the SNI hostname
-  indicated by the client. This is done only if no certificate matches the SNI
-  hostname (see 'crt-list'). If an error occurs, the default certificate is
-  used, else the 'strict-sni' option is set.
-  It can also be used when HAProxy is configured as a reverse proxy to ease the
-  deployment of an architecture with many backends.
-
-  Creating a SSL certificate is an expensive operation, so a LRU cache is used
-  to store forged certificates (see 'tune.ssl.ssl-ctx-cache-size'). It
-  increases the HAProxy's memroy footprint to reduce latency when the same
-  certificate is used many times.
 
 gid <gid>
   Sets the group of the UNIX sockets to the designated system gid. It can also
@@ -9490,19 +8636,6 @@ strict-sni
   a certificate. The default certificate is not used.
   See the "crt" option for more information.
 
-tcp-ut <delay>
-  Sets the TCP User Timeout for all incoming connections instanciated from this
-  listening socket. This option is available on Linux since version 2.6.37. It
-  allows haproxy to configure a timeout for sockets which contain data not
-  receiving an acknoledgement for the configured delay. This is especially
-  useful on long-lived connections experiencing long idle periods such as
-  remote terminals or database connection pools, where the client and server
-  timeouts must remain high to allow a long period of idle, but where it is
-  important to detect that the client has disappeared in order to release all
-  resources associated with its connection (and the server's session). The
-  argument is a delay expressed in milliseconds by default. This only works
-  for regular TCP connections, and is ignored for other protocols.
-
 tfo
   Is an optional keyword which is supported only on Linux kernels >= 3.7. It
   enables TCP Fast Open on the listening socket, which means that clients which
@@ -9515,18 +8648,6 @@ tfo
   is only supported on TCPv4/TCPv6 sockets and ignored by other ones. You may
   need to build HAProxy with USE_TFO=1 if your libc doesn't define
   TCP_FASTOPEN.
-
-tls-ticket-keys <keyfile>
-  Sets the TLS ticket keys file to load the keys from. The keys need to be 48
-  bytes long, encoded with base64 (ex. openssl rand -base64 48). Number of keys
-  is specified by the TLS_TICKETS_NO build option (default 3) and at least as
-  many keys need to be present in the file. Last TLS_TICKETS_NO keys will be
-  used for decryption and the penultimate one for encryption. This enables easy
-  key rotation by just appending new key to the file and reloading the process.
-  Keys must be periodically rotated (ex. every 12h) or Perfect Forward Secrecy
-  is compromised. It is also a good idea to keep the keys off any permanent
-  storage such as hard drives (hint: use tmpfs and don't swap those files).
-  Lifetime hint can be changed using tune.ssl.timeout.
 
 transparent
   Is an optional keyword which is supported only on certain Linux kernels. It
@@ -9908,14 +9029,6 @@ minconn <minconn>
 
   Supported in default-server: Yes
 
-no-ssl-reuse
-  This option disables SSL session reuse when SSL is used to communicate with
-  the server. It will force the server to perform a full handshake for every
-  new connection. It's probably only useful for benchmarking, troubleshooting,
-  and for paranoid users.
-
-  Supported in default-server: No
-
 no-sslv3
   This option disables support for SSLv3 when SSL is used to communicate with
   the server. Note that SSLv2 is disabled in the code and cannot be enabled
@@ -10063,24 +9176,6 @@ rise <count>
   if unspecified. See also the "check", "inter" and "fall" parameters.
 
   Supported in default-server: Yes
-
-resolve-prefer <family>
-  When DNS resolution is enabled for a server and multiple IP addresses from
-  different families are returned, HAProxy will prefer using an IP address
-  from the family mentioned in the "resolve-prefer" parameter.
-  Available families: "ipv4" and "ipv6"
-
-  Default value: ipv4
-
-  Example: server s1 app1.domain.com:80 resolvers mydns resolve-prefer ipv6
-
-resolvers <id>
-  Points to an existing "resolvers" section to resolve current server's
-  hostname.
-
-  Example: server s1 app1.domain.com:80 resolvers mydns
-
-  See also chapter 5.3
 
 send-proxy
   The "send-proxy" parameter enforces use of the PROXY protocol over any
@@ -10230,106 +9325,6 @@ weight <weight>
   room above and below for later adjustments.
 
   Supported in default-server: Yes
-
-
-5.3 Server IP address resolution using DNS
-------------------------------------------
-
-HAProxy allows using a host name to be resolved to find out what is the server
-IP address. By default, HAProxy resolves the name when parsing the
-configuration, at startup.
-This is not sufficient in some cases, such as in Amazon where a server's IP
-can change after a reboot or an ELB Virtual IP can change based on current
-workload.
-This chapter describes how HAProxy can be configured to process server's name
-resolution at run time.
-Whether run time server name resolution has been enable or not, HAProxy will
-carry on doing the first resolution when parsing the configuration.
-
-
-5.3.1 Global overview
----------------------
-
-As we've seen in introduction, name resolution in HAProxy occurs at two
-different steps of the process life:
-
-  1. when starting up, HAProxy parses the server line definition and matches a
-     host name. It uses libc functions to get the host name resolved. This
-     resolution relies on /etc/resolv.conf file.
-
-  2. at run time, when HAProxy gets prepared to run a health check on a server,
-     it verifies if the current name resolution is still considered as valid.
-     If not, it processes a new resolution, in parallel of the health check.
-
-A few other events can trigger a name resolution at run time:
-  - when a server's health check ends up in a connection timeout: this may be
-    because the server has a new IP address. So we need to trigger a name
-    resolution to know this new IP.
-
-A few things important to notice:
-  - all the name servers are queried in the mean time. HAProxy will process the
-    first valid response.
-
-  - a resolution is considered as invalid (NX, timeout, refused), when all the
-    servers return an error.
-
-
-5.3.2 The resolvers section
----------------------------
-
-This section is dedicated to host information related to name resolution in
-HAProxy.
-There can be as many as resolvers section as needed. Each section can contain
-many name servers.
-
-resolvers <resolvers id>
-  Creates a new name server list labelled <resolvers id>
-
-A resolvers section accept the following parameters:
-
-nameserver <id> <ip>:<port>
-  DNS server description:
-    <id>   : label of the server, should be unique
-    <ip>   : IP address of the server
-    <port> : port where the DNS service actually runs
-
-hold <status> <period>
-  Defines <period> during which the last name resolution should be kept based
-  on last resolution <status>
-    <status> : last name resolution status. Only "valid" is accepted for now.
-    <period> : interval between two successive name resolution when the last
-               answer was in <status>. It follows the HAProxy time format.
-               <period> is in milliseconds by default.
-
-  Default value is 10s for "valid".
-
-  Note: since the name resolution is triggered by the health checks, a new
-        resolution is triggered after <period> modulo the <inter> parameter of
-        the healch check.
-
-resolve_retries <nb>
-  Defines the number <nb> of queries to send to resolve a server name before
-  giving up.
-  Default value: 3
-
-timeout <event> <time>
-  Defines timeouts related to name resolution
-     <event> : the event on which the <time> timeout period applies to.
-               events available are:
-               - retry: time between two DNS queries, when no response have
-                        been received.
-                        Default value: 1s
-     <time>  : time related to the event. It follows the HAProxy time format.
-               <time> is expressed in milliseconds.
-
-Example of a resolvers section (with default values):
-
-   resolvers mydns
-     nameserver dns1 10.0.0.1:53
-     nameserver dns2 10.0.0.2:53
-     resolve_retries       3
-     timeout retry         1s
-     hold valid           10s
 
 
 6. HTTP header manipulation
@@ -10985,98 +9980,12 @@ sample fetch method. These keywords may equally be appended immediately after
 the fetch keyword's argument, delimited by a comma. These keywords can also
 support some arguments (eg: a netmask) which must be passed in parenthesis.
 
-A certain category of converters are bitwise and arithmetic operators which
-support performing basic operations on integers. Some bitwise operations are
-supported (and, or, xor, cpl) and some arithmetic operations are supported
-(add, sub, mul, div, mod, neg). Some comparators are provided (odd, even, not,
-bool) which make it possible to report a match without having to write an ACL.
-
 The currently available list of transformation keywords include :
-
-add(<value>)
-  Adds <value> to the input value of type unsigned integer, and returns the
-  result as an unsigned integer.
-
-and(<value>)
-  Performs a bitwise "AND" between <value> and the input value of type unsigned
-  integer, and returns the result as an unsigned integer.
 
 base64
   Converts a binary input sample to a base64 string. It is used to log or
   transfer binary content in a way that can be reliably transferred (eg:
   an SSL ID can be copied in a header).
-
-bool
-  Returns a boolean TRUE if the input value of type unsigned integer is
-  non-null, otherwise returns FALSE. Used in conjunction with and(), it can be
-  used to report true/false for bit testing on input values (eg: verify the
-  presence of a flag).
-
-bytes(<offset>[,<length>])
-  Extracts some bytes from an input binary sample. The result is a binary
-  sample starting at an offset (in bytes) of the original sample and
-  optionnaly truncated at the given length.
-
-cpl
-  Takes the input value of type unsigned integer, applies a twos-complement
-  (flips all bits) and returns the result as an unsigned integer.
-
-crc32([<avalanche>])
-  Hashes a binary input sample into an unsigned 32-bit quantity using the CRC32
-  hash function. Optionally, it is possible to apply a full avalanche hash
-  function to the output if the optional <avalanche> argument equals 1. This
-  converter uses the same functions as used by the various hash-based load
-  balancing algorithms, so it will provide exactly the same results. It is
-  provided for compatibility with other software which want a CRC32 to be
-  computed on some input keys, so it follows the most common implementation as
-  found in Ethernet, Gzip, PNG, etc... It is slower than the other algorithms
-  but may provide a better or at least less predictable distribution. It must
-  not be used for security purposes as a 32-bit hash is trivial to break. See
-  also "djb2", "sdbm", "wt6" and the "hash-type" directive.
-
-da-csv(<prop>[,<prop>*])
-  Asks the DeviceAtlas converter to identify the User Agent string passed on
-  input, and to emit a string made of the concatenation of the properties
-  enumerated in argument, delimited by the separator defined by the global
-  keyword "deviceatlas-property-separator", or by default the pipe character
-  ('|'). There's a limit of 5 different properties imposed by the haproxy
-  configuration language.
-
-  Example:
-    frontend www
-	bind *:8881
-	default_backend servers
-	http-request set-header X-DeviceAtlas-Data %[req.fhdr(User-Agent),da-csv(primaryHardwareType,osName,osVersion,browserName,browserVersion)]
-
-debug
-  This converter is used as debug tool. It dumps on screen the content and the
-  type of the input sample. The sample is returned as is on its output. This
-  converter only exists when haproxy was built with debugging enabled.
-
-div(<value>)
-  Divides the input value of type unsigned integer by <value>, and returns the
-  result as an unsigned integer. If <value> is null, the largest unsigned
-  integer is returned (typically 2^32-1).
-
-djb2([<avalanche>])
-  Hashes a binary input sample into an unsigned 32-bit quantity using the DJB2
-  hash function. Optionally, it is possible to apply a full avalanche hash
-  function to the output if the optional <avalanche> argument equals 1. This
-  converter uses the same functions as used by the various hash-based load
-  balancing algorithms, so it will provide exactly the same results. It is
-  mostly intended for debugging, but can be used as a stick-table entry to
-  collect rough statistics. It must not be used for security purposes as a
-  32-bit hash is trivial to break. See also "crc32", "sdbm", "wt6" and the
-  "hash-type" directive.
-
-even
-  Returns a boolean TRUE if the input value of type unsigned integer is even
-  otherwise returns FALSE. It is functionally equivalent to "not,and(1),bool".
-
-field(<index>,<delimiters>)
-  Extracts the substring at the given index considering given delimiters from
-  an input string. Indexes start at 1 and delimiters are a string formatted
-  list of chars.
 
 hex
   Converts a binary input sample to an hex string containing two hex digits per
@@ -11092,58 +10001,11 @@ http_date([<offset>])
   emit Date header fields, Expires values in responses when combined with a
   positive offset, or Last-Modified values when the offset is negative.
 
-in_table(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, a boolean false
-  is returned. Otherwise a boolean true is returned. This can be used to verify
-  the presence of a certain key in a table tracking some elements (eg: whether
-  or not a source IP address or an Authorization header was already seen).
-
 ipmask(<mask>)
   Apply a mask to an IPv4 address, and use the result for lookups and storage.
   This can be used to make all hosts within a certain mask to share the same
   table entries and as such use the same server. The mask can be passed in
   dotted form (eg: 255.255.255.0) or in CIDR form (eg: 24).
-
-json([<input-code>])
-  Escapes the input string and produces an ASCII ouput string ready to use as a
-  JSON string. The converter tries to decode the input string according to the
-  <input-code> parameter. It can be "ascii", "utf8", "utf8s", "utf8"" or
-  "utf8ps". The "ascii" decoder never fails. The "utf8" decoder detects 3 types
-  of errors:
-   - bad UTF-8 sequence (lone continuation byte, bad number of continuation
-     bytes, ...)
-   - invalid range (the decoded value is within a UTF-8 prohibited range),
-   - code overlong (the value is encoded with more bytes than necessary).
-
-  The UTF-8 JSON encoding can produce a "too long value" error when the UTF-8
-  character is greater than 0xffff because the JSON string escape specification
-  only authorizes 4 hex digits for the value encoding. The UTF-8 decoder exists
-  in 4 variants designated by a combination of two suffix letters : "p" for
-  "permissive" and "s" for "silently ignore". The behaviors of the decoders
-  are :
-   - "ascii"  : never fails ;
-   - "utf8"   : fails on any detected errors ;
-   - "utf8s"  : never fails, but removes characters corresponding to errors ;
-   - "utf8p"  : accepts and fixes the overlong errors, but fails on any other
-                error ;
-   - "utf8ps" : never fails, accepts and fixes the overlong errors, but removes
-                characters corresponding to the other errors.
-
-  This converter is particularly useful for building properly escaped JSON for
-  logging to servers which consume JSON-formated traffic logs.
-
-  Example:
-     capture request header user-agent len 150
-     capture request header Host len 15
-     log-format {"ip":"%[src]","user-agent":"%[capture.req.hdr(1),json]"}
-
-  Input request from client 127.0.0.1:
-     GET / HTTP/1.0
-     User-Agent: Very "Ugly" UA 1/2
-
-  Output log:
-     {"ip":"127.0.0.1","user-agent":"Very \"Ugly\" UA 1\/2"}
 
 language(<value>[,<default>])
   Returns the value with the highest q-factor from a list as extracted from the
@@ -11176,20 +10038,6 @@ lower
   Convert a string sample to lower case. This can only be placed after a string
   sample fetch function or after a transformation keyword returning a string
   type. The result is of type string.
-
-ltime(<format>[,<offset>])
-  Converts an integer supposed to contain a date since epoch to a string
-  representing this date in local time using a format defined by the <format>
-  string using strftime(3). The purpose is to allow any date format to be used
-  in logs. An optional <offset> in seconds may be applied to the input date
-  (positive or negative). See the strftime() man page for the format supported
-  by your operating system. See also the utime converter.
-
-  Example :
-
-      # Emit two colons, one with the local time and another with ip:port
-      # Eg:  20140710162350 127.0.0.1:57325
-      log-format %[date,ltime(%Y%m%d%H%M%S)]\ %ci:%cp
 
 map(<map_file>[,<default_value>])
 map_<match_type>(<map_file>[,<default_value>])
@@ -11248,281 +10096,10 @@ map_<match_type>_<output_type>(<map_file>[,<default_value>])
       |       `---------------------------- key
       `------------------------------------ leading spaces ignored
 
-mod(<value>)
-  Divides the input value of type unsigned integer by <value>, and returns the
-  remainder as an unsigned integer. If <value> is null, then zero is returned.
-
-mul(<value>)
-  Multiplies the input value of type unsigned integer by <value>, and returns
-  the product as an unsigned integer. In case of overflow, the higher bits are
-  lost, leading to seemingly strange values.
-
-neg
-  Takes the input value of type unsigned integer, computes the opposite value,
-  and returns the remainder as an unsigned integer. 0 is identity. This
-  operator is provided for reversed subtracts : in order to subtract the input
-  from a constant, simply perform a "neg,add(value)".
-
-not
-  Returns a boolean FALSE if the input value of type unsigned integer is
-  non-null, otherwise returns TRUE. Used in conjunction with and(), it can be
-  used to report true/false for bit testing on input values (eg: verify the
-  absence of a flag).
-
-odd
-  Returns a boolean TRUE if the input value of type unsigned integer is odd
-  otherwise returns FALSE. It is functionally equivalent to "and(1),bool".
-
-or(<value>)
-  Performs a bitwise "OR" between <value> and the input value of type unsigned
-  integer, and returns the result as an unsigned integer.
-
-regsub(<regex>,<subst>[,<flags>])
-  Applies a regex-based substitution to the input string. It does the same
-  operation as the well-known "sed" utility with "s/<regex>/<subst>/". By
-  default it will replace in the input string the first occurrence of the
-  largest part matching the regular expression <regex> with the substitution
-  string <subst>. It is possible to replace all occurrences instead by adding
-  the flag "g" in the third argument <flags>. It is also possible to make the
-  regex case insensitive by adding the flag "i" in <flags>. Since <flags> is a
-  string, it is made up from the concatenation of all desired flags. Thus if
-  both "i" and "g" are desired, using "gi" or "ig" will have the same effect.
-  It is important to note that due to the current limitations of the
-  configuration parser, some characters such as closing parenthesis or comma
-  are not possible to use in the arguments. The first use of this converter is
-  to replace certain characters or sequence of characters with other ones.
-
-  Example :
-
-     # de-duplicate "/" in header "x-path".
-     # input:  x-path: /////a///b/c/xzxyz/
-     # output: x-path: /a/b/c/xzxyz/
-     http-request set-header x-path %[hdr(x-path),regsub(/+,/,g)]
-
-capture-req(<id>)
-  Capture the string entry in the request slot <id> and returns the entry as
-  is. If the slot doesn't exist, the capture fails silently.
-
-  See also: "declare capture", "http-request capture",
-            "http-response capture", "req.hdr.capture" and
-            "res.hdr.capture" (sample fetches).
-
-capture-res(<id>)
-  Capture the string entry in the response slot <id> and returns the entry as
-  is. If the slot doesn't exist, the capture fails silently.
-
-  See also: "declare capture", "http-request capture",
-            "http-response capture", "req.hdr.capture" and
-            "res.hdr.capture" (sample fetches).
-
-sdbm([<avalanche>])
-  Hashes a binary input sample into an unsigned 32-bit quantity using the SDBM
-  hash function. Optionally, it is possible to apply a full avalanche hash
-  function to the output if the optional <avalanche> argument equals 1. This
-  converter uses the same functions as used by the various hash-based load
-  balancing algorithms, so it will provide exactly the same results. It is
-  mostly intended for debugging, but can be used as a stick-table entry to
-  collect rough statistics. It must not be used for security purposes as a
-  32-bit hash is trivial to break. See also "crc32", "djb2", "wt6" and the
-  "hash-type" directive.
-
-set-var(<var name>)
-  Sets a variable with the input content and return the content on the output as
-  is. The variable keep the value and the associated input type. The name of the
-  variable starts by an indication about it scope. The scope allowed are:
-    "sess" : the variable is shared with all the session,
-    "txn"  : the variable is shared with all the transaction (request and
-             response),
-    "req"  : the variable is shared only during the request processing,
-    "res"  : the variable is shared only during the response processing.
-  This prefix is followed by a name. The separator is a '.'. The name may only
-  contain characters 'a-z', 'A-Z', '0-9' and '_'.
-
-sub(<value>)
-  Subtracts <value> from the input value of type unsigned integer, and returns
-  the result as an unsigned integer. Note: in order to subtract the input from
-  a constant, simply perform a "neg,add(value)".
-
-table_bytes_in_rate(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, integer value zero
-  is returned. Otherwise the converter returns the average client-to-server
-  bytes rate associated with the input sample in the designated table, measured
-  in amount of bytes over the period configured in the table. See also the
-  sc_bytes_in_rate sample fetch keyword.
-
-
-table_bytes_out_rate(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, integer value zero
-  is returned. Otherwise the converter returns the average server-to-client
-  bytes rate associated with the input sample in the designated table, measured
-  in amount of bytes over the period configured in the table. See also the
-  sc_bytes_out_rate sample fetch keyword.
-
-table_conn_cnt(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, integer value zero
-  is returned. Otherwise the converter returns the cumulated amount of incoming
-  connections associated with the input sample in the designated table. See
-  also the sc_conn_cnt sample fetch keyword.
-
-table_conn_cur(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, integer value zero
-  is returned. Otherwise the converter returns the current amount of concurrent
-  tracked connections associated with the input sample in the designated table.
-  See also the sc_conn_cur sample fetch keyword.
-
-table_conn_rate(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, integer value zero
-  is returned. Otherwise the converter returns the average incoming connection
-  rate associated with the input sample in the designated table. See also the
-  sc_conn_rate sample fetch keyword.
-
-table_gpc0(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, integer value zero
-  is returned. Otherwise the converter returns the current value of the first
-  general purpose counter associated with the input sample in the designated
-  table. See also the sc_get_gpc0 sample fetch keyword.
-
-table_gpc0_rate(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, integer value zero
-  is returned. Otherwise the converter returns the frequency which the gpc0
-  counter was incremented over the configured period in the table, associated
-  with the input sample in the designated table. See also the sc_get_gpc0_rate
-  sample fetch keyword.
-
-table_http_err_cnt(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, integer value zero
-  is returned. Otherwise the converter returns the cumulated amount of HTTP
-  errors associated with the input sample in the designated table. See also the
-  sc_http_err_cnt sample fetch keyword.
-
-table_http_err_rate(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, integer value zero
-  is returned. Otherwise the average rate of HTTP errors associated with the
-  input sample in the designated table, measured in amount of errors over the
-  period configured in the table. See also the sc_http_err_rate sample fetch
-  keyword.
-
-table_http_req_cnt(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, integer value zero
-  is returned. Otherwise the converter returns the cumulated amount of HTTP
-  requests associated with the input sample in the designated table. See also
-  the sc_http_req_cnt sample fetch keyword.
-
-table_http_req_rate(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, integer value zero
-  is returned. Otherwise the average rate of HTTP requests associated with the
-  input sample in the designated table, measured in amount of requests over the
-  period configured in the table. See also the sc_http_req_rate sample fetch
-  keyword.
-
-table_kbytes_in(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, integer value zero
-  is returned. Otherwise the converter returns the cumulated amount of client-
-  to-server data associated with the input sample in the designated table,
-  measured in kilobytes. The test is currently performed on 32-bit integers,
-  which limits values to 4 terabytes. See also the sc_kbytes_in sample fetch
-  keyword.
-
-table_kbytes_out(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, integer value zero
-  is returned. Otherwise the converter returns the cumulated amount of server-
-  to-client data associated with the input sample in the designated table,
-  measured in kilobytes. The test is currently performed on 32-bit integers,
-  which limits values to 4 terabytes. See also the sc_kbytes_out sample fetch
-  keyword.
-
-table_server_id(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, integer value zero
-  is returned. Otherwise the converter returns the server ID associated with
-  the input sample in the designated table. A server ID is associated to a
-  sample by a "stick" rule when a connection to a server succeeds. A server ID
-  zero means that no server is associated with this key.
-
-table_sess_cnt(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, integer value zero
-  is returned. Otherwise the converter returns the cumulated amount of incoming
-  sessions associated with the input sample in the designated table. Note that
-  a session here refers to an incoming connection being accepted by the
-  "tcp-request connection" rulesets. See also the sc_sess_cnt sample fetch
-  keyword.
-
-table_sess_rate(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, integer value zero
-  is returned. Otherwise the converter returns the average incoming session
-  rate associated with the input sample in the designated table. Note that a
-  session here refers to an incoming connection being accepted by the
-  "tcp-request connection" rulesets. See also the sc_sess_rate sample fetch
-  keyword.
-
-table_trackers(<table>)
-  Uses the string representation of the input sample to perform a look up in
-  the specified table. If the key is not found in the table, integer value zero
-  is returned. Otherwise the converter returns the current amount of concurrent
-  connections tracking the same key as the input sample in the designated
-  table. It differs from table_conn_cur in that it does not rely on any stored
-  information but on the table's reference count (the "use" value which is
-  returned by "show table" on the CLI). This may sometimes be more suited for
-  layer7 tracking. It can be used to tell a server how many concurrent
-  connections there are from a given address for example. See also the
-  sc_trackers sample fetch keyword.
-
 upper
   Convert a string sample to upper case. This can only be placed after a string
   sample fetch function or after a transformation keyword returning a string
   type. The result is of type string.
-
-url_dec
-  Takes an url-encoded string provided as input and returns the decoded
-  version as output. The input and the output are of type string.
-
-utime(<format>[,<offset>])
-  Converts an integer supposed to contain a date since epoch to a string
-  representing this date in UTC time using a format defined by the <format>
-  string using strftime(3). The purpose is to allow any date format to be used
-  in logs. An optional <offset> in seconds may be applied to the input date
-  (positive or negative). See the strftime() man page for the format supported
-  by your operating system. See also the ltime converter.
-
-  Example :
-
-      # Emit two colons, one with the UTC time and another with ip:port
-      # Eg:  20140710162350 127.0.0.1:57325
-      log-format %[date,utime(%Y%m%d%H%M%S)]\ %ci:%cp
-
-word(<index>,<delimiters>)
-  Extracts the nth word considering given delimiters from an input string.
-  Indexes start at 1 and delimiters are a string formatted list of chars.
-
-wt6([<avalanche>])
-  Hashes a binary input sample into an unsigned 32-bit quantity using the WT6
-  hash function. Optionally, it is possible to apply a full avalanche hash
-  function to the output if the optional <avalanche> argument equals 1. This
-  converter uses the same functions as used by the various hash-based load
-  balancing algorithms, so it will provide exactly the same results. It is
-  mostly intended for debugging, but can be used as a stick-table entry to
-  collect rough statistics. It must not be used for security purposes as a
-  32-bit hash is trivial to break. See also "crc32", "djb2", "sdbm", and the
-  "hash-type" directive.
-
-xor(<value>)
-  Performs a bitwise "XOR" (exclusive OR) between <value> and the input value
-  of type unsigned integer, and returns the result as an unsigned integer.
 
 
 7.3.2. Fetching samples from internal states
@@ -11578,14 +10155,6 @@ be_sess_rate([<backend>]) : integer
             mode http
             acl being_scanned be_sess_rate gt 100
             redirect location /denied.html if being_scanned
-
-bin(<hexa>) : bin
-  Returns a binary chain. The input is the hexadecimal representation
-  of the string.
-
-bool(<bool>) : bool
-  Returns a boolean value. <bool> can be 'true', 'false', '1' or '0'.
-  'false' and '0' are the same. 'true' and '1' are the same.
 
 connslots([<backend>]) : integer
   Returns an integer value corresponding to the number of connection slots
@@ -11673,15 +10242,6 @@ fe_sess_rate([<frontend>]) : integer
             tcp-request content accept if ! too_fast
             tcp-request content accept if WAIT_END
 
-ipv4(<ipv4>) : ipv4
-  Returns an ipv4.
-
-ipv6(<ipv6>) : ipv6
-  Returns an ipv6.
-
-meth(<method>) : method
-  Returns a method.
-
 nbproc : integer
   Returns an integer value corresponding to the number of processes that were
   started (it equals the global "nbproc" setting). This is useful for logging
@@ -11716,9 +10276,6 @@ rand([<range>]) : integer
   gives numbers between 0 and 4294967295. It can be useful to pass some values
   needed to take some routing decisions for example, or just for debugging
   purposes. This random must not be used for security purposes.
-
-sint(<sint>) : signed integer
-  Returns a signed integer.
 
 srv_conn([<backend>/]<server>) : integer
   Returns an integer value corresponding to the number of currently established
@@ -11758,9 +10315,6 @@ stopping : boolean
   can be useful for logging, or for relaxing certain checks or helping close
   certain connections upon graceful shutdown.
 
-str(<string>) : string
-  Returns a string.
-
 table_avl([<table>]) : integer
   Returns the total number of available entries in the current proxy's
   stick-table or in the designated stick-table. See also table_cnt.
@@ -11769,21 +10323,6 @@ table_cnt([<table>]) : integer
   Returns the total number of entries currently in use in the current proxy's
   stick-table or in the designated stick-table. See also src_conn_cnt and
   table_avl for other entry counting methods.
-
-uint(<uint>) : unsigned integer
-  Returns an unsigned integer.
-
-var(<var-name>) : undefined
-  Returns a variable with the stored type. If the variable is not set, the
-  sample fetch fails. The name of the variable starts by an indication about its
-  scope. The scope allowed are:
-    "sess" : the variable is shared with all the session,
-    "txn"  : the variable is shared with all the transaction (request and
-             response),
-    "req"  : the variable is shared only during the request processing,
-    "res"  : the variable is shared only during the response processing.
-  This prefix is followed by a name. The separator is a '.'. The name may only
-  contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
 
 7.3.3. Fetching samples at Layer 4
@@ -12435,10 +10974,6 @@ ssl_fc_has_sni : boolean
   that the SSL library is build with support for TLS extensions enabled (check
   haproxy -vv).
 
-ssl_fc_is_resumed: boolean
-  Returns true if the SSL/TLS session has been resumed through the use of
-  SSL session cache or TLS tickets.
-
 ssl_fc_npn : string
   This extracts the Next Protocol Negotiation field from an incoming connection
   made via a TLS transport layer and locally deciphered by haproxy. The result
@@ -12752,9 +11287,7 @@ base32 : integer
   This returns a 32-bit hash of the value returned by the "base" fetch method
   above. This is useful to track per-URL activity on high traffic sites without
   having to store all URLs. Instead a shorter hash is stored, saving a lot of
-  memory. The output type is an unsigned integer. The hash function used is
-  SDBM with full avalanche on the output. Technically, base32 is exactly equal
-  to "base,sdbm(1)".
+  memory. The output type is an unsigned integer.
 
 base32+src : binary
   This returns the concatenation of the base32 fetch above and the src fetch
@@ -12793,37 +11326,6 @@ capture.res.ver : string
   This extracts the response's HTTP version and returns either "HTTP/1.0" or
   "HTTP/1.1". Unlike "res.ver", it can be used in logs because it relies on a
   persistent flag.
-
-req.body : binary
-  This returns the HTTP request's available body as a block of data. It
-  requires that the request body has been buffered made available using
-  "option http-buffer-request". In case of chunked-encoded body, currently only
-  the first chunk is analyzed.
-
-req.body_param([<name>) : string
-  This fetch assumes that the body of the POST request is url-encoded. The user
-  can check if the "content-type" contains the value
-  "application/x-www-form-urlencoded". This extracts the first occurrence of the
-  parameter <name> in the body, which ends before '&'. The parameter name is
-  case-sensitive. If no name is given, any parameter will match, and the first
-  one will be returned. The result is a string corresponding to the value of the
-  parameter <name> as presented in the request body (no URL decoding is
-  performed). Note that the ACL version of this fetch iterates over multiple
-  parameters and will iteratively report all parameters values if no name is
-  given.
-
-req.body_len : integer
-  This returns the length of the HTTP request's available body in bytes. It may
-  be lower than the advertised length if the body is larger than the buffer. It
-  requires that the request body has been buffered made available using
-  "option http-buffer-request".
-
-req.body_size : integer
-  This returns the advertised length of the HTTP request's body in bytes. It
-  will represent the advertised Content-Length header, or the size of the first
-  chunk in case of chunked encoding. In order to parse the chunks, it requires
-  that the request body has been buffered made available using
-  "option http-buffer-request".
 
 req.cook([<name>]) : string
 cook([<name>]) : string (deprecated)
@@ -13011,20 +11513,6 @@ path : string
     path_reg : regex match
     path_sub : substring match
 
-query : string
-  This extracts the request's query string, which starts after the first
-  question mark. If no question mark is present, this fetch returns nothing. If
-  a question mark is present but nothing follows, it returns an empty string.
-  This means it's possible to easily know whether a query string is present
-  using the "found" matching method. This fetch is the completemnt of "path"
-  which stops before the question mark.
-
-req.hdr_names([<delim>]) : string
-  This builds a string made from the concatenation of all header names as they
-  appear in the request when the rule is evaluated. The default delimiter is
-  the comma (',') but it may be overridden as an optional argument <delim>. In
-  this case, only the first character of <delim> is considered.
-
 req.ver : string
 req_ver : string (deprecated)
   Returns the version string from the HTTP request, for example "1.1". This can
@@ -13121,12 +11609,6 @@ shdr_ip([<name>[,<occ>]]) : ip (deprecated)
   Negative values indicate positions relative to the last one, with -1 being
   the last one. This can be useful to learn some data into a stick table.
 
-res.hdr_names([<delim>]) : string
-  This builds a string made from the concatenation of all header names as they
-  appear in the response when the rule is evaluated. The default delimiter is
-  the comma (',') but it may be overridden as an optional argument <delim>. In
-  this case, only the first character of <delim> is considered.
-
 res.hdr_val([<name>[,<occ>]]) : integer
 shdr_val([<name>[,<occ>]]) : integer (deprecated)
   This extracts the last occurrence of header <name> in an HTTP response, and
@@ -13194,18 +11676,17 @@ url_port : integer
   restrict access to certain systems through a proxy, for example when combined
   with option "http_proxy".
 
-urlp([<name>[,<delim>]]) : string
-url_param([<name>[,<delim>]]) : string
+urlp(<name>[,<delim>]) : string
+url_param(<name>[,<delim>]) : string
   This extracts the first occurrence of the parameter <name> in the query
   string, which begins after either '?' or <delim>, and which ends before '&',
-  ';' or <delim>. The parameter name is case-sensitive. If no name is given,
-  any parameter will match, and the first one will be returned. The result is
-  a string corresponding to the value of the parameter <name> as presented in
-  the request (no URL decoding is performed). This can be used for session
+  ';' or <delim>. The parameter name is case-sensitive. The result is a string
+  corresponding to the value of the parameter <name> as presented in the
+  request (no URL decoding is performed). This can be used for session
   stickiness based on a client ID, to extract an application cookie passed as a
   URL parameter, or in ACLs to apply some checks. Note that the ACL version of
-  this fetch iterates over multiple parameters and will iteratively report all
-  parameters values if no name is given
+  this fetch do not iterate over multiple parameters and stop at the first one
+  as well.
 
   ACL derivatives :
     urlp(<name>[,<delim>])     : exact string match
@@ -13224,7 +11705,7 @@ url_param([<name>[,<delim>]]) : string
       # match http://example.com/foo;JSESSIONID=some_id
       stick on urlp(JSESSIONID,;)
 
-urlp_val([<name>[,<delim>])] : integer
+urlp_val(<name>[,<delim>]) : integer
   See "urlp" above. This one extracts the URL parameter <name> in the request
   and converts it to an integer value. This can be used for session stickiness
   based on a user ID for example, or with ACLs to match a page number or price.
@@ -13281,8 +11762,6 @@ send logs to different sources at the same time with different level filters :
   - per-instance external troubles (servers up/down, max connections)
   - per-instance activity (client connections), either at the establishment or
     at the termination.
-  - per-request control of log-level, eg:
-        http-request set-log-level silent if sensitive_request
 
 The ability to distribute different levels of logs to different log servers
 allow several production teams to interact and to fix their problems as soon
@@ -13871,10 +12350,6 @@ Please refer to the table below for currently defined variables :
   | H | %CC  | captured_request_cookie                       | string      |
   | H | %CS  | captured_response_cookie                      | string      |
   |   | %H   | hostname                                      | string      |
-  | H | %HM  | HTTP method (ex: POST)                        | string      |
-  | H | %HP  | HTTP request URI without query string (path)  | string      |
-  | H | %HU  | HTTP request URI (ex: /foo?bar=baz)           | string      |
-  | H | %HV  | HTTP version (ex: HTTP/1.0)                   | string      |
   |   | %ID  | unique-id                                     | string      |
   |   | %ST  | status_code                                   | numeric     |
   |   | %T   | gmt_date_time                                 | date        |
@@ -13899,7 +12374,6 @@ Please refer to the table below for currently defined variables :
   |   | %fi  | frontend_ip              (accepting address)  | IP          |
   |   | %fp  | frontend_port            (accepting address)  | numeric     |
   |   | %ft  | frontend_name_transport ('~' suffix for SSL)  | string      |
-  |   | %lc  | frontend_log_counter                          | numeric     |
   |   | %hr  | captured_request_headers default style        | string      |
   |   | %hrl | captured_request_headers CLF style            | string list |
   |   | %hs  | captured_response_headers default style       | string      |
@@ -14766,9 +13240,9 @@ S (Servers).
      server. The server value counts the number of times that server was
      switched away from.
  17. status [LFBS]: status (UP/DOWN/NOLB/MAINT/MAINT(via)...)
- 18. weight [..BS]: total weight (backend), server weight (server)
- 19. act [..BS]: number of active servers (backend), server is active (server)
- 20. bck [..BS]: number of backup servers (backend), server is backup (server)
+ 18. weight [..BS]: server weight (server), total weight (backend)
+ 19. act [..BS]: server is active (server), number of active servers (backend)
+ 20. bck [..BS]: server is backup (server), number of backup servers (backend)
  21. chkfail [...S]: number of failed checks. (Only counts checks failed when
      the server is up.)
  22. chkdown [..BS]: number of UP->DOWN transitions. The backend counter counts
@@ -15228,9 +13702,6 @@ set rate-limit ssl-sessions global <value>
   is passed in number of sessions per second sent to the SSL stack. It applies
   before the handshake in order to protect the stack against handshake abuses.
 
-set server <backend>/<server> addr <ip4 or ip6 address>
-  Replace the current IP address of a server by the one provided.
-
 set server <backend>/<server> agent [ up | down ]
   Force a server's agent to a new state. This can be useful to immediately
   switch a server's state regardless of some slow agent checks for example.
@@ -15266,13 +13737,6 @@ set ssl ocsp-response <response>
                  -host ocsp.issuer.com:80 -respout resp.der
     echo "set ssl ocsp-response $(base64 -w 10000 resp.der)" | \
                  socat stdio /var/run/haproxy.stat
-
-set ssl tls-key <id> <tlskey>
-  Set the next TLS key for the <id> listener to <tlskey>. This key becomes the
-  ultimate key, while the penultimate one is used for encryption (others just
-  decrypt). The oldest TLS key present is overwritten. <id> is either a numeric
-  #<id> or <file> returned by "show tls-keys". <tlskey> is a base64 encoded 48
-  bit TLS ticket key (ex. openssl rand -base64 48).
 
 set table <table> key <key> [data.<data_type> <value>]*
   Create or update a stick-table entry in the table. If the key is not present,
@@ -15434,23 +13898,6 @@ show stat [<iid> <type> <sid>]
     A similar empty line appears at the end of the second block (stats) so that
     the reader knows the output has not been truncated.
 
-show stat resolvers <resolvers section id>
-  Dump statistics for the given resolvers section.
-  For each name server, the following counters are reported:
-    sent: number of DNS requests sent to this server
-    valid: number of DNS valid responses received from this server
-    update: number of DNS responses used to update the server's IP address
-    cname: number of CNAME responses
-    cname_error: CNAME errors encountered with this server
-    any_err: number of empty response (IE: server does not support ANY type)
-    nx: non existent domain response received from this server
-    timeout: how many time this server did not answer in time
-    refused: number of requests refused by this server
-    other: any other DNS errors
-    invalid: invalid DNS response (from a protocol point of view)
-    too_big: too big response
-    outdated: number of response arrived too late (after an other name server)
-
 show table
   Dump general information on all known stick-tables. Their name is returned
   (the name of the proxy which holds them), their type (currently zero, always
@@ -15524,11 +13971,6 @@ show table <name> [ data.<type> <operator> <value> ] | [ key <key> ]
           | socat stdio /tmp/sock1 \
           | fgrep 'key=' | cut -d' ' -f2 | cut -d= -f2 > abusers-ip.txt
           ( or | awk '/key/{ print a[split($2,a,"=")]; }' )
-
-show tls-keys
-  Dump all loaded TLS ticket keys. The TLS ticket key reference ID and the
-  file from which the keys have been loaded is shown. Both of those can be
-  used to update the TLS keys using "set ssl tls-key".
 
 shutdown frontend <frontend>
   Completely delete the specified frontend. All the ports it was bound to will

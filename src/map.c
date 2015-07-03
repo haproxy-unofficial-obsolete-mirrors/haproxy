@@ -114,8 +114,8 @@ static struct map_descriptor *map_create_descriptor(struct sample_conv *conv)
  * This function choose the indexation type (ebtree or list) according with
  * the type of match needed.
  */
-int sample_load_map(struct arg *arg, struct sample_conv *conv,
-                    const char *file, int line, char **err)
+static int sample_load_map(struct arg *arg, struct sample_conv *conv,
+                           const char *file, int line, char **err)
 {
 	struct map_descriptor *desc;
 
@@ -133,12 +133,12 @@ int sample_load_map(struct arg *arg, struct sample_conv *conv,
 	desc->do_free = 1;
 
 	/* Set the match method. */
-	desc->pat.match = pat_match_fcts[(long)conv->private];
-	desc->pat.parse = pat_parse_fcts[(long)conv->private];
-	desc->pat.index = pat_index_fcts[(long)conv->private];
-	desc->pat.delete = pat_delete_fcts[(long)conv->private];
-	desc->pat.prune = pat_prune_fcts[(long)conv->private];
-	desc->pat.expect_type = pat_match_types[(long)conv->private];
+	desc->pat.match = pat_match_fcts[conv->private];
+	desc->pat.parse = pat_parse_fcts[conv->private];
+	desc->pat.index = pat_index_fcts[conv->private];
+	desc->pat.delete = pat_delete_fcts[conv->private];
+	desc->pat.prune = pat_prune_fcts[conv->private];
+	desc->pat.expect_type = pat_match_types[conv->private];
 
 	/* Set the output parse method. */
 	switch (desc->conv->out_type) {
@@ -157,6 +157,26 @@ int sample_load_map(struct arg *arg, struct sample_conv *conv,
 	                            1, err, file, line))
 		return 0;
 
+	/* The second argument is the default value */
+	if (arg[1].type == ARGT_STR) {
+		desc->default_value = strdup(arg[1].data.str.str);
+		if (!desc->default_value) {
+			memprintf(err, "out of memory");
+			return 0;
+		}
+		desc->def = calloc(1, sizeof(*desc->def));
+		if (!desc->def) {
+			memprintf(err, "out of memory");
+			return 0;
+		}
+		if (!desc->pat.parse_smp(desc->default_value, desc->def)) {
+			memprintf(err, "Cannot parse default value");
+			return 0;
+		}
+	}
+	else
+		desc->def = NULL;
+
 	/* replace the first argument by this definition */
 	arg[0].type = ARGT_MAP;
 	arg[0].data.map = desc;
@@ -164,7 +184,7 @@ int sample_load_map(struct arg *arg, struct sample_conv *conv,
 	return 1;
 }
 
-static int sample_conv_map(const struct arg *arg_p, struct sample *smp, void *private)
+static int sample_conv_map(const struct arg *arg_p, struct sample *smp)
 {
 	struct map_descriptor *desc;
 	struct pattern *pat;
@@ -192,34 +212,13 @@ static int sample_conv_map(const struct arg *arg_p, struct sample *smp, void *pr
 	}
 
 	/* If no default value avalaible, the converter fails. */
-	if (arg_p[1].type == ARGT_STOP)
+	if (!desc->def)
 		return 0;
 
 	/* Return the default value. */
-	switch (desc->conv->out_type) {
-
-	case SMP_T_STR:
-		smp->type = SMP_T_STR;
-		smp->flags |= SMP_F_CONST;
-		smp->data.str = arg_p[1].data.str;
-		break;
-
-	case SMP_T_UINT:
-		smp->type = SMP_T_UINT;
-		smp->data.uint = arg_p[1].data.uint;
-		break;
-
-	case SMP_T_IPV4:
-		smp->type = SMP_T_IPV4;
-		smp->data.ipv4 = arg_p[1].data.ipv4;
-		break;
-
-	case SMP_T_IPV6:
-		smp->type = SMP_T_IPV6;
-		smp->data.ipv6 = arg_p[1].data.ipv6;
-		break;
-	}
-
+	smp->type = desc->def->type;
+	smp->flags |= SMP_F_CONST;
+	memcpy(&smp->data, &desc->def->data, sizeof(smp->data));
 	return 1;
 }
 
@@ -240,36 +239,36 @@ static int sample_conv_map(const struct arg *arg_p, struct sample *smp, void *pr
  * The arguments are: <file>[,<default value>]
  */
 static struct sample_conv_kw_list sample_conv_kws = {ILH, {
-	{ "map",         sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_STR,  (void *)PAT_MATCH_STR },
-	{ "map_str",     sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_STR,  (void *)PAT_MATCH_STR },
-	{ "map_beg",     sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_STR,  (void *)PAT_MATCH_BEG },
-	{ "map_sub",     sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_STR,  (void *)PAT_MATCH_SUB },
-	{ "map_dir",     sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_STR,  (void *)PAT_MATCH_DIR },
-	{ "map_dom",     sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_STR,  (void *)PAT_MATCH_DOM },
-	{ "map_end",     sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_STR,  (void *)PAT_MATCH_END },
-	{ "map_reg",     sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_STR,  (void *)PAT_MATCH_REG },
-	{ "map_int",     sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_UINT, SMP_T_STR,  (void *)PAT_MATCH_INT },
-	{ "map_ip",      sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_ADDR, SMP_T_STR,  (void *)PAT_MATCH_IP  },
+	{ "map",         sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_STR,  PAT_MATCH_STR },
+	{ "map_str",     sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_STR,  PAT_MATCH_STR },
+	{ "map_beg",     sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_STR,  PAT_MATCH_BEG },
+	{ "map_sub",     sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_STR,  PAT_MATCH_SUB },
+	{ "map_dir",     sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_STR,  PAT_MATCH_DIR },
+	{ "map_dom",     sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_STR,  PAT_MATCH_DOM },
+	{ "map_end",     sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_STR,  PAT_MATCH_END },
+	{ "map_reg",     sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_STR,  PAT_MATCH_REG },
+	{ "map_int",     sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_UINT, SMP_T_STR,  PAT_MATCH_INT },
+	{ "map_ip",      sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_ADDR, SMP_T_STR,  PAT_MATCH_IP  },
 
-	{ "map_str_int", sample_conv_map, ARG2(1,STR,UINT), sample_load_map, SMP_T_STR,  SMP_T_UINT, (void *)PAT_MATCH_STR },
-	{ "map_beg_int", sample_conv_map, ARG2(1,STR,UINT), sample_load_map, SMP_T_STR,  SMP_T_UINT, (void *)PAT_MATCH_BEG },
-	{ "map_sub_int", sample_conv_map, ARG2(1,STR,UINT), sample_load_map, SMP_T_STR,  SMP_T_UINT, (void *)PAT_MATCH_SUB },
-	{ "map_dir_int", sample_conv_map, ARG2(1,STR,UINT), sample_load_map, SMP_T_STR,  SMP_T_UINT, (void *)PAT_MATCH_DIR },
-	{ "map_dom_int", sample_conv_map, ARG2(1,STR,UINT), sample_load_map, SMP_T_STR,  SMP_T_UINT, (void *)PAT_MATCH_DOM },
-	{ "map_end_int", sample_conv_map, ARG2(1,STR,UINT), sample_load_map, SMP_T_STR,  SMP_T_UINT, (void *)PAT_MATCH_END },
-	{ "map_reg_int", sample_conv_map, ARG2(1,STR,UINT), sample_load_map, SMP_T_STR,  SMP_T_UINT, (void *)PAT_MATCH_REG },
-	{ "map_int_int", sample_conv_map, ARG2(1,STR,UINT), sample_load_map, SMP_T_UINT, SMP_T_UINT, (void *)PAT_MATCH_INT },
-	{ "map_ip_int",  sample_conv_map, ARG2(1,STR,UINT), sample_load_map, SMP_T_ADDR, SMP_T_UINT, (void *)PAT_MATCH_IP  },
+	{ "map_str_int", sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_UINT, PAT_MATCH_STR },
+	{ "map_beg_int", sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_UINT, PAT_MATCH_BEG },
+	{ "map_sub_int", sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_UINT, PAT_MATCH_SUB },
+	{ "map_dir_int", sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_UINT, PAT_MATCH_DIR },
+	{ "map_dom_int", sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_UINT, PAT_MATCH_DOM },
+	{ "map_end_int", sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_UINT, PAT_MATCH_END },
+	{ "map_reg_int", sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_UINT, PAT_MATCH_REG },
+	{ "map_int_int", sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_UINT, SMP_T_UINT, PAT_MATCH_INT },
+	{ "map_ip_int",  sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_ADDR, SMP_T_UINT, PAT_MATCH_IP  },
 
-	{ "map_str_ip",  sample_conv_map, ARG2(1,STR,IPV4), sample_load_map, SMP_T_STR,  SMP_T_IPV4, (void *)PAT_MATCH_STR },
-	{ "map_beg_ip",  sample_conv_map, ARG2(1,STR,IPV4), sample_load_map, SMP_T_STR,  SMP_T_IPV4, (void *)PAT_MATCH_BEG },
-	{ "map_sub_ip",  sample_conv_map, ARG2(1,STR,IPV4), sample_load_map, SMP_T_STR,  SMP_T_IPV4, (void *)PAT_MATCH_SUB },
-	{ "map_dir_ip",  sample_conv_map, ARG2(1,STR,IPV4), sample_load_map, SMP_T_STR,  SMP_T_IPV4, (void *)PAT_MATCH_DIR },
-	{ "map_dom_ip",  sample_conv_map, ARG2(1,STR,IPV4), sample_load_map, SMP_T_STR,  SMP_T_IPV4, (void *)PAT_MATCH_DOM },
-	{ "map_end_ip",  sample_conv_map, ARG2(1,STR,IPV4), sample_load_map, SMP_T_STR,  SMP_T_IPV4, (void *)PAT_MATCH_END },
-	{ "map_reg_ip",  sample_conv_map, ARG2(1,STR,IPV4), sample_load_map, SMP_T_STR,  SMP_T_IPV4, (void *)PAT_MATCH_REG },
-	{ "map_int_ip",  sample_conv_map, ARG2(1,STR,IPV4), sample_load_map, SMP_T_UINT, SMP_T_IPV4, (void *)PAT_MATCH_INT },
-	{ "map_ip_ip",   sample_conv_map, ARG2(1,STR,IPV4), sample_load_map, SMP_T_ADDR, SMP_T_IPV4, (void *)PAT_MATCH_IP  },
+	{ "map_str_ip",  sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_IPV4, PAT_MATCH_STR },
+	{ "map_beg_ip",  sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_IPV4, PAT_MATCH_BEG },
+	{ "map_sub_ip",  sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_IPV4, PAT_MATCH_SUB },
+	{ "map_dir_ip",  sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_IPV4, PAT_MATCH_DIR },
+	{ "map_dom_ip",  sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_IPV4, PAT_MATCH_DOM },
+	{ "map_end_ip",  sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_IPV4, PAT_MATCH_END },
+	{ "map_reg_ip",  sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_STR,  SMP_T_IPV4, PAT_MATCH_REG },
+	{ "map_int_ip",  sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_UINT, SMP_T_IPV4, PAT_MATCH_INT },
+	{ "map_ip_ip",   sample_conv_map, ARG2(1,STR,STR), sample_load_map, SMP_T_ADDR, SMP_T_IPV4, PAT_MATCH_IP  },
 
 	{ /* END */ },
 }};

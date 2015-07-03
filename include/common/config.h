@@ -23,7 +23,6 @@
 #define _COMMON_CONFIG_H
 
 #include <common/compiler.h>
-#include <common/compat.h>
 #include <common/defaults.h>
 
 /* this reduces the number of calls to select() by choosing appropriate

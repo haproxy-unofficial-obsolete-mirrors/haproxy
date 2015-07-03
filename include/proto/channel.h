@@ -2,7 +2,7 @@
  * include/proto/channel.h
  * Channel management definitions, macros and inline functions.
  *
- * Copyright (C) 2000-2014 Willy Tarreau - w@1wt.eu
+ * Copyright (C) 2000-2012 Willy Tarreau - w@1wt.eu
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -28,13 +28,13 @@
 
 #include <common/config.h>
 #include <common/chunk.h>
+#include <common/memory.h>
 #include <common/ticks.h>
 #include <common/time.h>
 
-#include <types/channel.h>
 #include <types/global.h>
-#include <types/stream.h>
-#include <types/stream_interface.h>
+
+extern struct pool_head *pool2_channel;
 
 /* perform minimal intializations, report 0 in case of error, 1 if OK. */
 int init_channel();
@@ -43,54 +43,24 @@ unsigned long long __channel_forward(struct channel *chn, unsigned long long byt
 
 /* SI-to-channel functions working with buffers */
 int bi_putblk(struct channel *chn, const char *str, int len);
-struct buffer *bi_swpbuf(struct channel *chn, struct buffer *buf);
 int bi_putchr(struct channel *chn, char c);
-int bi_getline_nc(struct channel *chn, char **blk1, int *len1, char **blk2, int *len2);
-int bi_getblk_nc(struct channel *chn, char **blk1, int *len1, char **blk2, int *len2);
 int bo_inject(struct channel *chn, const char *msg, int len);
 int bo_getline(struct channel *chn, char *str, int len);
 int bo_getblk(struct channel *chn, char *blk, int len, int offset);
-int bo_getline_nc(struct channel *chn, char **blk1, int *len1, char **blk2, int *len2);
-int bo_getblk_nc(struct channel *chn, char **blk1, int *len1, char **blk2, int *len2);
-
-
-/* returns a pointer to the stream the channel belongs to */
-static inline struct stream *chn_sess(const struct channel *chn)
-{
-	if (chn->flags & CF_ISRESP)
-		return LIST_ELEM(chn, struct stream *, res);
-	else
-		return LIST_ELEM(chn, struct stream *, req);
-}
-
-/* returns a pointer to the stream interface feeding the channel (producer) */
-static inline struct stream_interface *chn_prod(const struct channel *chn)
-{
-	if (chn->flags & CF_ISRESP)
-		return &LIST_ELEM(chn, struct stream *, res)->si[1];
-	else
-		return &LIST_ELEM(chn, struct stream *, req)->si[0];
-}
-
-/* returns a pointer to the stream interface consuming the channel (producer) */
-static inline struct stream_interface *chn_cons(const struct channel *chn)
-{
-	if (chn->flags & CF_ISRESP)
-		return &LIST_ELEM(chn, struct stream *, res)->si[0];
-	else
-		return &LIST_ELEM(chn, struct stream *, req)->si[1];
-}
 
 /* Initialize all fields in the channel. */
 static inline void channel_init(struct channel *chn)
 {
-	chn->buf = &buf_empty;
+	chn->buf->o = 0;
+	chn->buf->i = 0;
+	chn->buf->p = chn->buf->data;
 	chn->to_forward = 0;
 	chn->last_read = now_ms;
 	chn->xfer_small = chn->xfer_large = 0;
 	chn->total = 0;
 	chn->pipe = NULL;
 	chn->analysers = 0;
+	chn->cons = NULL;
 	chn->flags = 0;
 }
 
@@ -134,12 +104,11 @@ static inline unsigned int channel_is_empty(struct channel *c)
 	return !(c->buf->o | (long)c->pipe);
 }
 
-/* Returns non-zero if the channel is rewritable, which means that the buffer
- * it is attached to has at least <maxrewrite> bytes immediately available.
- * This is used to decide when a request or response may be parsed when some
- * data from a previous exchange might still be present.
+/* Returns non-zero if the buffer input has all of its reserve available. This
+ * is used to decide when a request or response may be parsed when some data
+ * from a previous exchange might still be present.
  */
-static inline int channel_is_rewritable(const struct channel *chn)
+static inline int channel_reserved(const struct channel *chn)
 {
 	int rem = chn->buf->size;
 
@@ -155,7 +124,7 @@ static inline int channel_is_rewritable(const struct channel *chn)
  */
 static inline int channel_may_send(const struct channel *chn)
 {
-	return chn_cons(chn)->state == SI_ST_EST;
+	return chn->cons->state == SI_ST_EST;
 }
 
 /* Returns the amount of bytes from the channel that are already scheduled for
@@ -184,7 +153,7 @@ static inline int channel_in_transit(const struct channel *chn)
 	return ret;
 }
 
-/* Returns non-zero if the channel can still receive data. This is used to
+/* Returns non-zero if the buffer input is considered full. This is used to
  * decide when to stop reading into a buffer when we want to ensure that we
  * leave the reserve untouched after all pending outgoing data are forwarded.
  * The reserved space is taken into account if ->to_forward indicates that an
@@ -193,17 +162,14 @@ static inline int channel_in_transit(const struct channel *chn)
  * test is optimized to avoid as many operations as possible for the fast case
  * and to be used as an "if" condition.
  */
-static inline int channel_may_recv(const struct channel *chn)
+static inline int channel_full(const struct channel *chn)
 {
 	int rem = chn->buf->size;
-
-	if (chn->buf == &buf_empty)
-		return 1;
 
 	rem -= chn->buf->o;
 	rem -= chn->buf->i;
 	if (!rem)
-		return 0; /* buffer already full */
+		return 1; /* buffer already full */
 
 	/* now we know there's some room left, verify if we're touching
 	 * the reserve with some permanent input data.
@@ -211,12 +177,12 @@ static inline int channel_may_recv(const struct channel *chn)
 	if (chn->to_forward >= chn->buf->i ||
 	    (CHN_INFINITE_FORWARD < MAX_RANGE(typeof(chn->buf->i)) && // just there to ensure gcc
 	     chn->to_forward == CHN_INFINITE_FORWARD))                // avoids the useless second
-		return 1;                                             // test whenever possible
+		return 0;                                             // test whenever possible
 
 	rem -= global.tune.maxrewrite;
 	rem += chn->buf->o;
 	rem += chn->to_forward;
-	return rem > 0;
+	return rem <= 0;
 }
 
 /* Returns true if the channel's input is already closed */
@@ -257,8 +223,10 @@ static inline void channel_check_timeouts(struct channel *chn)
  */
 static inline void channel_erase(struct channel *chn)
 {
+	chn->buf->o = 0;
+	chn->buf->i = 0;
 	chn->to_forward = 0;
-	b_reset(chn->buf);
+	chn->buf->p = chn->buf->data;
 }
 
 /* marks the channel as "shutdown" ASAP for reads */
@@ -331,7 +299,7 @@ static inline void channel_dont_read(struct channel *chn)
  * any chn->size. Special care is taken to avoid any possible integer
  * overflow in the operations.
  */
-static inline int channel_reserved(const struct channel *chn)
+static inline int buffer_reserved(const struct channel *chn)
 {
 	int reserved;
 
@@ -342,12 +310,12 @@ static inline int channel_reserved(const struct channel *chn)
 }
 
 /* Return the max number of bytes the buffer can contain so that once all the
- * data in transit are forwarded, the buffer still has global.tune.maxrewrite
+ * pending bytes are forwarded, the buffer still has global.tune.maxrewrite
  * bytes free. The result sits between chn->size - maxrewrite and chn->size.
  */
-static inline int channel_recv_limit(const struct channel *chn)
+static inline int buffer_max_len(const struct channel *chn)
 {
-	return chn->buf->size - channel_reserved(chn);
+	return chn->buf->size - buffer_reserved(chn);
 }
 
 /* Returns the amount of space available at the input of the buffer, taking the
@@ -355,21 +323,22 @@ static inline int channel_recv_limit(const struct channel *chn)
  * is close to happen. The test is optimized to avoid as many operations as
  * possible for the fast case.
  */
-static inline int channel_recv_max(const struct channel *chn)
+static inline int bi_avail(const struct channel *chn)
 {
 	int ret;
 
-	ret = channel_recv_limit(chn) - chn->buf->i - chn->buf->o;
+	ret = buffer_max_len(chn) - chn->buf->i - chn->buf->o;
 	if (ret < 0)
 		ret = 0;
 	return ret;
 }
 
-/* Truncate any unread data in the channel's buffer, and disable forwarding.
- * Outgoing data are left intact. This is mainly to be used to send error
- * messages after existing data.
+/* Cut the "tail" of the channel's buffer, which means strip it to the length
+ * of unsent data only, and kill any remaining unsent data. Any scheduled
+ * forwarding is stopped. This is mainly to be used to send error messages
+ * after existing data.
  */
-static inline void channel_truncate(struct channel *chn)
+static inline void bi_erase(struct channel *chn)
 {
 	if (!chn->buf->o)
 		return channel_erase(chn);

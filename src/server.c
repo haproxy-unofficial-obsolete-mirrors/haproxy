@@ -16,21 +16,17 @@
 #include <common/cfgparse.h>
 #include <common/config.h>
 #include <common/errors.h>
-#include <common/namespace.h>
 #include <common/time.h>
 
 #include <types/global.h>
-#include <types/dns.h>
 
-#include <proto/checks.h>
 #include <proto/port_range.h>
 #include <proto/protocol.h>
 #include <proto/queue.h>
 #include <proto/raw_sock.h>
 #include <proto/server.h>
-#include <proto/stream.h>
+#include <proto/session.h>
 #include <proto/task.h>
-#include <proto/dns.h>
 
 
 /* List head of all known server keywords */
@@ -165,29 +161,29 @@ static int srv_parse_id(char **args, int *cur_arg, struct proxy *curproxy, struc
 }
 
 /* Shutdown all connections of a server. The caller must pass a termination
- * code in <why>, which must be one of SF_ERR_* indicating the reason for the
+ * code in <why>, which must be one of SN_ERR_* indicating the reason for the
  * shutdown.
  */
-void srv_shutdown_streams(struct server *srv, int why)
+void srv_shutdown_sessions(struct server *srv, int why)
 {
-	struct stream *stream, *stream_bck;
+	struct session *session, *session_bck;
 
-	list_for_each_entry_safe(stream, stream_bck, &srv->actconns, by_srv)
-		if (stream->srv_conn == srv)
-			stream_shutdown(stream, why);
+	list_for_each_entry_safe(session, session_bck, &srv->actconns, by_srv)
+		if (session->srv_conn == srv)
+			session_shutdown(session, why);
 }
 
 /* Shutdown all connections of all backup servers of a proxy. The caller must
- * pass a termination code in <why>, which must be one of SF_ERR_* indicating
+ * pass a termination code in <why>, which must be one of SN_ERR_* indicating
  * the reason for the shutdown.
  */
-void srv_shutdown_backup_streams(struct proxy *px, int why)
+void srv_shutdown_backup_sessions(struct proxy *px, int why)
 {
 	struct server *srv;
 
 	for (srv = px->srv; srv != NULL; srv = srv->next)
 		if (srv->flags & SRV_F_BACKUP)
-			srv_shutdown_streams(srv, why);
+			srv_shutdown_sessions(srv, why);
 }
 
 /* Appends some information to a message string related to a server going UP or
@@ -195,7 +191,7 @@ void srv_shutdown_backup_streams(struct proxy *px, int why)
  * one, a "via" information will be provided to know where the status came from.
  * If <reason> is non-null, the entire string will be appended after a comma and
  * a space (eg: to report some information from the check that changed the state).
- * If <xferred> is non-negative, some information about requeued streams are
+ * If <xferred> is non-negative, some information about requeued sessions are
  * provided.
  */
 void srv_append_status(struct chunk *msg, struct server *s, const char *reason, int xferred, int forced)
@@ -223,7 +219,7 @@ void srv_append_status(struct chunk *msg, struct server *s, const char *reason, 
 
 /* Marks server <s> down, regardless of its checks' statuses, notifies by all
  * available means, recounts the remaining servers on the proxy and transfers
- * queued streams whenever possible to other servers. It automatically
+ * queued sessions whenever possible to other servers. It automatically
  * recomputes the number of servers, but not the map. Maintenance servers are
  * ignored. It reports <reason> if non-null as the reason for going down. Note
  * that it makes use of the trash to build the log strings, so <reason> must
@@ -234,7 +230,6 @@ void srv_set_stopped(struct server *s, const char *reason)
 	struct server *srv;
 	int prev_srv_count = s->proxy->srv_bck + s->proxy->srv_act;
 	int srv_was_stopping = (s->state == SRV_ST_STOPPING);
-	int log_level;
 	int xferred;
 
 	if ((s->admin & SRV_ADMF_MAINT) || s->state == SRV_ST_STOPPED)
@@ -246,9 +241,9 @@ void srv_set_stopped(struct server *s, const char *reason)
 		s->proxy->lbprm.set_server_status_down(s);
 
 	if (s->onmarkeddown & HANA_ONMARKEDDOWN_SHUTDOWNSESSIONS)
-		srv_shutdown_streams(s, SF_ERR_DOWN);
+		srv_shutdown_sessions(s, SN_ERR_DOWN);
 
-	/* we might have streams queued on this server and waiting for
+	/* we might have sessions queued on this server and waiting for
 	 * a connection. Those which are redispatchable will be queued
 	 * to another server or to the proxy itself.
 	 */
@@ -262,9 +257,7 @@ void srv_set_stopped(struct server *s, const char *reason)
 	Warning("%s.\n", trash.str);
 
 	/* we don't send an alert if the server was previously paused */
-	log_level = srv_was_stopping ? LOG_NOTICE : LOG_ALERT;
-	send_log(s->proxy, log_level, "%s.\n", trash.str);
-	send_email_alert(s, log_level, "%s", trash.str);
+	send_log(s->proxy, srv_was_stopping ? LOG_NOTICE : LOG_ALERT, "%s.\n", trash.str);
 
 	if (prev_srv_count && s->proxy->srv_bck == 0 && s->proxy->srv_act == 0)
 		set_backend_down(s->proxy);
@@ -315,12 +308,12 @@ void srv_set_running(struct server *s, const char *reason)
 
 	/* If the server is set with "on-marked-up shutdown-backup-sessions",
 	 * and it's not a backup server and its effective weight is > 0,
-	 * then it can accept new connections, so we shut down all streams
+	 * then it can accept new connections, so we shut down all sessions
 	 * on all backup servers.
 	 */
 	if ((s->onmarkedup & HANA_ONMARKEDUP_SHUTDOWNBACKUPSESSIONS) &&
 	    !(s->flags & SRV_F_BACKUP) && s->eweight)
-		srv_shutdown_backup_streams(s->proxy, SF_ERR_UP);
+		srv_shutdown_backup_sessions(s->proxy, SN_ERR_UP);
 
 	/* check if we can handle some connections queued at the proxy. We
 	 * will take as many as we can handle.
@@ -334,7 +327,6 @@ void srv_set_running(struct server *s, const char *reason)
 	srv_append_status(&trash, s, reason, xferred, 0);
 	Warning("%s.\n", trash.str);
 	send_log(s->proxy, LOG_NOTICE, "%s.\n", trash.str);
-	send_email_alert(s, LOG_NOTICE, "%s", trash.str);
 
 	for (srv = s->trackers; srv; srv = srv->tracknext)
 		srv_set_running(srv, NULL);
@@ -364,7 +356,7 @@ void srv_set_stopping(struct server *s, const char *reason)
 	if (s->proxy->lbprm.set_server_status_down)
 		s->proxy->lbprm.set_server_status_down(s);
 
-	/* we might have streams queued on this server and waiting for
+	/* we might have sessions queued on this server and waiting for
 	 * a connection. Those which are redispatchable will be queued
 	 * to another server or to the proxy itself.
 	 */
@@ -441,9 +433,9 @@ void srv_set_admin_flag(struct server *s, enum srv_admin mode)
 				s->proxy->lbprm.set_server_status_down(s);
 
 			if (s->onmarkeddown & HANA_ONMARKEDDOWN_SHUTDOWNSESSIONS)
-				srv_shutdown_streams(s, SF_ERR_DOWN);
+				srv_shutdown_sessions(s, SN_ERR_DOWN);
 
-			/* we might have streams queued on this server and waiting for
+			/* we might have sessions queued on this server and waiting for
 			 * a connection. Those which are redispatchable will be queued
 			 * to another server or to the proxy itself.
 			 */
@@ -474,7 +466,7 @@ void srv_set_admin_flag(struct server *s, enum srv_admin mode)
 		if (s->proxy->lbprm.set_server_status_down)
 			s->proxy->lbprm.set_server_status_down(s);
 
-		/* we might have streams queued on this server and waiting for
+		/* we might have sessions queued on this server and waiting for
 		 * a connection. Those which are redispatchable will be queued
 		 * to another server or to the proxy itself.
 		 */
@@ -487,7 +479,6 @@ void srv_set_admin_flag(struct server *s, enum srv_admin mode)
 
 		Warning("%s.\n", trash.str);
 		send_log(s->proxy, LOG_NOTICE, "%s.\n", trash.str);
-		send_email_alert(s, LOG_NOTICE, "%s", trash.str);
 
 		if (prev_srv_count && s->proxy->srv_bck == 0 && s->proxy->srv_act == 0)
 			set_backend_down(s->proxy);
@@ -599,12 +590,12 @@ void srv_clr_admin_flag(struct server *s, enum srv_admin mode)
 
 			/* If the server is set with "on-marked-up shutdown-backup-sessions",
 			 * and it's not a backup server and its effective weight is > 0,
-			 * then it can accept new connections, so we shut down all streams
+			 * then it can accept new connections, so we shut down all sessions
 			 * on all backup servers.
 			 */
 			if ((s->onmarkedup & HANA_ONMARKEDUP_SHUTDOWNBACKUPSESSIONS) &&
 			    !(s->flags & SRV_F_BACKUP) && s->eweight)
-				srv_shutdown_backup_streams(s->proxy, SF_ERR_UP);
+				srv_shutdown_backup_sessions(s->proxy, SN_ERR_UP);
 
 			/* check if we can handle some connections queued at the proxy. We
 			 * will take as many as we can handle.
@@ -804,27 +795,33 @@ const char *server_parse_weight_change_request(struct server *sv,
 	return NULL;
 }
 
-/*
- * Parses <addr_str> and configures <sv> accordingly.
- * Returns:
- *  - error string on error
- *  - NULL on success
- */
-const char *server_parse_addr_change_request(struct server *sv,
-                                             const char *addr_str)
+static int init_check(struct check *check, int type, const char * file, int linenum)
 {
-	unsigned char ip[INET6_ADDRSTRLEN];
+	check->type = type;
 
-	if (inet_pton(AF_INET6, addr_str, ip)) {
-		update_server_addr(sv, ip, AF_INET6, "stats command\n");
-		return NULL;
+	/* Allocate buffer for requests... */
+	if ((check->bi = calloc(sizeof(struct buffer) + global.tune.chksize, sizeof(char))) == NULL) {
+		Alert("parsing [%s:%d] : out of memory while allocating check buffer.\n", file, linenum);
+		return ERR_ALERT | ERR_ABORT;
 	}
-	if (inet_pton(AF_INET, addr_str, ip)) {
-		update_server_addr(sv, ip, AF_INET, "stats command\n");
-		return NULL;
+	check->bi->size = global.tune.chksize;
+
+	/* Allocate buffer for responses... */
+	if ((check->bo = calloc(sizeof(struct buffer) + global.tune.chksize, sizeof(char))) == NULL) {
+		Alert("parsing [%s:%d] : out of memory while allocating check buffer.\n", file, linenum);
+		return ERR_ALERT | ERR_ABORT;
+	}
+	check->bo->size = global.tune.chksize;
+
+	/* Allocate buffer for partial results... */
+	if ((check->conn = calloc(1, sizeof(struct connection))) == NULL) {
+		Alert("parsing [%s:%d] : out of memory while allocating check connection.\n", file, linenum);
+		return ERR_ALERT | ERR_ABORT;
 	}
 
-	return "Could not understand IP address format.\n";
+	check->conn->t.sock.fd = -1; /* no agent in progress yet */
+
+	return 0;
 }
 
 int parse_server(const char *file, int linenum, char **args, struct proxy *curproxy, struct proxy *defproxy)
@@ -867,7 +864,6 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			struct sockaddr_storage *sk;
 			int port1, port2;
 			struct protocol *proto;
-			struct dns_resolution *curr_resolution;
 
 			if ((newsrv = (struct server *)calloc(1, sizeof(struct server))) == NULL) {
 				Alert("parsing [%s:%d] : out of memory.\n", file, linenum);
@@ -931,57 +927,11 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 				realport = port1;
 			}
 
-			/* save hostname and create associated name resolution */
-			switch (sk->ss_family) {
-			case AF_INET: {
-				/* remove the port if any */
-				char *c;
-				if ((c = rindex(args[2], ':')) != NULL) {
-					newsrv->hostname = my_strndup(args[2], c - args[2]);
-				}
-				else {
-					newsrv->hostname = strdup(args[2]);
-				}
-			}
-				break;
-			case AF_INET6:
-				newsrv->hostname = strdup(args[2]);
-				break;
-			default:
-				goto skip_name_resolution;
-			}
-
-			/* no name resolution if an IP has been provided */
-			if (inet_pton(sk->ss_family, newsrv->hostname, trash.str) == 1)
-				goto skip_name_resolution;
-
-			if ((curr_resolution = calloc(1, sizeof(struct dns_resolution))) == NULL)
-				goto skip_name_resolution;
-
-			curr_resolution->hostname_dn_len = dns_str_to_dn_label_len(newsrv->hostname);
-			if ((curr_resolution->hostname_dn = calloc(curr_resolution->hostname_dn_len + 1, sizeof(char))) == NULL)
-				goto skip_name_resolution;
-			if ((dns_str_to_dn_label(newsrv->hostname, curr_resolution->hostname_dn, curr_resolution->hostname_dn_len + 1)) == NULL) {
-				Alert("parsing [%s:%d] : Invalid hostname '%s'\n",
-				      file, linenum, args[2]);
-				err_code |= ERR_ALERT | ERR_FATAL;
-				goto out;
-			}
-
-			curr_resolution->requester = newsrv;
-			curr_resolution->requester_cb = snr_resolution_cb;
-			curr_resolution->requester_error_cb = snr_resolution_error_cb;
-			curr_resolution->status = RSLV_STATUS_NONE;
-			curr_resolution->step = RSLV_STEP_NONE;
-			/* a first resolution has been done by the configuration parser */
-			curr_resolution->last_resolution = now_ms;
-			newsrv->resolution = curr_resolution;
-
- skip_name_resolution:
 			newsrv->addr = *sk;
+			newsrv->proto = newsrv->check_common.proto = protocol_by_family(newsrv->addr.ss_family);
 			newsrv->xprt  = newsrv->check.xprt = newsrv->agent.xprt = &raw_sock;
 
-			if (!protocol_by_family(newsrv->addr.ss_family)) {
+			if (!newsrv->proto) {
 				Alert("parsing [%s:%d] : Unknown protocol family %d '%s'\n",
 				      file, linenum, newsrv->addr.ss_family, args[2]);
 				err_code |= ERR_ALERT | ERR_FATAL;
@@ -1018,22 +968,17 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			newsrv->check.fall	= curproxy->defsrv.check.fall;
 			newsrv->check.health	= newsrv->check.rise;	/* up, but will fall down at first failure */
 			newsrv->check.server	= newsrv;
-			newsrv->check.tcpcheck_rules	= &curproxy->tcpcheck_rules;
 
 			newsrv->agent.status	= HCHK_STATUS_INI;
 			newsrv->agent.rise	= curproxy->defsrv.agent.rise;
 			newsrv->agent.fall	= curproxy->defsrv.agent.fall;
 			newsrv->agent.health	= newsrv->agent.rise;	/* up, but will fall down at first failure */
 			newsrv->agent.server	= newsrv;
-			newsrv->resolver_family_priority = curproxy->defsrv.resolver_family_priority;
-			if (newsrv->resolver_family_priority == AF_UNSPEC)
-				newsrv->resolver_family_priority = AF_INET6;
 
 			cur_arg = 3;
 		} else {
 			newsrv = &curproxy->defsrv;
 			cur_arg = 1;
-			newsrv->resolver_family_priority = AF_INET6;
 		}
 
 		while (*args[cur_arg]) {
@@ -1071,23 +1016,6 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			else if (!defsrv && !strcmp(args[cur_arg], "redir")) {
 				newsrv->rdr_pfx = strdup(args[cur_arg + 1]);
 				newsrv->rdr_len = strlen(args[cur_arg + 1]);
-				cur_arg += 2;
-			}
-			else if (!strcmp(args[cur_arg], "resolvers")) {
-				newsrv->resolvers_id = strdup(args[cur_arg + 1]);
-				cur_arg += 2;
-			}
-			else if (!strcmp(args[cur_arg], "resolve-prefer")) {
-				if (!strcmp(args[cur_arg + 1], "ipv4"))
-					newsrv->resolver_family_priority = AF_INET;
-				else if (!strcmp(args[cur_arg + 1], "ipv6"))
-					newsrv->resolver_family_priority = AF_INET6;
-				else {
-					Alert("parsing [%s:%d]: '%s' expects either ipv4 or ipv6 as argument.\n",
-						file, linenum, args[cur_arg]);
-					err_code |= ERR_ALERT | ERR_FATAL;
-					goto out;
-				}
 				cur_arg += 2;
 			}
 			else if (!strcmp(args[cur_arg], "rise")) {
@@ -1208,7 +1136,8 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 					goto out;
 				}
 
-				newsrv->check.addr = newsrv->agent.addr = *sk;
+				newsrv->check_common.addr = *sk;
+				newsrv->check_common.proto = protocol_by_family(sk->ss_family);
 				cur_arg += 2;
 			}
 			else if (!strcmp(args[cur_arg], "port")) {
@@ -1571,31 +1500,6 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;
 			}
-			else if (!defsrv && !strcmp(args[cur_arg], "namespace")) {
-#ifdef CONFIG_HAP_NS
-				char *arg = args[cur_arg + 1];
-				if (!strcmp(arg, "*")) {
-					newsrv->flags |= SRV_F_USE_NS_FROM_PP;
-				} else {
-					newsrv->netns = netns_store_lookup(arg, strlen(arg));
-
-					if (newsrv->netns == NULL)
-						newsrv->netns = netns_store_insert(arg);
-
-					if (newsrv->netns == NULL) {
-						Alert("Cannot open namespace '%s'.\n", args[cur_arg + 1]);
-						err_code |= ERR_ALERT | ERR_FATAL;
-						goto out;
-					}
-				}
-#else
-				Alert("parsing [%s:%d] : '%s' : '%s' option not implemented.\n",
-				      file, linenum, args[0], args[cur_arg]);
-				err_code |= ERR_ALERT | ERR_FATAL;
-				goto out;
-#endif
-				cur_arg += 2;
-			}
 			else {
 				static int srv_dumped;
 				struct srv_kw *kw;
@@ -1662,7 +1566,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 		}
 
 		if (do_check) {
-			const char *ret;
+			int ret;
 
 			if (newsrv->trackit) {
 				Alert("parsing [%s:%d]: unable to enable checks and tracking at the same time!\n",
@@ -1676,7 +1580,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			 * same as for the production traffic. Otherwise we use raw_sock by
 			 * default, unless one is specified.
 			 */
-			if (!newsrv->check.port && !is_addr(&newsrv->check.addr)) {
+			if (!newsrv->check.port && !is_addr(&newsrv->check_common.addr)) {
 #ifdef USE_OPENSSL
 				newsrv->check.use_ssl |= (newsrv->use_ssl || (newsrv->proxy->options & PR_O_TCPCHK_SSL));
 #endif
@@ -1684,7 +1588,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			}
 			/* try to get the port from check_core.addr if check.port not set */
 			if (!newsrv->check.port)
-				newsrv->check.port = get_host_port(&newsrv->check.addr);
+				newsrv->check.port = get_host_port(&newsrv->check_common.addr);
 
 			if (!newsrv->check.port)
 				newsrv->check.port = realport; /* by default */
@@ -1707,8 +1611,8 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			 * be a 'connect' one when checking an IPv4/IPv6 server.
 			 */
 			if (!newsrv->check.port &&
-			    (is_inet_addr(&newsrv->check.addr) ||
-			     (!is_addr(&newsrv->check.addr) && is_inet_addr(&newsrv->addr)))) {
+			    (is_inet_addr(&newsrv->check_common.addr) ||
+			     (!is_addr(&newsrv->check_common.addr) && is_inet_addr(&newsrv->addr)))) {
 				struct tcpcheck_rule *n = NULL, *r = NULL;
 				struct list *l;
 
@@ -1741,21 +1645,17 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			}
 
 			/* note: check type will be set during the config review phase */
-			ret = init_check(&newsrv->check, 0);
+			ret = init_check(&newsrv->check, 0, file, linenum);
 			if (ret) {
-				Alert("parsing [%s:%d] : %s.\n", file, linenum, ret);
-				err_code |= ERR_ALERT | ERR_ABORT;
+				err_code |= ret;
 				goto out;
 			}
-
-			if (newsrv->resolution)
-				newsrv->resolution->resolver_family_priority = newsrv->resolver_family_priority;
 
 			newsrv->check.state |= CHK_ST_CONFIGURED | CHK_ST_ENABLED;
 		}
 
 		if (do_agent) {
-			const char *ret;
+			int ret;
 
 			if (!newsrv->agent.port) {
 				Alert("parsing [%s:%d] : server %s does not have agent port. Agent check has been disabled.\n",
@@ -1767,10 +1667,9 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			if (!newsrv->agent.inter)
 				newsrv->agent.inter = newsrv->check.inter;
 
-			ret = init_check(&newsrv->agent, PR_O2_LB_AGENT_CHK);
+			ret = init_check(&newsrv->agent, PR_O2_LB_AGENT_CHK, file, linenum);
 			if (ret) {
-				Alert("parsing [%s:%d] : %s.\n", file, linenum, ret);
-				err_code |= ERR_ALERT | ERR_ABORT;
+				err_code |= ret;
 				goto out;
 			}
 
@@ -1791,304 +1690,6 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
  out:
 	free(errmsg);
 	return err_code;
-}
-
-/*
- * update a server's current IP address.
- * ip is a pointer to the new IP address, whose address family is ip_sin_family.
- * ip is in network format.
- * updater is a string which contains an information about the requester of the update.
- * updater is used if not NULL.
- *
- * A log line and a stderr warning message is generated based on server's backend options.
- */
-int update_server_addr(struct server *s, void *ip, int ip_sin_family, char *updater)
-{
-	/* generates a log line and a warning on stderr */
-	if (1) {
-		/* book enough space for both IPv4 and IPv6 */
-		char oldip[INET6_ADDRSTRLEN];
-		char newip[INET6_ADDRSTRLEN];
-
-		memset(oldip, '\0', INET6_ADDRSTRLEN);
-		memset(newip, '\0', INET6_ADDRSTRLEN);
-
-		/* copy old IP address in a string */
-		switch (s->addr.ss_family) {
-		case AF_INET:
-			inet_ntop(s->addr.ss_family, &((struct sockaddr_in *)&s->addr)->sin_addr, oldip, INET_ADDRSTRLEN);
-			break;
-		case AF_INET6:
-			inet_ntop(s->addr.ss_family, &((struct sockaddr_in6 *)&s->addr)->sin6_addr, oldip, INET6_ADDRSTRLEN);
-			break;
-		};
-
-		/* copy new IP address in a string */
-		switch (ip_sin_family) {
-		case AF_INET:
-			inet_ntop(ip_sin_family, ip, newip, INET_ADDRSTRLEN);
-			break;
-		case AF_INET6:
-			inet_ntop(ip_sin_family, ip, newip, INET6_ADDRSTRLEN);
-			break;
-		};
-
-		/* save log line into a buffer */
-		chunk_printf(&trash, "%s/%s changed its IP from %s to %s by %s",
-				s->proxy->id, s->id, oldip, newip, updater);
-
-		/* write the buffer on stderr */
-		Warning("%s.\n", trash.str);
-
-		/* send a log */
-		send_log(s->proxy, LOG_NOTICE, "%s.\n", trash.str);
-	}
-
-	/* save the new IP family */
-	s->addr.ss_family = ip_sin_family;
-	/* save the new IP address */
-	switch (ip_sin_family) {
-	case AF_INET:
-		((struct sockaddr_in *)&s->addr)->sin_addr.s_addr = *(uint32_t *)ip;
-		break;
-	case AF_INET6:
-		memcpy(((struct sockaddr_in6 *)&s->addr)->sin6_addr.s6_addr, ip, 16);
-		break;
-	};
-
-	return 0;
-}
-
-/*
- * update server status based on result of name resolution
- * returns:
- *  0 if server status is updated
- *  1 if server status has not changed
- */
-int snr_update_srv_status(struct server *s)
-{
-	struct dns_resolution *resolution = s->resolution;
-
-	switch (resolution->status) {
-		case RSLV_STATUS_NONE:
-			/* status when HAProxy has just (re)started */
-			trigger_resolution(s);
-			break;
-
-		default:
-			break;
-	}
-
-	return 1;
-}
-
-/*
- * Server Name Resolution valid response callback
- * It expects:
- *  - <nameserver>: the name server which answered the valid response
- *  - <response>: buffer containing a valid DNS response
- *  - <response_len>: size of <response>
- * It performs the following actions:
- *  - ignore response if current ip found and server family not met
- *  - update with first new ip found if family is met and current IP is not found
- * returns:
- *  0 on error
- *  1 when no error or safe ignore
- */
-int snr_resolution_cb(struct dns_resolution *resolution, struct dns_nameserver *nameserver, unsigned char *response, int response_len)
-{
-	struct server *s;
-	void *serverip, *firstip;
-	short server_sin_family, firstip_sin_family;
-	unsigned char *response_end;
-	int ret;
-	struct chunk *chk = get_trash_chunk();
-
-	/* initializing variables */
-	response_end = response + response_len;	/* pointer to mark the end of the response */
-	firstip = NULL;		/* pointer to the first valid response found */
-				/* it will be used as the new IP if a change is required */
-	firstip_sin_family = AF_UNSPEC;
-	serverip = NULL;	/* current server IP address */
-
-	/* shortcut to the server whose name is being resolved */
-	s = (struct server *)resolution->requester;
-
-	/* initializing server IP pointer */
-	server_sin_family = s->addr.ss_family;
-	switch (server_sin_family) {
-		case AF_INET:
-			serverip = &((struct sockaddr_in *)&s->addr)->sin_addr.s_addr;
-			break;
-
-		case AF_INET6:
-			serverip = &((struct sockaddr_in6 *)&s->addr)->sin6_addr.s6_addr;
-			break;
-
-		default:
-			goto invalid;
-	}
-
-	ret = dns_get_ip_from_response(response, response_end, resolution->hostname_dn, resolution->hostname_dn_len,
-			serverip, server_sin_family, resolution->resolver_family_priority, &firstip,
-			&firstip_sin_family);
-
-	switch (ret) {
-		case DNS_UPD_NO:
-			if (resolution->status != RSLV_STATUS_VALID) {
-				resolution->status = RSLV_STATUS_VALID;
-				resolution->last_status_change = now_ms;
-			}
-			goto stop_resolution;
-
-		case DNS_UPD_SRVIP_NOT_FOUND:
-			goto save_ip;
-
-		case DNS_UPD_CNAME:
-			if (resolution->status != RSLV_STATUS_VALID) {
-				resolution->status = RSLV_STATUS_VALID;
-				resolution->last_status_change = now_ms;
-			}
-			goto invalid;
-
-		default:
-			goto invalid;
-
-	}
-
- save_ip:
-	nameserver->counters.update += 1;
-	if (resolution->status != RSLV_STATUS_VALID) {
-		resolution->status = RSLV_STATUS_VALID;
-		resolution->last_status_change = now_ms;
-	}
-
-	/* save the first ip we found */
-	chunk_printf(chk, "%s/%s", nameserver->resolvers->id, nameserver->id);
-	update_server_addr(s, firstip, firstip_sin_family, (char *)chk->str);
-
- stop_resolution:
-	/* update last resolution date and time */
-	resolution->last_resolution = now_ms;
-	/* reset current status flag */
-	resolution->step = RSLV_STEP_NONE;
-	/* reset values */
-	dns_reset_resolution(resolution);
-
-	LIST_DEL(&resolution->list);
-	dns_update_resolvers_timeout(nameserver->resolvers);
-
-	snr_update_srv_status(s);
-	return 0;
-
- invalid:
-	nameserver->counters.invalid += 1;
-	if (resolution->nb_responses >= nameserver->resolvers->count_nameservers)
-		goto stop_resolution;
-
-	snr_update_srv_status(s);
-	return 0;
-}
-
-/*
- * Server Name Resolution error management callback
- * returns:
- *  0 on error
- *  1 when no error or safe ignore
- */
-int snr_resolution_error_cb(struct dns_resolution *resolution, int error_code)
-{
-	struct server *s;
-	struct dns_resolvers *resolvers;
-
-	/* shortcut to the server whose name is being resolved */
-	s = (struct server *)resolution->requester;
-	resolvers = resolution->resolvers;
-
-	/* can be ignored if this is not the last response */
-	if ((error_code != DNS_RESP_TIMEOUT) && (resolution->nb_responses < resolvers->count_nameservers)) {
-		return 1;
-	}
-
-	switch (error_code) {
-		case DNS_RESP_INVALID:
-		case DNS_RESP_WRONG_NAME:
-			if (resolution->status != RSLV_STATUS_INVALID) {
-				resolution->status = RSLV_STATUS_INVALID;
-				resolution->last_status_change = now_ms;
-			}
-			break;
-
-		case DNS_RESP_ANCOUNT_ZERO:
-		case DNS_RESP_ERROR:
-			if (resolution->query_type == DNS_RTYPE_ANY) {
-				/* let's change the query type */
-				if (resolution->resolver_family_priority == AF_INET6)
-					resolution->query_type = DNS_RTYPE_AAAA;
-				else
-					resolution->query_type = DNS_RTYPE_A;
-
-				dns_send_query(resolution);
-
-				/*
-				 * move the resolution to the last element of the FIFO queue
-				 * and update timeout wakeup based on the new first entry
-				 */
-				if (dns_check_resolution_queue(resolvers) > 1) {
-					/* second resolution becomes first one */
-					LIST_DEL(&resolvers->curr_resolution);
-					/* ex first resolution goes to the end of the queue */
-					LIST_ADDQ(&resolvers->curr_resolution, &resolution->list);
-				}
-				dns_update_resolvers_timeout(resolvers);
-				goto leave;
-			}
-			else {
-				if (resolution->status != RSLV_STATUS_OTHER) {
-					resolution->status = RSLV_STATUS_OTHER;
-					resolution->last_status_change = now_ms;
-				}
-			}
-			break;
-
-		case DNS_RESP_NX_DOMAIN:
-			if (resolution->status != RSLV_STATUS_NX) {
-				resolution->status = RSLV_STATUS_NX;
-				resolution->last_status_change = now_ms;
-			}
-			break;
-
-		case DNS_RESP_REFUSED:
-			if (resolution->status != RSLV_STATUS_REFUSED) {
-				resolution->status = RSLV_STATUS_REFUSED;
-				resolution->last_status_change = now_ms;
-			}
-			break;
-
-		case DNS_RESP_CNAME_ERROR:
-			break;
-
-		case DNS_RESP_TIMEOUT:
-			if (resolution->status != RSLV_STATUS_TIMEOUT) {
-				resolution->status = RSLV_STATUS_TIMEOUT;
-				resolution->last_status_change = now_ms;
-			}
-			break;
-	}
-
-	/* update last resolution date and time */
-	resolution->last_resolution = now_ms;
-	/* reset current status flag */
-	resolution->step = RSLV_STEP_NONE;
-	/* reset values */
-	dns_reset_resolution(resolution);
-
-	LIST_DEL(&resolution->list);
-	dns_update_resolvers_timeout(resolvers);
-
- leave:
-	snr_update_srv_status(s);
-	return 1;
 }
 
 /*

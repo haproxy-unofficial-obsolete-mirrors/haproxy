@@ -25,7 +25,11 @@
 #include <types/global.h>
 
 #include <proto/fd.h>
+#include <proto/signal.h>
+#include <proto/task.h>
 
+
+static int absmaxevents = 0;    // absolute maximum amounts of polled events
 
 /* private data */
 static struct epoll_event *epoll_events;
@@ -65,7 +69,7 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 	int updt_idx;
 	int wait_time;
 
-	/* first, scan the update list to find polling changes */
+	/* first, scan the update list to find changes */
 	for (updt_idx = 0; updt_idx < fd_nbupdt; updt_idx++) {
 		fd = fd_updt[updt_idx];
 		fdtab[fd].updated = 0;
@@ -105,18 +109,31 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 			ev.data.fd = fd;
 			epoll_ctl(epoll_fd, opcode, fd, &ev);
 		}
+
+		fd_alloc_or_release_cache_entry(fd, en);
 	}
 	fd_nbupdt = 0;
 
 	/* compute the epoll_wait() timeout */
-	if (!exp)
-		wait_time = MAX_DELAY_MS;
-	else if (tick_is_expired(exp, now_ms))
+
+	if (fd_cache_num || run_queue || signal_queue_len) {
+		/* Maybe we still have events in the spec list, or there are
+		 * some tasks left pending in the run_queue, so we must not
+		 * wait in epoll() otherwise we would delay their delivery by
+		 * the next timeout.
+		 */
 		wait_time = 0;
+	}
 	else {
-		wait_time = TICKS_TO_MS(tick_remain(now_ms, exp)) + 1;
-		if (wait_time > MAX_DELAY_MS)
+		if (!exp)
 			wait_time = MAX_DELAY_MS;
+		else if (tick_is_expired(exp, now_ms))
+			wait_time = 0;
+		else {
+			wait_time = TICKS_TO_MS(tick_remain(now_ms, exp)) + 1;
+			if (wait_time > MAX_DELAY_MS)
+				wait_time = MAX_DELAY_MS;
+		}
 	}
 
 	/* now let's wait for polled events */
@@ -158,11 +175,7 @@ REGPRM2 static void _do_poll(struct poller *p, int exp)
 			n |= FD_POLL_HUP;
 
 		fdtab[fd].ev |= n;
-		if (n & (FD_POLL_IN | FD_POLL_HUP | FD_POLL_ERR))
-			fd_may_recv(fd);
-
-		if (n & (FD_POLL_OUT | FD_POLL_ERR))
-			fd_may_send(fd);
+		fd_process_polled_events(fd);
 	}
 	/* the caller will take care of cached events */
 }
@@ -180,8 +193,10 @@ REGPRM1 static int _do_init(struct poller *p)
 	if (epoll_fd < 0)
 		goto fail_fd;
 
+	/* See comments at the top of the file about this formula. */
+	absmaxevents = MAX(global.tune.maxpollevents, global.maxsock);
 	epoll_events = (struct epoll_event*)
-		calloc(1, sizeof(struct epoll_event) * global.tune.maxpollevents);
+		calloc(1, sizeof(struct epoll_event) * absmaxevents);
 
 	if (epoll_events == NULL)
 		goto fail_ee;
