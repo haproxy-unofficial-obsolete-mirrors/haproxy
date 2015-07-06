@@ -33,6 +33,7 @@
 #include <proto/freq_ctr.h>
 #include <proto/log.h>
 #include <proto/sample.h>
+#include <proto/stream.h>
 #include <proto/task.h>
 
 /* List head of all known bind keywords */
@@ -120,9 +121,10 @@ int pause_listener(struct listener *l)
  * may replace enable_listener(). The resulting state will either be LI_READY
  * or LI_FULL. 0 is returned in case of failure to resume (eg: dead socket).
  * Listeners bound to a different process are not woken up unless we're in
- * foreground mode. If the listener was only in the assigned state, it's totally
- * rebound. This can happen if a pause() has completely stopped it. If the
- * resume fails, 0 is returned and an error might be displayed.
+ * foreground mode, and are ignored. If the listener was only in the assigned
+ * state, it's totally rebound. This can happen if a pause() has completely
+ * stopped it. If the resume fails, 0 is returned and an error might be
+ * displayed.
  */
 int resume_listener(struct listener *l)
 {
@@ -146,7 +148,7 @@ int resume_listener(struct listener *l)
 	if ((global.mode & (MODE_DAEMON | MODE_SYSTEMD)) &&
 	    l->bind_conf->bind_proc &&
 	    !(l->bind_conf->bind_proc & (1UL << (relative_pid - 1))))
-		return 0;
+		return 1;
 
 	if (l->proto->sock_prot == IPPROTO_TCP &&
 	    l->state == LI_PAUSED &&
@@ -169,7 +171,7 @@ int resume_listener(struct listener *l)
 	return 1;
 }
 
-/* Marks a ready listener as full so that the session code tries to re-enable
+/* Marks a ready listener as full so that the stream code tries to re-enable
  * it upon next close() using resume_listener().
  */
 void listener_full(struct listener *l)
@@ -466,7 +468,7 @@ void listener_accept(int fd)
 
 		ret = l->accept(l, cfd, &addr);
 		if (unlikely(ret <= 0)) {
-			/* The connection was closed by session_accept(). Either
+			/* The connection was closed by stream_accept(). Either
 			 * we just have to ignore it (ret == 0) or it's a critical
 			 * error due to a resource shortage, and we must stop the
 			 * listener (ret < 0).
@@ -589,21 +591,19 @@ void bind_dump_kws(char **out)
 
 /* set temp integer to the number of connexions to the same listening socket */
 static int
-smp_fetch_dconn(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_dconn(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	smp->type = SMP_T_UINT;
-	smp->data.uint = l4->listener->nbconn;
+	smp->data.uint = smp->sess->listener->nbconn;
 	return 1;
 }
 
 /* set temp integer to the id of the socket (listener) */
 static int
-smp_fetch_so_id(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_so_id(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	smp->type = SMP_T_UINT;
-	smp->data.uint = l4->listener->luid;
+	smp->data.uint = smp->sess->listener->luid;
 	return 1;
 }
 

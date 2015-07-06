@@ -35,7 +35,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-
+#include <netdb.h>
 #include <netinet/tcp.h>
 
 #include <openssl/ssl.h>
@@ -47,6 +47,12 @@
 #if (defined SSL_CTRL_SET_TLSEXT_STATUS_REQ_CB && !defined OPENSSL_NO_OCSP)
 #include <openssl/ocsp.h>
 #endif
+#ifndef OPENSSL_NO_DH
+#include <openssl/dh.h>
+#endif
+
+#include <import/lru.h>
+#include <import/xxhash.h>
 
 #include <common/buffer.h>
 #include <common/compat.h>
@@ -72,11 +78,13 @@
 #include <proto/frontend.h>
 #include <proto/listener.h>
 #include <proto/pattern.h>
+#include <proto/proto_tcp.h>
 #include <proto/server.h>
 #include <proto/log.h>
 #include <proto/proxy.h>
 #include <proto/shctx.h>
 #include <proto/ssl_sock.h>
+#include <proto/stream.h>
 #include <proto/task.h>
 
 /* Warning, these are bits, not integers! */
@@ -114,12 +122,40 @@ enum {
 int sslconns = 0;
 int totalsslconns = 0;
 
+#if (defined SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB && TLS_TICKETS_NO > 0)
+struct list tlskeys_reference = LIST_HEAD_INIT(tlskeys_reference);
+#endif
+
 #ifndef OPENSSL_NO_DH
+static int ssl_dh_ptr_index = -1;
+static DH *global_dh = NULL;
 static DH *local_dh_1024 = NULL;
 static DH *local_dh_2048 = NULL;
 static DH *local_dh_4096 = NULL;
-static DH *local_dh_8192 = NULL;
 #endif /* OPENSSL_NO_DH */
+
+#ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+/* X509V3 Extensions that will be added on generated certificates */
+#define X509V3_EXT_SIZE 5
+static char *x509v3_ext_names[X509V3_EXT_SIZE] = {
+	"basicConstraints",
+	"nsComment",
+	"subjectKeyIdentifier",
+	"authorityKeyIdentifier",
+	"keyUsage",
+};
+static char *x509v3_ext_values[X509V3_EXT_SIZE] = {
+	"CA:FALSE",
+	"\"OpenSSL Generated Certificate\"",
+	"hash",
+	"keyid,issuer:always",
+	"nonRepudiation,digitalSignature,keyEncipherment"
+};
+
+/* LRU cache to store generated certificate */
+static struct lru64_head *ssl_ctx_lru_tree = NULL;
+static unsigned int       ssl_ctx_lru_seed = 0;
+#endif // SSL_CTRL_SET_TLSEXT_HOSTNAME
 
 #if (defined SSL_CTRL_SET_TLSEXT_STATUS_REQ_CB && !defined OPENSSL_NO_OCSP)
 struct certificate_ocsp {
@@ -405,8 +441,8 @@ static int ssl_tlsext_ticket_key_cb(SSL *s, unsigned char key_name[16], unsigned
 	int i;
 
 	conn = (struct connection *)SSL_get_app_data(s);
-	keys = objt_listener(conn->target)->bind_conf->tls_ticket_keys;
-	head = objt_listener(conn->target)->bind_conf->tls_ticket_enc_index;
+	keys = objt_listener(conn->target)->bind_conf->keys_ref->tlskeys;
+	head = objt_listener(conn->target)->bind_conf->keys_ref->tls_ticket_enc_index;
 
 	if (enc) {
 		memcpy(key_name, keys[head].name, 16);
@@ -435,6 +471,88 @@ static int ssl_tlsext_ticket_key_cb(SSL *s, unsigned char key_name[16], unsigned
 		return i ? 2 : 1;
 	}
 }
+
+struct tls_keys_ref *tlskeys_ref_lookup(const char *filename)
+{
+        struct tls_keys_ref *ref;
+
+        list_for_each_entry(ref, &tlskeys_reference, list)
+                if (ref->filename && strcmp(filename, ref->filename) == 0)
+                        return ref;
+        return NULL;
+}
+
+struct tls_keys_ref *tlskeys_ref_lookupid(int unique_id)
+{
+        struct tls_keys_ref *ref;
+
+        list_for_each_entry(ref, &tlskeys_reference, list)
+                if (ref->unique_id == unique_id)
+                        return ref;
+        return NULL;
+}
+
+int ssl_sock_update_tlskey(char *filename, struct chunk *tlskey, char **err) {
+	struct tls_keys_ref *ref = tlskeys_ref_lookup(filename);
+
+	if(!ref) {
+		memprintf(err, "Unable to locate the referenced filename: %s", filename);
+		return 1;
+	}
+
+	memcpy((char *) (ref->tlskeys + 2 % TLS_TICKETS_NO), tlskey->str, tlskey->len);
+	ref->tls_ticket_enc_index = ref->tls_ticket_enc_index + 1 % TLS_TICKETS_NO;
+
+	return 0;
+}
+
+/* This function finalize the configuration parsing. Its set all the
+ * automatic ids
+ */
+void tlskeys_finalize_config(void)
+{
+	int i = 0;
+	struct tls_keys_ref *ref, *ref2, *ref3;
+	struct list tkr = LIST_HEAD_INIT(tkr);
+
+	list_for_each_entry(ref, &tlskeys_reference, list) {
+		if (ref->unique_id == -1) {
+			/* Look for the first free id. */
+			while (1) {
+				list_for_each_entry(ref2, &tlskeys_reference, list) {
+					if (ref2->unique_id == i) {
+						i++;
+						break;
+					}
+				}
+				if (&ref2->list == &tlskeys_reference)
+					break;
+			}
+
+			/* Uses the unique id and increment it for the next entry. */
+			ref->unique_id = i;
+			i++;
+		}
+	}
+
+	/* This sort the reference list by id. */
+	list_for_each_entry_safe(ref, ref2, &tlskeys_reference, list) {
+		LIST_DEL(&ref->list);
+		list_for_each_entry(ref3, &tkr, list) {
+			if (ref->unique_id < ref3->unique_id) {
+				LIST_ADDQ(&ref3->list, &ref->list);
+				break;
+			}
+		}
+		if (&ref3->list == &tkr)
+			LIST_ADDQ(&tkr, &ref->list);
+	}
+
+	/* swap root */
+	LIST_ADD(&tkr, &tlskeys_reference);
+	LIST_DEL(&tkr);
+}
+
 #endif /* SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB */
 
 /*
@@ -591,6 +709,141 @@ out:
 		free(warn);
 
 
+	return ret;
+}
+
+#endif
+
+#if (OPENSSL_VERSION_NUMBER >= 0x1000200fL && !defined OPENSSL_NO_TLSEXT && !defined OPENSSL_IS_BORINGSSL)
+
+#define CT_EXTENSION_TYPE 18
+
+static int sctl_ex_index = -1;
+
+/*
+ * Try to parse Signed Certificate Timestamp List structure. This function
+ * makes only basic test if the data seems like SCTL. No signature validation
+ * is performed.
+ */
+static int ssl_sock_parse_sctl(struct chunk *sctl)
+{
+	int ret = 1;
+	int len, pos, sct_len;
+	unsigned char *data;
+
+	if (sctl->len < 2)
+		goto out;
+
+	data = (unsigned char *)sctl->str;
+	len = (data[0] << 8) | data[1];
+
+	if (len + 2 != sctl->len)
+		goto out;
+
+	data = data + 2;
+	pos = 0;
+	while (pos < len) {
+		if (len - pos < 2)
+			goto out;
+
+		sct_len = (data[pos] << 8) | data[pos + 1];
+		if (pos + sct_len + 2 > len)
+			goto out;
+
+		pos += sct_len + 2;
+	}
+
+	ret = 0;
+
+out:
+	return ret;
+}
+
+static int ssl_sock_load_sctl_from_file(const char *sctl_path, struct chunk **sctl)
+{
+	int fd = -1;
+	int r = 0;
+	int ret = 1;
+
+	*sctl = NULL;
+
+	fd = open(sctl_path, O_RDONLY);
+	if (fd == -1)
+		goto end;
+
+	trash.len = 0;
+	while (trash.len < trash.size) {
+		r = read(fd, trash.str + trash.len, trash.size - trash.len);
+		if (r < 0) {
+			if (errno == EINTR)
+				continue;
+
+			goto end;
+		}
+		else if (r == 0) {
+			break;
+		}
+		trash.len += r;
+	}
+
+	ret = ssl_sock_parse_sctl(&trash);
+	if (ret)
+		goto end;
+
+	*sctl = calloc(1, sizeof(struct chunk));
+	if (!chunk_dup(*sctl, &trash)) {
+		free(*sctl);
+		*sctl = NULL;
+		goto end;
+	}
+
+end:
+	if (fd != -1)
+		close(fd);
+
+	return ret;
+}
+
+int ssl_sock_sctl_add_cbk(SSL *ssl, unsigned ext_type, const unsigned char **out, size_t *outlen, int *al, void *add_arg)
+{
+	struct chunk *sctl = (struct chunk *)add_arg;
+
+	*out = (unsigned char *)sctl->str;
+	*outlen = sctl->len;
+
+	return 1;
+}
+
+int ssl_sock_sctl_parse_cbk(SSL *s, unsigned int ext_type, const unsigned char *in, size_t inlen, int *al, void *parse_arg)
+{
+	return 1;
+}
+
+static int ssl_sock_load_sctl(SSL_CTX *ctx, const char *cert_path)
+{
+	char sctl_path[MAXPATHLEN+1];
+	int ret = -1;
+	struct stat st;
+	struct chunk *sctl = NULL;
+
+	snprintf(sctl_path, MAXPATHLEN+1, "%s.sctl", cert_path);
+
+	if (stat(sctl_path, &st))
+		return 1;
+
+	if (ssl_sock_load_sctl_from_file(sctl_path, &sctl))
+		goto out;
+
+	if (!SSL_CTX_add_server_custom_ext(ctx, CT_EXTENSION_TYPE, ssl_sock_sctl_add_cbk, NULL, sctl, ssl_sock_sctl_parse_cbk, NULL)) {
+		free(sctl);
+		goto out;
+	}
+
+	SSL_CTX_set_ex_data(ctx, sctl_ex_index, sctl);
+
+	ret = 0;
+
+out:
 	return ret;
 }
 
@@ -753,6 +1006,174 @@ static int ssl_sock_advertise_alpn_protos(SSL *s, const unsigned char **out,
 #endif
 
 #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+/* Create a X509 certificate with the specified servername and serial. This
+ * function returns a SSL_CTX object or NULL if an error occurs. */
+SSL_CTX *
+ssl_sock_create_cert(const char *servername, unsigned int serial, X509 *cacert, EVP_PKEY *capkey)
+{
+	SSL_CTX      *ssl_ctx = NULL;
+	X509         *newcrt  = NULL;
+	EVP_PKEY     *pkey    = NULL;
+	RSA          *rsa;
+	X509_NAME    *name;
+	const EVP_MD *digest;
+	X509V3_CTX    ctx;
+	unsigned int  i;
+
+	/* Generate the public key */
+	if (!(rsa = RSA_generate_key(2048, 3, NULL, NULL)))
+		goto mkcert_error;
+	if (!(pkey = EVP_PKEY_new()))
+		goto mkcert_error;
+	if (EVP_PKEY_assign_RSA(pkey, rsa) != 1)
+		goto mkcert_error;
+
+	/* Create the certificate */
+	if (!(newcrt = X509_new()))
+		goto mkcert_error;
+
+	/* Set version number for the certificate (X509v3) and the serial
+	 * number */
+	if (X509_set_version(newcrt, 2L) != 1)
+		goto mkcert_error;
+	ASN1_INTEGER_set(X509_get_serialNumber(newcrt), serial);
+
+	/* Set duration for the certificate */
+	if (!X509_gmtime_adj(X509_get_notBefore(newcrt), (long)-60*60*24) ||
+	    !X509_gmtime_adj(X509_get_notAfter(newcrt),(long)60*60*24*365))
+		goto mkcert_error;
+
+	/* set public key in the certificate */
+	if (X509_set_pubkey(newcrt, pkey) != 1)
+		goto mkcert_error;
+
+	/* Set issuer name from the CA */
+	if (!(name = X509_get_subject_name(cacert)))
+		goto mkcert_error;
+	if (X509_set_issuer_name(newcrt, name) != 1)
+		goto mkcert_error;
+
+	/* Set the subject name using the same, but the CN */
+	name = X509_NAME_dup(name);
+	if (X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+				       (const unsigned char *)servername,
+				       -1, -1, 0) != 1) {
+		X509_NAME_free(name);
+		goto mkcert_error;
+	}
+	if (X509_set_subject_name(newcrt, name) != 1) {
+		X509_NAME_free(name);
+		goto mkcert_error;
+	}
+	X509_NAME_free(name);
+
+	/* Add x509v3 extensions as specified */
+	X509V3_set_ctx(&ctx, cacert, newcrt, NULL, NULL, 0);
+	for (i = 0; i < X509V3_EXT_SIZE; i++) {
+		X509_EXTENSION *ext;
+
+		if (!(ext = X509V3_EXT_conf(NULL, &ctx, x509v3_ext_names[i], x509v3_ext_values[i])))
+			goto mkcert_error;
+		if (!X509_add_ext(newcrt, ext, -1)) {
+			X509_EXTENSION_free(ext);
+			goto mkcert_error;
+		}
+		X509_EXTENSION_free(ext);
+	}
+
+	/* Sign the certificate with the CA private key */
+	if (EVP_PKEY_type(capkey->type) == EVP_PKEY_DSA)
+		digest = EVP_dss1();
+	else if (EVP_PKEY_type (capkey->type) == EVP_PKEY_RSA)
+		digest = EVP_sha256();
+	else
+		goto mkcert_error;
+	if (!(X509_sign(newcrt, capkey, digest)))
+		goto mkcert_error;
+
+	/* Create and set the new SSL_CTX */
+	if (!(ssl_ctx = SSL_CTX_new(SSLv23_server_method())))
+		goto mkcert_error;
+	if (!SSL_CTX_use_PrivateKey(ssl_ctx, pkey))
+		goto mkcert_error;
+	if (!SSL_CTX_use_certificate(ssl_ctx, newcrt))
+		goto mkcert_error;
+	if (!SSL_CTX_check_private_key(ssl_ctx))
+		goto mkcert_error;
+
+	if (newcrt) X509_free(newcrt);
+	if (pkey)   EVP_PKEY_free(pkey);
+	return ssl_ctx;
+
+ mkcert_error:
+	if (ssl_ctx) SSL_CTX_free(ssl_ctx);
+	if (newcrt)  X509_free(newcrt);
+	if (pkey)    EVP_PKEY_free(pkey);
+	return NULL;
+}
+
+/* Do a lookup for a certificate in the LRU cache used to store generated
+ * certificates. */
+SSL_CTX *
+ssl_sock_get_generated_cert(unsigned int serial, X509 *cacert)
+{
+	struct lru64 *lru = NULL;
+
+	if (ssl_ctx_lru_tree) {
+		lru = lru64_lookup(serial, ssl_ctx_lru_tree, cacert, 0);
+		if (lru && lru->domain)
+			return (SSL_CTX *)lru->data;
+	}
+	return NULL;
+}
+
+/* Set a certificate int the LRU cache used to store generated certificate. */
+void
+ssl_sock_set_generated_cert(SSL_CTX *ssl_ctx, unsigned int serial, X509 *cacert)
+{
+	struct lru64 *lru = NULL;
+
+	if (ssl_ctx_lru_tree) {
+		lru = lru64_get(serial, ssl_ctx_lru_tree, cacert, 0);
+		if (!lru)
+			return;
+		if (lru->domain && lru->data)
+			lru->free((SSL_CTX *)lru->data);
+		lru64_commit(lru, ssl_ctx, cacert, 0, (void (*)(void *))SSL_CTX_free);
+	}
+}
+
+/* Compute the serial that will be used to create/set/get a certificate. */
+unsigned int
+ssl_sock_generated_cert_serial(void *data, size_t len)
+{
+	return XXH32(data, len, ssl_ctx_lru_seed);
+}
+
+static SSL_CTX *
+ssl_sock_generate_certificate(const char *servername, struct bind_conf *bind_conf)
+{
+	X509         *cacert  = bind_conf->ca_sign_cert;
+	EVP_PKEY     *capkey  = bind_conf->ca_sign_pkey;
+	SSL_CTX      *ssl_ctx = NULL;
+	struct lru64 *lru     = NULL;
+	unsigned int  serial;
+
+	serial = XXH32(servername, strlen(servername), ssl_ctx_lru_seed);
+	if (ssl_ctx_lru_tree) {
+		lru = lru64_get(serial, ssl_ctx_lru_tree, cacert, 0);
+		if (lru && lru->domain)
+			ssl_ctx = (SSL_CTX *)lru->data;
+	}
+
+	if (!ssl_ctx) {
+		ssl_ctx = ssl_sock_create_cert(servername, serial, cacert, capkey);
+		if (lru)
+			lru64_commit(lru, ssl_ctx, cacert, 0, (void (*)(void *))SSL_CTX_free);
+	}
+	return ssl_ctx;
+}
+
 /* Sets the SSL ctx of <ssl> to match the advertised server name. Returns a
  * warning when no match is found, which implies the default (first) cert
  * will keep being used.
@@ -767,6 +1188,21 @@ static int ssl_sock_switchctx_cbk(SSL *ssl, int *al, struct bind_conf *s)
 
 	servername = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
 	if (!servername) {
+		struct sockaddr to;
+		int             fd;
+
+		if (s->generate_certs &&
+		    (fd = SSL_get_fd(ssl)) != -1 &&
+		    tcp_get_dst(fd, &to, sizeof(to), 0) != -1) {
+			unsigned int serial = ssl_sock_generated_cert_serial(&to, sizeof(to));
+			SSL_CTX *ctx = ssl_sock_get_generated_cert(serial, s->ca_sign_cert);
+			if (ctx) {
+				/* switch ctx */
+				SSL_set_SSL_CTX(ssl, ctx);
+				return SSL_TLSEXT_ERR_OK;
+			}
+		}
+
 		return (s->strict_sni ?
 			SSL_TLSEXT_ERR_ALERT_FATAL :
 			SSL_TLSEXT_ERR_NOACK);
@@ -796,6 +1232,14 @@ static int ssl_sock_switchctx_cbk(SSL *ssl, int *al, struct bind_conf *s)
 		node = ebst_lookup(&s->sni_w_ctx, wildp);
 	}
 	if (!node || container_of(node, struct sni_ctx, name)->neg) {
+		SSL_CTX *ctx;
+
+		if (s->generate_certs &&
+		    (ctx = ssl_sock_generate_certificate(servername, s))) {
+			/* switch ctx */
+			SSL_set_SSL_CTX(ssl, ctx);
+			return SSL_TLSEXT_ERR_OK;
+		}
 		return (s->strict_sni ?
 			SSL_TLSEXT_ERR_ALERT_FATAL :
 			SSL_TLSEXT_ERR_ALERT_WARNING);
@@ -811,32 +1255,28 @@ static int ssl_sock_switchctx_cbk(SSL *ssl, int *al, struct bind_conf *s)
 
 static DH * ssl_get_dh_1024(void)
 {
-#if (OPENSSL_VERSION_NUMBER < 0x0090801fL || defined OPENSSL_IS_BORINGSSL)
-	static const unsigned char rfc_2409_prime_1024[] = {
-		0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xC9,0x0F,0xDA,0xA2,
-		0x21,0x68,0xC2,0x34,0xC4,0xC6,0x62,0x8B,0x80,0xDC,0x1C,0xD1,
-		0x29,0x02,0x4E,0x08,0x8A,0x67,0xCC,0x74,0x02,0x0B,0xBE,0xA6,
-		0x3B,0x13,0x9B,0x22,0x51,0x4A,0x08,0x79,0x8E,0x34,0x04,0xDD,
-		0xEF,0x95,0x19,0xB3,0xCD,0x3A,0x43,0x1B,0x30,0x2B,0x0A,0x6D,
-		0xF2,0x5F,0x14,0x37,0x4F,0xE1,0x35,0x6D,0x6D,0x51,0xC2,0x45,
-		0xE4,0x85,0xB5,0x76,0x62,0x5E,0x7E,0xC6,0xF4,0x4C,0x42,0xE9,
-		0xA6,0x37,0xED,0x6B,0x0B,0xFF,0x5C,0xB6,0xF4,0x06,0xB7,0xED,
-		0xEE,0x38,0x6B,0xFB,0x5A,0x89,0x9F,0xA5,0xAE,0x9F,0x24,0x11,
-		0x7C,0x4B,0x1F,0xE6,0x49,0x28,0x66,0x51,0xEC,0xE6,0x53,0x81,
-		0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
-	};
-#endif
+	static unsigned char dh1024_p[]={
+		0xFA,0xF9,0x2A,0x22,0x2A,0xA7,0x7F,0xE1,0x67,0x4E,0x53,0xF7,
+		0x56,0x13,0xC3,0xB1,0xE3,0x29,0x6B,0x66,0x31,0x6A,0x7F,0xB3,
+		0xC2,0x68,0x6B,0xCB,0x1D,0x57,0x39,0x1D,0x1F,0xFF,0x1C,0xC9,
+		0xA6,0xA4,0x98,0x82,0x31,0x5D,0x25,0xFF,0x8A,0xE0,0x73,0x96,
+		0x81,0xC8,0x83,0x79,0xC1,0x5A,0x04,0xF8,0x37,0x0D,0xA8,0x3D,
+		0xAE,0x74,0xBC,0xDB,0xB6,0xA4,0x75,0xD9,0x71,0x8A,0xA0,0x17,
+		0x9E,0x2D,0xC8,0xA8,0xDF,0x2C,0x5F,0x82,0x95,0xF8,0x92,0x9B,
+		0xA7,0x33,0x5F,0x89,0x71,0xC8,0x2D,0x6B,0x18,0x86,0xC4,0x94,
+		0x22,0xA5,0x52,0x8D,0xF6,0xF6,0xD2,0x37,0x92,0x0F,0xA5,0xCC,
+		0xDB,0x7B,0x1D,0x3D,0xA1,0x31,0xB7,0x80,0x8F,0x0B,0x67,0x5E,
+		0x36,0xA5,0x60,0x0C,0xF1,0x95,0x33,0x8B,
+		};
+	static unsigned char dh1024_g[]={
+		0x02,
+		};
+
 	DH *dh = DH_new();
 	if (dh) {
-#if (OPENSSL_VERSION_NUMBER >= 0x0090801fL && !defined OPENSSL_IS_BORINGSSL)
-		dh->p = get_rfc2409_prime_1024(NULL);
-#else
-		dh->p = BN_bin2bn(rfc_2409_prime_1024, sizeof rfc_2409_prime_1024, NULL);
-#endif
-		/* See RFC 2409, Section 6 "Oakley Groups"
-		   for the reason why 2 is used as generator.
-		*/
-		BN_dec2bn(&dh->g, "2");
+		dh->p = BN_bin2bn(dh1024_p, sizeof dh1024_p, NULL);
+		dh->g = BN_bin2bn(dh1024_g, sizeof dh1024_g, NULL);
+
 		if (!dh->p || !dh->g) {
 			DH_free(dh);
 			dh = NULL;
@@ -847,43 +1287,39 @@ static DH * ssl_get_dh_1024(void)
 
 static DH *ssl_get_dh_2048(void)
 {
-#if (OPENSSL_VERSION_NUMBER < 0x0090801fL || defined OPENSSL_IS_BORINGSSL)
-	static const unsigned char rfc_3526_prime_2048[] = {
-		0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xC9,0x0F,0xDA,0xA2,
-		0x21,0x68,0xC2,0x34,0xC4,0xC6,0x62,0x8B,0x80,0xDC,0x1C,0xD1,
-		0x29,0x02,0x4E,0x08,0x8A,0x67,0xCC,0x74,0x02,0x0B,0xBE,0xA6,
-		0x3B,0x13,0x9B,0x22,0x51,0x4A,0x08,0x79,0x8E,0x34,0x04,0xDD,
-		0xEF,0x95,0x19,0xB3,0xCD,0x3A,0x43,0x1B,0x30,0x2B,0x0A,0x6D,
-		0xF2,0x5F,0x14,0x37,0x4F,0xE1,0x35,0x6D,0x6D,0x51,0xC2,0x45,
-		0xE4,0x85,0xB5,0x76,0x62,0x5E,0x7E,0xC6,0xF4,0x4C,0x42,0xE9,
-		0xA6,0x37,0xED,0x6B,0x0B,0xFF,0x5C,0xB6,0xF4,0x06,0xB7,0xED,
-		0xEE,0x38,0x6B,0xFB,0x5A,0x89,0x9F,0xA5,0xAE,0x9F,0x24,0x11,
-		0x7C,0x4B,0x1F,0xE6,0x49,0x28,0x66,0x51,0xEC,0xE4,0x5B,0x3D,
-		0xC2,0x00,0x7C,0xB8,0xA1,0x63,0xBF,0x05,0x98,0xDA,0x48,0x36,
-		0x1C,0x55,0xD3,0x9A,0x69,0x16,0x3F,0xA8,0xFD,0x24,0xCF,0x5F,
-		0x83,0x65,0x5D,0x23,0xDC,0xA3,0xAD,0x96,0x1C,0x62,0xF3,0x56,
-		0x20,0x85,0x52,0xBB,0x9E,0xD5,0x29,0x07,0x70,0x96,0x96,0x6D,
-		0x67,0x0C,0x35,0x4E,0x4A,0xBC,0x98,0x04,0xF1,0x74,0x6C,0x08,
-		0xCA,0x18,0x21,0x7C,0x32,0x90,0x5E,0x46,0x2E,0x36,0xCE,0x3B,
-		0xE3,0x9E,0x77,0x2C,0x18,0x0E,0x86,0x03,0x9B,0x27,0x83,0xA2,
-		0xEC,0x07,0xA2,0x8F,0xB5,0xC5,0x5D,0xF0,0x6F,0x4C,0x52,0xC9,
-		0xDE,0x2B,0xCB,0xF6,0x95,0x58,0x17,0x18,0x39,0x95,0x49,0x7C,
-		0xEA,0x95,0x6A,0xE5,0x15,0xD2,0x26,0x18,0x98,0xFA,0x05,0x10,
-		0x15,0x72,0x8E,0x5A,0x8A,0xAC,0xAA,0x68,0xFF,0xFF,0xFF,0xFF,
-		0xFF,0xFF,0xFF,0xFF,
-	};
-#endif
+	static unsigned char dh2048_p[]={
+		0xEC,0x86,0xF8,0x70,0xA0,0x33,0x16,0xEC,0x05,0x1A,0x73,0x59,
+		0xCD,0x1F,0x8B,0xF8,0x29,0xE4,0xD2,0xCF,0x52,0xDD,0xC2,0x24,
+		0x8D,0xB5,0x38,0x9A,0xFB,0x5C,0xA4,0xE4,0xB2,0xDA,0xCE,0x66,
+		0x50,0x74,0xA6,0x85,0x4D,0x4B,0x1D,0x30,0xB8,0x2B,0xF3,0x10,
+		0xE9,0xA7,0x2D,0x05,0x71,0xE7,0x81,0xDF,0x8B,0x59,0x52,0x3B,
+		0x5F,0x43,0x0B,0x68,0xF1,0xDB,0x07,0xBE,0x08,0x6B,0x1B,0x23,
+		0xEE,0x4D,0xCC,0x9E,0x0E,0x43,0xA0,0x1E,0xDF,0x43,0x8C,0xEC,
+		0xBE,0xBE,0x90,0xB4,0x51,0x54,0xB9,0x2F,0x7B,0x64,0x76,0x4E,
+		0x5D,0xD4,0x2E,0xAE,0xC2,0x9E,0xAE,0x51,0x43,0x59,0xC7,0x77,
+		0x9C,0x50,0x3C,0x0E,0xED,0x73,0x04,0x5F,0xF1,0x4C,0x76,0x2A,
+		0xD8,0xF8,0xCF,0xFC,0x34,0x40,0xD1,0xB4,0x42,0x61,0x84,0x66,
+		0x42,0x39,0x04,0xF8,0x68,0xB2,0x62,0xD7,0x55,0xED,0x1B,0x74,
+		0x75,0x91,0xE0,0xC5,0x69,0xC1,0x31,0x5C,0xDB,0x7B,0x44,0x2E,
+		0xCE,0x84,0x58,0x0D,0x1E,0x66,0x0C,0xC8,0x44,0x9E,0xFD,0x40,
+		0x08,0x67,0x5D,0xFB,0xA7,0x76,0x8F,0x00,0x11,0x87,0xE9,0x93,
+		0xF9,0x7D,0xC4,0xBC,0x74,0x55,0x20,0xD4,0x4A,0x41,0x2F,0x43,
+		0x42,0x1A,0xC1,0xF2,0x97,0x17,0x49,0x27,0x37,0x6B,0x2F,0x88,
+		0x7E,0x1C,0xA0,0xA1,0x89,0x92,0x27,0xD9,0x56,0x5A,0x71,0xC1,
+		0x56,0x37,0x7E,0x3A,0x9D,0x05,0xE7,0xEE,0x5D,0x8F,0x82,0x17,
+		0xBC,0xE9,0xC2,0x93,0x30,0x82,0xF9,0xF4,0xC9,0xAE,0x49,0xDB,
+		0xD0,0x54,0xB4,0xD9,0x75,0x4D,0xFA,0x06,0xB8,0xD6,0x38,0x41,
+		0xB7,0x1F,0x77,0xF3,
+		};
+	static unsigned char dh2048_g[]={
+		0x02,
+		};
+
 	DH *dh = DH_new();
 	if (dh) {
-#if (OPENSSL_VERSION_NUMBER >= 0x0090801fL && !defined OPENSSL_IS_BORINGSSL)
-		dh->p = get_rfc3526_prime_2048(NULL);
-#else
-		dh->p = BN_bin2bn(rfc_3526_prime_2048, sizeof rfc_3526_prime_2048, NULL);
-#endif
-		/* See RFC 3526, Section 3 "2048-bit MODP Group"
-		   for the reason why 2 is used as generator.
-		*/
-		BN_dec2bn(&dh->g, "2");
+		dh->p = BN_bin2bn(dh2048_p, sizeof dh2048_p, NULL);
+		dh->g = BN_bin2bn(dh2048_g, sizeof dh2048_g, NULL);
+
 		if (!dh->p || !dh->g) {
 			DH_free(dh);
 			dh = NULL;
@@ -894,175 +1330,60 @@ static DH *ssl_get_dh_2048(void)
 
 static DH *ssl_get_dh_4096(void)
 {
-#if (OPENSSL_VERSION_NUMBER < 0x0090801fL || defined OPENSSL_IS_BORINGSSL)
-	static const unsigned char rfc_3526_prime_4096[] = {
-                0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xC9,0x0F,0xDA,0xA2,
-                0x21,0x68,0xC2,0x34,0xC4,0xC6,0x62,0x8B,0x80,0xDC,0x1C,0xD1,
-                0x29,0x02,0x4E,0x08,0x8A,0x67,0xCC,0x74,0x02,0x0B,0xBE,0xA6,
-                0x3B,0x13,0x9B,0x22,0x51,0x4A,0x08,0x79,0x8E,0x34,0x04,0xDD,
-                0xEF,0x95,0x19,0xB3,0xCD,0x3A,0x43,0x1B,0x30,0x2B,0x0A,0x6D,
-                0xF2,0x5F,0x14,0x37,0x4F,0xE1,0x35,0x6D,0x6D,0x51,0xC2,0x45,
-                0xE4,0x85,0xB5,0x76,0x62,0x5E,0x7E,0xC6,0xF4,0x4C,0x42,0xE9,
-                0xA6,0x37,0xED,0x6B,0x0B,0xFF,0x5C,0xB6,0xF4,0x06,0xB7,0xED,
-                0xEE,0x38,0x6B,0xFB,0x5A,0x89,0x9F,0xA5,0xAE,0x9F,0x24,0x11,
-                0x7C,0x4B,0x1F,0xE6,0x49,0x28,0x66,0x51,0xEC,0xE4,0x5B,0x3D,
-                0xC2,0x00,0x7C,0xB8,0xA1,0x63,0xBF,0x05,0x98,0xDA,0x48,0x36,
-                0x1C,0x55,0xD3,0x9A,0x69,0x16,0x3F,0xA8,0xFD,0x24,0xCF,0x5F,
-                0x83,0x65,0x5D,0x23,0xDC,0xA3,0xAD,0x96,0x1C,0x62,0xF3,0x56,
-                0x20,0x85,0x52,0xBB,0x9E,0xD5,0x29,0x07,0x70,0x96,0x96,0x6D,
-                0x67,0x0C,0x35,0x4E,0x4A,0xBC,0x98,0x04,0xF1,0x74,0x6C,0x08,
-                0xCA,0x18,0x21,0x7C,0x32,0x90,0x5E,0x46,0x2E,0x36,0xCE,0x3B,
-                0xE3,0x9E,0x77,0x2C,0x18,0x0E,0x86,0x03,0x9B,0x27,0x83,0xA2,
-                0xEC,0x07,0xA2,0x8F,0xB5,0xC5,0x5D,0xF0,0x6F,0x4C,0x52,0xC9,
-                0xDE,0x2B,0xCB,0xF6,0x95,0x58,0x17,0x18,0x39,0x95,0x49,0x7C,
-                0xEA,0x95,0x6A,0xE5,0x15,0xD2,0x26,0x18,0x98,0xFA,0x05,0x10,
-                0x15,0x72,0x8E,0x5A,0x8A,0xAA,0xC4,0x2D,0xAD,0x33,0x17,0x0D,
-                0x04,0x50,0x7A,0x33,0xA8,0x55,0x21,0xAB,0xDF,0x1C,0xBA,0x64,
-                0xEC,0xFB,0x85,0x04,0x58,0xDB,0xEF,0x0A,0x8A,0xEA,0x71,0x57,
-                0x5D,0x06,0x0C,0x7D,0xB3,0x97,0x0F,0x85,0xA6,0xE1,0xE4,0xC7,
-                0xAB,0xF5,0xAE,0x8C,0xDB,0x09,0x33,0xD7,0x1E,0x8C,0x94,0xE0,
-                0x4A,0x25,0x61,0x9D,0xCE,0xE3,0xD2,0x26,0x1A,0xD2,0xEE,0x6B,
-                0xF1,0x2F,0xFA,0x06,0xD9,0x8A,0x08,0x64,0xD8,0x76,0x02,0x73,
-                0x3E,0xC8,0x6A,0x64,0x52,0x1F,0x2B,0x18,0x17,0x7B,0x20,0x0C,
-                0xBB,0xE1,0x17,0x57,0x7A,0x61,0x5D,0x6C,0x77,0x09,0x88,0xC0,
-                0xBA,0xD9,0x46,0xE2,0x08,0xE2,0x4F,0xA0,0x74,0xE5,0xAB,0x31,
-                0x43,0xDB,0x5B,0xFC,0xE0,0xFD,0x10,0x8E,0x4B,0x82,0xD1,0x20,
-                0xA9,0x21,0x08,0x01,0x1A,0x72,0x3C,0x12,0xA7,0x87,0xE6,0xD7,
-                0x88,0x71,0x9A,0x10,0xBD,0xBA,0x5B,0x26,0x99,0xC3,0x27,0x18,
-                0x6A,0xF4,0xE2,0x3C,0x1A,0x94,0x68,0x34,0xB6,0x15,0x0B,0xDA,
-                0x25,0x83,0xE9,0xCA,0x2A,0xD4,0x4C,0xE8,0xDB,0xBB,0xC2,0xDB,
-                0x04,0xDE,0x8E,0xF9,0x2E,0x8E,0xFC,0x14,0x1F,0xBE,0xCA,0xA6,
-                0x28,0x7C,0x59,0x47,0x4E,0x6B,0xC0,0x5D,0x99,0xB2,0x96,0x4F,
-                0xA0,0x90,0xC3,0xA2,0x23,0x3B,0xA1,0x86,0x51,0x5B,0xE7,0xED,
-                0x1F,0x61,0x29,0x70,0xCE,0xE2,0xD7,0xAF,0xB8,0x1B,0xDD,0x76,
-                0x21,0x70,0x48,0x1C,0xD0,0x06,0x91,0x27,0xD5,0xB0,0x5A,0xA9,
-                0x93,0xB4,0xEA,0x98,0x8D,0x8F,0xDD,0xC1,0x86,0xFF,0xB7,0xDC,
-                0x90,0xA6,0xC0,0x8F,0x4D,0xF4,0x35,0xC9,0x34,0x06,0x31,0x99,
-                0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+	static unsigned char dh4096_p[]={
+		0xDE,0x16,0x94,0xCD,0x99,0x58,0x07,0xF1,0xF7,0x32,0x96,0x11,
+		0x04,0x82,0xD4,0x84,0x72,0x80,0x99,0x06,0xCA,0xF0,0xA3,0x68,
+		0x07,0xCE,0x64,0x50,0xE7,0x74,0x45,0x20,0x80,0x5E,0x4D,0xAD,
+		0xA5,0xB6,0xED,0xFA,0x80,0x6C,0x3B,0x35,0xC4,0x9A,0x14,0x6B,
+		0x32,0xBB,0xFD,0x1F,0x17,0x8E,0xB7,0x1F,0xD6,0xFA,0x3F,0x7B,
+		0xEE,0x16,0xA5,0x62,0x33,0x0D,0xED,0xBC,0x4E,0x58,0xE5,0x47,
+		0x4D,0xE9,0xAB,0x8E,0x38,0xD3,0x6E,0x90,0x57,0xE3,0x22,0x15,
+		0x33,0xBD,0xF6,0x43,0x45,0xB5,0x10,0x0A,0xBE,0x2C,0xB4,0x35,
+		0xB8,0x53,0x8D,0xAD,0xFB,0xA7,0x1F,0x85,0x58,0x41,0x7A,0x79,
+		0x20,0x68,0xB3,0xE1,0x3D,0x08,0x76,0xBF,0x86,0x0D,0x49,0xE3,
+		0x82,0x71,0x8C,0xB4,0x8D,0x81,0x84,0xD4,0xE7,0xBE,0x91,0xDC,
+		0x26,0x39,0x48,0x0F,0x35,0xC4,0xCA,0x65,0xE3,0x40,0x93,0x52,
+		0x76,0x58,0x7D,0xDD,0x51,0x75,0xDC,0x69,0x61,0xBF,0x47,0x2C,
+		0x16,0x68,0x2D,0xC9,0x29,0xD3,0xE6,0xC0,0x99,0x48,0xA0,0x9A,
+		0xC8,0x78,0xC0,0x6D,0x81,0x67,0x12,0x61,0x3F,0x71,0xBA,0x41,
+		0x1F,0x6C,0x89,0x44,0x03,0xBA,0x3B,0x39,0x60,0xAA,0x28,0x55,
+		0x59,0xAE,0xB8,0xFA,0xCB,0x6F,0xA5,0x1A,0xF7,0x2B,0xDD,0x52,
+		0x8A,0x8B,0xE2,0x71,0xA6,0x5E,0x7E,0xD8,0x2E,0x18,0xE0,0x66,
+		0xDF,0xDD,0x22,0x21,0x99,0x52,0x73,0xA6,0x33,0x20,0x65,0x0E,
+		0x53,0xE7,0x6B,0x9B,0xC5,0xA3,0x2F,0x97,0x65,0x76,0xD3,0x47,
+		0x23,0x77,0x12,0xB6,0x11,0x7B,0x24,0xED,0xF1,0xEF,0xC0,0xE2,
+		0xA3,0x7E,0x67,0x05,0x3E,0x96,0x4D,0x45,0xC2,0x18,0xD1,0x73,
+		0x9E,0x07,0xF3,0x81,0x6E,0x52,0x63,0xF6,0x20,0x76,0xB9,0x13,
+		0xD2,0x65,0x30,0x18,0x16,0x09,0x16,0x9E,0x8F,0xF1,0xD2,0x10,
+		0x5A,0xD3,0xD4,0xAF,0x16,0x61,0xDA,0x55,0x2E,0x18,0x5E,0x14,
+		0x08,0x54,0x2E,0x2A,0x25,0xA2,0x1A,0x9B,0x8B,0x32,0xA9,0xFD,
+		0xC2,0x48,0x96,0xE1,0x80,0xCA,0xE9,0x22,0x17,0xBB,0xCE,0x3E,
+		0x9E,0xED,0xC7,0xF1,0x1F,0xEC,0x17,0x21,0xDC,0x7B,0x82,0x48,
+		0x8E,0xBB,0x4B,0x9D,0x5B,0x04,0x04,0xDA,0xDB,0x39,0xDF,0x01,
+		0x40,0xC3,0xAA,0x26,0x23,0x89,0x75,0xC6,0x0B,0xD0,0xA2,0x60,
+		0x6A,0xF1,0xCC,0x65,0x18,0x98,0x1B,0x52,0xD2,0x74,0x61,0xCC,
+		0xBD,0x60,0xAE,0xA3,0xA0,0x66,0x6A,0x16,0x34,0x92,0x3F,0x41,
+		0x40,0x31,0x29,0xC0,0x2C,0x63,0xB2,0x07,0x8D,0xEB,0x94,0xB8,
+		0xE8,0x47,0x92,0x52,0x93,0x6A,0x1B,0x7E,0x1A,0x61,0xB3,0x1B,
+		0xF0,0xD6,0x72,0x9B,0xF1,0xB0,0xAF,0xBF,0x3E,0x65,0xEF,0x23,
+		0x1D,0x6F,0xFF,0x70,0xCD,0x8A,0x4C,0x8A,0xA0,0x72,0x9D,0xBE,
+		0xD4,0xBB,0x24,0x47,0x4A,0x68,0xB5,0xF5,0xC6,0xD5,0x7A,0xCD,
+		0xCA,0x06,0x41,0x07,0xAD,0xC2,0x1E,0xE6,0x54,0xA7,0xAD,0x03,
+		0xD9,0x12,0xC1,0x9C,0x13,0xB1,0xC9,0x0A,0x43,0x8E,0x1E,0x08,
+		0xCE,0x50,0x82,0x73,0x5F,0xA7,0x55,0x1D,0xD9,0x59,0xAC,0xB5,
+		0xEA,0x02,0x7F,0x6C,0x5B,0x74,0x96,0x98,0x67,0x24,0xA3,0x0F,
+		0x15,0xFC,0xA9,0x7D,0x3E,0x67,0xD1,0x70,0xF8,0x97,0xF3,0x67,
+		0xC5,0x8C,0x88,0x44,0x08,0x02,0xC7,0x2B,
 	};
-#endif
-	DH *dh = DH_new();
-	if (dh) {
-#if (OPENSSL_VERSION_NUMBER >= 0x0090801fL && !defined OPENSSL_IS_BORINGSSL)
-		dh->p = get_rfc3526_prime_4096(NULL);
-#else
-		dh->p = BN_bin2bn(rfc_3526_prime_4096, sizeof rfc_3526_prime_4096, NULL);
-#endif
-		/* See RFC 3526, Section 5 "4096-bit MODP Group"
-		   for the reason why 2 is used as generator.
-		*/
-		BN_dec2bn(&dh->g, "2");
-		if (!dh->p || !dh->g) {
-			DH_free(dh);
-			dh = NULL;
-		}
-	}
-	return dh;
-}
+	static unsigned char dh4096_g[]={
+		0x02,
+		};
 
-static DH *ssl_get_dh_8192(void)
-{
-#if (OPENSSL_VERSION_NUMBER < 0x0090801fL || defined OPENSSL_IS_BORINGSSL)
-	static const unsigned char rfc_3526_prime_8192[] = {
-                0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xC9,0x0F,0xDA,0xA2,
-                0x21,0x68,0xC2,0x34,0xC4,0xC6,0x62,0x8B,0x80,0xDC,0x1C,0xD1,
-                0x29,0x02,0x4E,0x08,0x8A,0x67,0xCC,0x74,0x02,0x0B,0xBE,0xA6,
-                0x3B,0x13,0x9B,0x22,0x51,0x4A,0x08,0x79,0x8E,0x34,0x04,0xDD,
-                0xEF,0x95,0x19,0xB3,0xCD,0x3A,0x43,0x1B,0x30,0x2B,0x0A,0x6D,
-                0xF2,0x5F,0x14,0x37,0x4F,0xE1,0x35,0x6D,0x6D,0x51,0xC2,0x45,
-                0xE4,0x85,0xB5,0x76,0x62,0x5E,0x7E,0xC6,0xF4,0x4C,0x42,0xE9,
-                0xA6,0x37,0xED,0x6B,0x0B,0xFF,0x5C,0xB6,0xF4,0x06,0xB7,0xED,
-                0xEE,0x38,0x6B,0xFB,0x5A,0x89,0x9F,0xA5,0xAE,0x9F,0x24,0x11,
-                0x7C,0x4B,0x1F,0xE6,0x49,0x28,0x66,0x51,0xEC,0xE4,0x5B,0x3D,
-                0xC2,0x00,0x7C,0xB8,0xA1,0x63,0xBF,0x05,0x98,0xDA,0x48,0x36,
-                0x1C,0x55,0xD3,0x9A,0x69,0x16,0x3F,0xA8,0xFD,0x24,0xCF,0x5F,
-                0x83,0x65,0x5D,0x23,0xDC,0xA3,0xAD,0x96,0x1C,0x62,0xF3,0x56,
-                0x20,0x85,0x52,0xBB,0x9E,0xD5,0x29,0x07,0x70,0x96,0x96,0x6D,
-                0x67,0x0C,0x35,0x4E,0x4A,0xBC,0x98,0x04,0xF1,0x74,0x6C,0x08,
-                0xCA,0x18,0x21,0x7C,0x32,0x90,0x5E,0x46,0x2E,0x36,0xCE,0x3B,
-                0xE3,0x9E,0x77,0x2C,0x18,0x0E,0x86,0x03,0x9B,0x27,0x83,0xA2,
-                0xEC,0x07,0xA2,0x8F,0xB5,0xC5,0x5D,0xF0,0x6F,0x4C,0x52,0xC9,
-                0xDE,0x2B,0xCB,0xF6,0x95,0x58,0x17,0x18,0x39,0x95,0x49,0x7C,
-                0xEA,0x95,0x6A,0xE5,0x15,0xD2,0x26,0x18,0x98,0xFA,0x05,0x10,
-                0x15,0x72,0x8E,0x5A,0x8A,0xAA,0xC4,0x2D,0xAD,0x33,0x17,0x0D,
-                0x04,0x50,0x7A,0x33,0xA8,0x55,0x21,0xAB,0xDF,0x1C,0xBA,0x64,
-                0xEC,0xFB,0x85,0x04,0x58,0xDB,0xEF,0x0A,0x8A,0xEA,0x71,0x57,
-                0x5D,0x06,0x0C,0x7D,0xB3,0x97,0x0F,0x85,0xA6,0xE1,0xE4,0xC7,
-                0xAB,0xF5,0xAE,0x8C,0xDB,0x09,0x33,0xD7,0x1E,0x8C,0x94,0xE0,
-                0x4A,0x25,0x61,0x9D,0xCE,0xE3,0xD2,0x26,0x1A,0xD2,0xEE,0x6B,
-                0xF1,0x2F,0xFA,0x06,0xD9,0x8A,0x08,0x64,0xD8,0x76,0x02,0x73,
-                0x3E,0xC8,0x6A,0x64,0x52,0x1F,0x2B,0x18,0x17,0x7B,0x20,0x0C,
-                0xBB,0xE1,0x17,0x57,0x7A,0x61,0x5D,0x6C,0x77,0x09,0x88,0xC0,
-                0xBA,0xD9,0x46,0xE2,0x08,0xE2,0x4F,0xA0,0x74,0xE5,0xAB,0x31,
-                0x43,0xDB,0x5B,0xFC,0xE0,0xFD,0x10,0x8E,0x4B,0x82,0xD1,0x20,
-                0xA9,0x21,0x08,0x01,0x1A,0x72,0x3C,0x12,0xA7,0x87,0xE6,0xD7,
-                0x88,0x71,0x9A,0x10,0xBD,0xBA,0x5B,0x26,0x99,0xC3,0x27,0x18,
-                0x6A,0xF4,0xE2,0x3C,0x1A,0x94,0x68,0x34,0xB6,0x15,0x0B,0xDA,
-                0x25,0x83,0xE9,0xCA,0x2A,0xD4,0x4C,0xE8,0xDB,0xBB,0xC2,0xDB,
-                0x04,0xDE,0x8E,0xF9,0x2E,0x8E,0xFC,0x14,0x1F,0xBE,0xCA,0xA6,
-                0x28,0x7C,0x59,0x47,0x4E,0x6B,0xC0,0x5D,0x99,0xB2,0x96,0x4F,
-                0xA0,0x90,0xC3,0xA2,0x23,0x3B,0xA1,0x86,0x51,0x5B,0xE7,0xED,
-                0x1F,0x61,0x29,0x70,0xCE,0xE2,0xD7,0xAF,0xB8,0x1B,0xDD,0x76,
-                0x21,0x70,0x48,0x1C,0xD0,0x06,0x91,0x27,0xD5,0xB0,0x5A,0xA9,
-                0x93,0xB4,0xEA,0x98,0x8D,0x8F,0xDD,0xC1,0x86,0xFF,0xB7,0xDC,
-                0x90,0xA6,0xC0,0x8F,0x4D,0xF4,0x35,0xC9,0x34,0x02,0x84,0x92,
-                0x36,0xC3,0xFA,0xB4,0xD2,0x7C,0x70,0x26,0xC1,0xD4,0xDC,0xB2,
-                0x60,0x26,0x46,0xDE,0xC9,0x75,0x1E,0x76,0x3D,0xBA,0x37,0xBD,
-                0xF8,0xFF,0x94,0x06,0xAD,0x9E,0x53,0x0E,0xE5,0xDB,0x38,0x2F,
-                0x41,0x30,0x01,0xAE,0xB0,0x6A,0x53,0xED,0x90,0x27,0xD8,0x31,
-                0x17,0x97,0x27,0xB0,0x86,0x5A,0x89,0x18,0xDA,0x3E,0xDB,0xEB,
-                0xCF,0x9B,0x14,0xED,0x44,0xCE,0x6C,0xBA,0xCE,0xD4,0xBB,0x1B,
-                0xDB,0x7F,0x14,0x47,0xE6,0xCC,0x25,0x4B,0x33,0x20,0x51,0x51,
-                0x2B,0xD7,0xAF,0x42,0x6F,0xB8,0xF4,0x01,0x37,0x8C,0xD2,0xBF,
-                0x59,0x83,0xCA,0x01,0xC6,0x4B,0x92,0xEC,0xF0,0x32,0xEA,0x15,
-                0xD1,0x72,0x1D,0x03,0xF4,0x82,0xD7,0xCE,0x6E,0x74,0xFE,0xF6,
-                0xD5,0x5E,0x70,0x2F,0x46,0x98,0x0C,0x82,0xB5,0xA8,0x40,0x31,
-                0x90,0x0B,0x1C,0x9E,0x59,0xE7,0xC9,0x7F,0xBE,0xC7,0xE8,0xF3,
-                0x23,0xA9,0x7A,0x7E,0x36,0xCC,0x88,0xBE,0x0F,0x1D,0x45,0xB7,
-                0xFF,0x58,0x5A,0xC5,0x4B,0xD4,0x07,0xB2,0x2B,0x41,0x54,0xAA,
-                0xCC,0x8F,0x6D,0x7E,0xBF,0x48,0xE1,0xD8,0x14,0xCC,0x5E,0xD2,
-                0x0F,0x80,0x37,0xE0,0xA7,0x97,0x15,0xEE,0xF2,0x9B,0xE3,0x28,
-                0x06,0xA1,0xD5,0x8B,0xB7,0xC5,0xDA,0x76,0xF5,0x50,0xAA,0x3D,
-                0x8A,0x1F,0xBF,0xF0,0xEB,0x19,0xCC,0xB1,0xA3,0x13,0xD5,0x5C,
-                0xDA,0x56,0xC9,0xEC,0x2E,0xF2,0x96,0x32,0x38,0x7F,0xE8,0xD7,
-                0x6E,0x3C,0x04,0x68,0x04,0x3E,0x8F,0x66,0x3F,0x48,0x60,0xEE,
-                0x12,0xBF,0x2D,0x5B,0x0B,0x74,0x74,0xD6,0xE6,0x94,0xF9,0x1E,
-                0x6D,0xBE,0x11,0x59,0x74,0xA3,0x92,0x6F,0x12,0xFE,0xE5,0xE4,
-                0x38,0x77,0x7C,0xB6,0xA9,0x32,0xDF,0x8C,0xD8,0xBE,0xC4,0xD0,
-                0x73,0xB9,0x31,0xBA,0x3B,0xC8,0x32,0xB6,0x8D,0x9D,0xD3,0x00,
-                0x74,0x1F,0xA7,0xBF,0x8A,0xFC,0x47,0xED,0x25,0x76,0xF6,0x93,
-                0x6B,0xA4,0x24,0x66,0x3A,0xAB,0x63,0x9C,0x5A,0xE4,0xF5,0x68,
-                0x34,0x23,0xB4,0x74,0x2B,0xF1,0xC9,0x78,0x23,0x8F,0x16,0xCB,
-                0xE3,0x9D,0x65,0x2D,0xE3,0xFD,0xB8,0xBE,0xFC,0x84,0x8A,0xD9,
-                0x22,0x22,0x2E,0x04,0xA4,0x03,0x7C,0x07,0x13,0xEB,0x57,0xA8,
-                0x1A,0x23,0xF0,0xC7,0x34,0x73,0xFC,0x64,0x6C,0xEA,0x30,0x6B,
-                0x4B,0xCB,0xC8,0x86,0x2F,0x83,0x85,0xDD,0xFA,0x9D,0x4B,0x7F,
-                0xA2,0xC0,0x87,0xE8,0x79,0x68,0x33,0x03,0xED,0x5B,0xDD,0x3A,
-                0x06,0x2B,0x3C,0xF5,0xB3,0xA2,0x78,0xA6,0x6D,0x2A,0x13,0xF8,
-                0x3F,0x44,0xF8,0x2D,0xDF,0x31,0x0E,0xE0,0x74,0xAB,0x6A,0x36,
-                0x45,0x97,0xE8,0x99,0xA0,0x25,0x5D,0xC1,0x64,0xF3,0x1C,0xC5,
-                0x08,0x46,0x85,0x1D,0xF9,0xAB,0x48,0x19,0x5D,0xED,0x7E,0xA1,
-                0xB1,0xD5,0x10,0xBD,0x7E,0xE7,0x4D,0x73,0xFA,0xF3,0x6B,0xC3,
-                0x1E,0xCF,0xA2,0x68,0x35,0x90,0x46,0xF4,0xEB,0x87,0x9F,0x92,
-                0x40,0x09,0x43,0x8B,0x48,0x1C,0x6C,0xD7,0x88,0x9A,0x00,0x2E,
-                0xD5,0xEE,0x38,0x2B,0xC9,0x19,0x0D,0xA6,0xFC,0x02,0x6E,0x47,
-                0x95,0x58,0xE4,0x47,0x56,0x77,0xE9,0xAA,0x9E,0x30,0x50,0xE2,
-                0x76,0x56,0x94,0xDF,0xC8,0x1F,0x56,0xE8,0x80,0xB9,0x6E,0x71,
-                0x60,0xC9,0x80,0xDD,0x98,0xED,0xD3,0xDF,0xFF,0xFF,0xFF,0xFF,
-                0xFF,0xFF,0xFF,0xFF,
-	};
-#endif
 	DH *dh = DH_new();
 	if (dh) {
-#if (OPENSSL_VERSION_NUMBER >= 0x0090801fL && !defined OPENSSL_IS_BORINGSSL)
-		dh->p = get_rfc3526_prime_8192(NULL);
-#else
-		dh->p = BN_bin2bn(rfc_3526_prime_8192, sizeof rfc_3526_prime_8192, NULL);
-#endif
-		/* See RFC 3526, Section 7 "8192-bit MODP Group"
-		   for the reason why 2 is used as generator.
-		*/
-		BN_dec2bn(&dh->g, "2");
+		dh->p = BN_bin2bn(dh4096_p, sizeof dh4096_p, NULL);
+		dh->g = BN_bin2bn(dh4096_g, sizeof dh4096_g, NULL);
+
 		if (!dh->p || !dh->g) {
 			DH_free(dh);
 			dh = NULL;
@@ -1090,10 +1411,7 @@ static DH *ssl_get_tmp_dh(SSL *ssl, int export, int keylen)
 		keylen = global.tune.ssl_default_dh_param;
 	}
 
-	if (keylen >= 8192) {
-		dh = local_dh_8192;
-	}
-	else if (keylen >= 4096) {
+	if (keylen >= 4096) {
 		dh = local_dh_4096;
 	}
 	else if (keylen >= 2048) {
@@ -1106,29 +1424,57 @@ static DH *ssl_get_tmp_dh(SSL *ssl, int export, int keylen)
 	return dh;
 }
 
+static DH * ssl_sock_get_dh_from_file(const char *filename)
+{
+	DH *dh = NULL;
+	BIO *in = BIO_new(BIO_s_file());
+
+	if (in == NULL)
+		goto end;
+
+	if (BIO_read_filename(in, filename) <= 0)
+		goto end;
+
+	dh = PEM_read_bio_DHparams(in, NULL, NULL, NULL);
+
+end:
+        if (in)
+                BIO_free(in);
+
+	return dh;
+}
+
+int ssl_sock_load_global_dh_param_from_file(const char *filename)
+{
+	global_dh = ssl_sock_get_dh_from_file(filename);
+
+	if (global_dh) {
+		return 0;
+	}
+
+	return -1;
+}
+
 /* Loads Diffie-Hellman parameter from a file. Returns 1 if loaded, else -1
    if an error occured, and 0 if parameter not found. */
 int ssl_sock_load_dh_params(SSL_CTX *ctx, const char *file)
 {
 	int ret = -1;
-	BIO *in;
-	DH *dh = NULL;
+	DH *dh = ssl_sock_get_dh_from_file(file);
 
-	in = BIO_new(BIO_s_file());
-	if (in == NULL)
-		goto end;
-
-	if (BIO_read_filename(in, file) <= 0)
-		goto end;
-
-	dh = PEM_read_bio_DHparams(in, NULL, ctx->default_passwd_callback, ctx->default_passwd_callback_userdata);
 	if (dh) {
 		ret = 1;
 		SSL_CTX_set_tmp_dh(ctx, dh);
-		/* Setting ssl default dh param to the size of the static DH params
-		   found in the file. This way we know that there is no use
-		   complaining later about ssl-default-dh-param not being set. */
-		global.tune.ssl_default_dh_param = DH_size(dh) * 8;
+
+		if (ssl_dh_ptr_index >= 0) {
+			/* store a pointer to the DH params to avoid complaining about
+			   ssl-default-dh-param not being set for this SSL_CTX */
+			SSL_CTX_set_ex_data(ctx, ssl_dh_ptr_index, dh);
+		}
+	}
+	else if (global_dh) {
+		SSL_CTX_set_tmp_dh(ctx, global_dh);
+		ret = 0; /* DH params not found */
 	}
 	else {
 		/* Clear openssl global errors stack */
@@ -1152,9 +1498,6 @@ int ssl_sock_load_dh_params(SSL_CTX *ctx, const char *file)
 end:
 	if (dh)
 		DH_free(dh);
-
-	if (in)
-		BIO_free(in);
 
 	return ret;
 }
@@ -1323,6 +1666,12 @@ static int ssl_sock_load_cert_file(const char *path, struct bind_conf *bind_conf
 	 * the tree, so it will be discovered and cleaned in time.
 	 */
 #ifndef OPENSSL_NO_DH
+	/* store a NULL pointer to indicate we have not yet loaded
+	   a custom DH param file */
+	if (ssl_dh_ptr_index >= 0) {
+		SSL_CTX_set_ex_data(ctx, ssl_dh_ptr_index, NULL);
+	}
+
 	ret = ssl_sock_load_dh_params(ctx, path);
 	if (ret < 0) {
 		if (err)
@@ -1339,6 +1688,18 @@ static int ssl_sock_load_cert_file(const char *path, struct bind_conf *bind_conf
 			memprintf(err, "%s '%s.ocsp' is present and activates OCSP but it is impossible to compute the OCSP certificate ID (maybe the issuer could not be found)'.\n",
 				  *err ? *err : "", path);
 		return 1;
+	}
+#endif
+
+#if (OPENSSL_VERSION_NUMBER >= 0x1000200fL && !defined OPENSSL_NO_TLSEXT && !defined OPENSSL_IS_BORINGSSL)
+	if (sctl_ex_index >= 0) {
+		ret = ssl_sock_load_sctl(ctx, path);
+		if (ret < 0) {
+			if (err)
+				memprintf(err, "%s '%s.sctl' is present but cannot be read or parsed'.\n",
+					  *err ? *err : "", path);
+			return 1;
+		}
 	}
 #endif
 
@@ -1383,7 +1744,7 @@ int ssl_sock_load_cert(char *path, struct bind_conf *bind_conf, struct proxy *cu
 			struct dirent *de = de_list[i];
 
 			end = strrchr(de->d_name, '.');
-			if (end && (!strcmp(end, ".issuer") || !strcmp(end, ".ocsp")))
+			if (end && (!strcmp(end, ".issuer") || !strcmp(end, ".ocsp") || !strcmp(end, ".sctl")))
 				goto ignore_entry;
 
 			snprintf(fp, sizeof(fp), "%s/%s", path, de->d_name);
@@ -1623,7 +1984,7 @@ int ssl_sock_prepare_ctx(struct bind_conf *bind_conf, SSL_CTX *ctx, struct proxy
 
 			if (!store || !X509_STORE_load_locations(store, bind_conf->crl_file, NULL)) {
 				Alert("Proxy '%s': unable to configure CRL file '%s' for bind '%s' at [%s:%d].\n",
-				      curproxy->id, bind_conf->ca_file, bind_conf->arg, bind_conf->file, bind_conf->line);
+				      curproxy->id, bind_conf->crl_file, bind_conf->arg, bind_conf->file, bind_conf->line);
 				cfgerr++;
 			}
 			else {
@@ -1635,7 +1996,7 @@ int ssl_sock_prepare_ctx(struct bind_conf *bind_conf, SSL_CTX *ctx, struct proxy
 	}
 
 #if (defined SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB && TLS_TICKETS_NO > 0)
-	if(bind_conf->tls_ticket_keys) {
+	if(bind_conf->keys_ref) {
 		if (!SSL_CTX_set_tlsext_ticket_key_cb(ctx, ssl_tlsext_ticket_key_cb)) {
 			Alert("Proxy '%s': unable to set callback for TLS ticket validation for bind '%s' at [%s:%d].\n",
 				curproxy->id, bind_conf->arg, bind_conf->file, bind_conf->line);
@@ -1655,9 +2016,13 @@ int ssl_sock_prepare_ctx(struct bind_conf *bind_conf, SSL_CTX *ctx, struct proxy
 		cfgerr++;
 	}
 
-	/* If tune.ssl.default-dh-param has not been set and
-	   no static DH params were in the certificate file. */
-	if (global.tune.ssl_default_dh_param == 0) {
+	/* If tune.ssl.default-dh-param has not been set,
+	   neither has ssl-default-dh-file and no static DH
+	   params were in the certificate file. */
+	if (global.tune.ssl_default_dh_param == 0 &&
+	    global_dh == NULL &&
+	    (ssl_dh_ptr_index == -1 ||
+	     SSL_CTX_get_ex_data(ctx, ssl_dh_ptr_index) == NULL)) {
 
 		ssl = SSL_new(ctx);
 
@@ -1699,10 +2064,6 @@ int ssl_sock_prepare_ctx(struct bind_conf *bind_conf, SSL_CTX *ctx, struct proxy
 			if (global.tune.ssl_default_dh_param >= 4096) {
 				if (local_dh_4096 == NULL) {
 					local_dh_4096 = ssl_get_dh_4096();
-				}
-				if (global.tune.ssl_default_dh_param >= 8192 &&
-				    local_dh_8192 == NULL) {
-					local_dh_8192 = ssl_get_dh_8192();
 				}
 			}
 		}
@@ -2102,6 +2463,75 @@ void ssl_sock_free_all_ctx(struct bind_conf *bind_conf)
 	bind_conf->default_ctx = NULL;
 }
 
+/* Load CA cert file and private key used to generate certificates */
+int
+ssl_sock_load_ca(struct bind_conf *bind_conf, struct proxy *px)
+{
+	FILE     *fp;
+	X509     *cacert = NULL;
+	EVP_PKEY *capkey = NULL;
+	int       err    = 0;
+
+	if (!bind_conf || !bind_conf->generate_certs)
+		return err;
+
+	if (!bind_conf->ca_sign_file) {
+		Alert("Proxy '%s': cannot enable certificate generation, "
+		      "no CA certificate File configured at [%s:%d].\n",
+		      px->id, bind_conf->file, bind_conf->line);
+		err++;
+	}
+
+	if (err)
+		goto load_error;
+
+	/* read in the CA certificate */
+	if (!(fp = fopen(bind_conf->ca_sign_file, "r"))) {
+		Alert("Proxy '%s': Failed to read CA certificate file '%s' at [%s:%d].\n",
+		      px->id, bind_conf->ca_sign_file, bind_conf->file, bind_conf->line);
+		err++;
+		goto load_error;
+	}
+	if (!(cacert = PEM_read_X509(fp, NULL, NULL, NULL))) {
+		Alert("Proxy '%s': Failed to read CA certificate file '%s' at [%s:%d].\n",
+		      px->id, bind_conf->ca_sign_file, bind_conf->file, bind_conf->line);
+		fclose (fp);
+		err++;
+		goto load_error;
+	}
+	if (!(capkey = PEM_read_PrivateKey(fp, NULL, NULL, bind_conf->ca_sign_pass))) {
+		Alert("Proxy '%s': Failed to read CA private key file '%s' at [%s:%d].\n",
+		      px->id, bind_conf->ca_sign_file, bind_conf->file, bind_conf->line);
+		fclose (fp);
+		err++;
+		goto load_error;
+	}
+	fclose (fp);
+
+	bind_conf->ca_sign_cert = cacert;
+	bind_conf->ca_sign_pkey = capkey;
+	return err;
+
+ load_error:
+	bind_conf->generate_certs = 0;
+	if (capkey) EVP_PKEY_free(capkey);
+	if (cacert) X509_free(cacert);
+	return err;
+}
+
+/* Release CA cert and private key used to generate certificated */
+void
+ssl_sock_free_ca(struct bind_conf *bind_conf)
+{
+	if (!bind_conf)
+		return;
+
+	if (bind_conf->ca_sign_pkey)
+		EVP_PKEY_free(bind_conf->ca_sign_pkey);
+	if (bind_conf->ca_sign_cert)
+		X509_free(bind_conf->ca_sign_cert);
+}
+
 /*
  * This function is called if SSL * context is not yet allocated. The function
  * is designed to be called before any other data-layer operation and sets the
@@ -2319,7 +2749,7 @@ int ssl_sock_handshake(struct connection *conn, unsigned int flag)
 				 * TCP sockets. We first try to drain possibly pending
 				 * data to avoid this as much as possible.
 				 */
-				conn_drain(conn);
+				conn_sock_drain(conn);
 				if (!conn->err_code)
 					conn->err_code = (conn->xprt_st & SSL_SOCK_RECV_HEARTBEAT) ?
 						CO_ER_SSL_KILLED_HB : CO_ER_SSL_HANDSHAKE;
@@ -2385,7 +2815,7 @@ int ssl_sock_handshake(struct connection *conn, unsigned int flag)
 			 * TCP sockets. We first try to drain possibly pending
 			 * data to avoid this as much as possible.
 			 */
-			conn_drain(conn);
+			conn_sock_drain(conn);
 			if (!conn->err_code)
 				conn->err_code = (conn->xprt_st & SSL_SOCK_RECV_HEARTBEAT) ?
 					CO_ER_SSL_KILLED_HB : CO_ER_SSL_HANDSHAKE;
@@ -2936,15 +3366,11 @@ unsigned int ssl_sock_get_verify_result(struct connection *conn)
 
 /* boolean, returns true if client cert was present */
 static int
-smp_fetch_ssl_fc_has_crt(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                         const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_fc_has_crt(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	struct connection *conn;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -2965,8 +3391,7 @@ smp_fetch_ssl_fc_has_crt(struct proxy *px, struct session *l4, void *l7, unsigne
  * should be use.
  */
 static int
-smp_fetch_ssl_x_der(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                    const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_x_der(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	int cert_peer = (kw[4] == 'c') ? 1 : 0;
 	X509 *crt = NULL;
@@ -2974,10 +3399,7 @@ smp_fetch_ssl_x_der(struct proxy *px, struct session *l4, void *l7, unsigned int
 	struct chunk *smp_trash;
 	struct connection *conn;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3013,8 +3435,7 @@ out:
  * should be use.
  */
 static int
-smp_fetch_ssl_x_serial(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                       const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_x_serial(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	int cert_peer = (kw[4] == 'c') ? 1 : 0;
 	X509 *crt = NULL;
@@ -3022,10 +3443,7 @@ smp_fetch_ssl_x_serial(struct proxy *px, struct session *l4, void *l7, unsigned 
 	struct chunk *smp_trash;
 	struct connection *conn;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3061,8 +3479,7 @@ out:
  * should be use.
  */
 static int
-smp_fetch_ssl_x_sha1(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                     const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_x_sha1(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	int cert_peer = (kw[4] == 'c') ? 1 : 0;
 	X509 *crt = NULL;
@@ -3071,10 +3488,7 @@ smp_fetch_ssl_x_sha1(struct proxy *px, struct session *l4, void *l7, unsigned in
 	struct chunk *smp_trash;
 	struct connection *conn;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3109,8 +3523,7 @@ out:
  * should be use.
  */
 static int
-smp_fetch_ssl_x_notafter(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                       const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_x_notafter(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	int cert_peer = (kw[4] == 'c') ? 1 : 0;
 	X509 *crt = NULL;
@@ -3118,10 +3531,7 @@ smp_fetch_ssl_x_notafter(struct proxy *px, struct session *l4, void *l7, unsigne
 	struct chunk *smp_trash;
 	struct connection *conn;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3156,8 +3566,7 @@ out:
  * should be use.
  */
 static int
-smp_fetch_ssl_x_i_dn(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                       const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_x_i_dn(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	int cert_peer = (kw[4] == 'c') ? 1 : 0;
 	X509 *crt = NULL;
@@ -3166,10 +3575,7 @@ smp_fetch_ssl_x_i_dn(struct proxy *px, struct session *l4, void *l7, unsigned in
 	struct chunk *smp_trash;
 	struct connection *conn;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3219,8 +3625,7 @@ out:
  * should be use.
  */
 static int
-smp_fetch_ssl_x_notbefore(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                       const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_x_notbefore(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	int cert_peer = (kw[4] == 'c') ? 1 : 0;
 	X509 *crt = NULL;
@@ -3228,10 +3633,7 @@ smp_fetch_ssl_x_notbefore(struct proxy *px, struct session *l4, void *l7, unsign
 	struct chunk *smp_trash;
 	struct connection *conn;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3266,8 +3668,7 @@ out:
  * should be use.
  */
 static int
-smp_fetch_ssl_x_s_dn(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                       const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_x_s_dn(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	int cert_peer = (kw[4] == 'c') ? 1 : 0;
 	X509 *crt = NULL;
@@ -3276,10 +3677,7 @@ smp_fetch_ssl_x_s_dn(struct proxy *px, struct session *l4, void *l7, unsigned in
 	struct chunk *smp_trash;
 	struct connection *conn;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3326,16 +3724,12 @@ out:
 
 /* integer, returns true if current session use a client certificate */
 static int
-smp_fetch_ssl_c_used(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                        const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_c_used(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	X509 *crt;
 	struct connection *conn;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3360,17 +3754,13 @@ smp_fetch_ssl_c_used(struct proxy *px, struct session *l4, void *l7, unsigned in
  * should be use.
  */
 static int
-smp_fetch_ssl_x_version(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                        const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_x_version(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	int cert_peer = (kw[4] == 'c') ? 1 : 0;
 	X509 *crt;
 	struct connection *conn;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3400,18 +3790,14 @@ smp_fetch_ssl_x_version(struct proxy *px, struct session *l4, void *l7, unsigned
  * should be use.
  */
 static int
-smp_fetch_ssl_x_sig_alg(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                        const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_x_sig_alg(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	int cert_peer = (kw[4] == 'c') ? 1 : 0;
 	X509 *crt;
 	int nid;
 	struct connection *conn;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3452,18 +3838,14 @@ smp_fetch_ssl_x_sig_alg(struct proxy *px, struct session *l4, void *l7, unsigned
  * should be use.
  */
 static int
-smp_fetch_ssl_x_key_alg(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                        const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_x_key_alg(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	int cert_peer = (kw[4] == 'c') ? 1 : 0;
 	X509 *crt;
 	int nid;
 	struct connection *conn;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3503,11 +3885,10 @@ smp_fetch_ssl_x_key_alg(struct proxy *px, struct session *l4, void *l7, unsigned
  * char is 'b'.
  */
 static int
-smp_fetch_ssl_fc(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                 const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_fc(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	int back_conn = (kw[4] == 'b') ? 1 : 0;
-	struct connection *conn = objt_conn(l4->si[back_conn].end);
+	struct connection *conn = objt_conn(smp->strm->si[back_conn].end);
 
 	smp->type = SMP_T_BOOL;
 	smp->data.uint = (conn && conn->xprt == &ssl_sock);
@@ -3516,11 +3897,10 @@ smp_fetch_ssl_fc(struct proxy *px, struct session *l4, void *l7, unsigned int op
 
 /* boolean, returns true if client present a SNI */
 static int
-smp_fetch_ssl_fc_has_sni(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                         const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_fc_has_sni(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
-	struct connection *conn = objt_conn(l4->si[0].end);
+	struct connection *conn = objt_conn(smp->sess->origin);
 
 	smp->type = SMP_T_BOOL;
 	smp->data.uint = (conn && conn->xprt == &ssl_sock) &&
@@ -3532,23 +3912,32 @@ smp_fetch_ssl_fc_has_sni(struct proxy *px, struct session *l4, void *l7, unsigne
 #endif
 }
 
+/* boolean, returns true if client session has been resumed */
+static int
+smp_fetch_ssl_fc_is_resumed(const struct arg *args, struct sample *smp, const char *kw, void *private)
+{
+	struct connection *conn = objt_conn(smp->sess->origin);
+
+	smp->type = SMP_T_BOOL;
+	smp->data.uint = (conn && conn->xprt == &ssl_sock) &&
+		conn->xprt_ctx &&
+		SSL_session_reused(conn->xprt_ctx);
+	return 1;
+}
+
 /* string, returns the used cipher if front conn. transport layer is SSL.
  * This function is also usable on backend conn if the fetch keyword 5th
  * char is 'b'.
  */
 static int
-smp_fetch_ssl_fc_cipher(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                        const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_fc_cipher(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	int back_conn = (kw[4] == 'b') ? 1 : 0;
 	struct connection *conn;
 
 	smp->flags = 0;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[back_conn].end);
+	conn = objt_conn(smp->strm->si[back_conn].end);
 	if (!conn || !conn->xprt_ctx || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3569,18 +3958,14 @@ smp_fetch_ssl_fc_cipher(struct proxy *px, struct session *l4, void *l7, unsigned
  * char is 'b'.
  */
 static int
-smp_fetch_ssl_fc_alg_keysize(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                             const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_fc_alg_keysize(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	int back_conn = (kw[4] == 'b') ? 1 : 0;
 	struct connection *conn;
 
 	smp->flags = 0;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[back_conn].end);
+	conn = objt_conn(smp->strm->si[back_conn].end);
 	if (!conn || !conn->xprt_ctx || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3597,18 +3982,14 @@ smp_fetch_ssl_fc_alg_keysize(struct proxy *px, struct session *l4, void *l7, uns
  * char is 'b'.
  */
 static int
-smp_fetch_ssl_fc_use_keysize(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                             const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_fc_use_keysize(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	int back_conn = (kw[4] == 'b') ? 1 : 0;
 	struct connection *conn;
 
 	smp->flags = 0;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[back_conn].end);
+	conn = objt_conn(smp->strm->si[back_conn].end);
 	if (!conn || !conn->xprt_ctx || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3623,18 +4004,14 @@ smp_fetch_ssl_fc_use_keysize(struct proxy *px, struct session *l4, void *l7, uns
 
 #ifdef OPENSSL_NPN_NEGOTIATED
 static int
-smp_fetch_ssl_fc_npn(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                     const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_fc_npn(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	struct connection *conn;
 
 	smp->flags = SMP_F_CONST;
 	smp->type = SMP_T_STR;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || !conn->xprt_ctx || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3651,18 +4028,14 @@ smp_fetch_ssl_fc_npn(struct proxy *px, struct session *l4, void *l7, unsigned in
 
 #ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
 static int
-smp_fetch_ssl_fc_alpn(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                      const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_fc_alpn(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	struct connection *conn;
 
 	smp->flags = SMP_F_CONST;
 	smp->type = SMP_T_STR;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || !conn->xprt_ctx || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3682,18 +4055,14 @@ smp_fetch_ssl_fc_alpn(struct proxy *px, struct session *l4, void *l7, unsigned i
  * char is 'b'.
  */
 static int
-smp_fetch_ssl_fc_protocol(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                          const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_fc_protocol(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	int back_conn = (kw[4] == 'b') ? 1 : 0;
 	struct connection *conn;
 
 	smp->flags = 0;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[back_conn].end);
+	conn = objt_conn(smp->strm->si[back_conn].end);
 	if (!conn || !conn->xprt_ctx || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3708,35 +4077,31 @@ smp_fetch_ssl_fc_protocol(struct proxy *px, struct session *l4, void *l7, unsign
 	return 1;
 }
 
-/* binary, returns the SSL session id if front conn. transport layer is SSL.
+/* binary, returns the SSL stream id if front conn. transport layer is SSL.
  * This function is also usable on backend conn if the fetch keyword 5th
  * char is 'b'.
  */
 static int
-smp_fetch_ssl_fc_session_id(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                            const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_fc_session_id(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 #if OPENSSL_VERSION_NUMBER > 0x0090800fL
 	int back_conn = (kw[4] == 'b') ? 1 : 0;
-	SSL_SESSION *sess;
+	SSL_SESSION *ssl_sess;
 	struct connection *conn;
 
 	smp->flags = SMP_F_CONST;
 	smp->type = SMP_T_BIN;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[back_conn].end);
+	conn = objt_conn(smp->strm->si[back_conn].end);
 	if (!conn || !conn->xprt_ctx || conn->xprt != &ssl_sock)
 		return 0;
 
-	sess = SSL_get_session(conn->xprt_ctx);
-	if (!sess)
+	ssl_sess = SSL_get_session(conn->xprt_ctx);
+	if (!ssl_sess)
 		return 0;
 
-	smp->data.str.str = (char *)SSL_SESSION_get_id(sess, (unsigned int *)&smp->data.str.len);
-	if (!smp->data.str.str || !&smp->data.str.len)
+	smp->data.str.str = (char *)SSL_SESSION_get_id(ssl_sess, (unsigned int *)&smp->data.str.len);
+	if (!smp->data.str.str || !smp->data.str.len)
 		return 0;
 
 	return 1;
@@ -3746,8 +4111,7 @@ smp_fetch_ssl_fc_session_id(struct proxy *px, struct session *l4, void *l7, unsi
 }
 
 static int
-smp_fetch_ssl_fc_sni(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                     const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_fc_sni(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
 	struct connection *conn;
@@ -3755,10 +4119,7 @@ smp_fetch_ssl_fc_sni(struct proxy *px, struct session *l4, void *l7, unsigned in
 	smp->flags = SMP_F_CONST;
 	smp->type = SMP_T_STR;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || !conn->xprt_ctx || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3774,8 +4135,7 @@ smp_fetch_ssl_fc_sni(struct proxy *px, struct session *l4, void *l7, unsigned in
 }
 
 static int
-smp_fetch_ssl_fc_unique_id(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                          const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_fc_unique_id(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 #if OPENSSL_VERSION_NUMBER > 0x0090800fL
 	int back_conn = (kw[4] == 'b') ? 1 : 0;
@@ -3785,10 +4145,7 @@ smp_fetch_ssl_fc_unique_id(struct proxy *px, struct session *l4, void *l7, unsig
 
 	smp->flags = 0;
 
-	if (!l4)
-	        return 0;
-
-	conn = objt_conn(l4->si[back_conn].end);
+	conn = objt_conn(smp->strm->si[back_conn].end);
 	if (!conn || !conn->xprt_ctx || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3818,15 +4175,11 @@ smp_fetch_ssl_fc_unique_id(struct proxy *px, struct session *l4, void *l7, unsig
 
 /* integer, returns the first verify error in CA chain of client certificate chain. */
 static int
-smp_fetch_ssl_c_ca_err(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                       const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_c_ca_err(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	struct connection *conn;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3844,15 +4197,11 @@ smp_fetch_ssl_c_ca_err(struct proxy *px, struct session *l4, void *l7, unsigned 
 
 /* integer, returns the depth of the first verify error in CA chain of client certificate chain. */
 static int
-smp_fetch_ssl_c_ca_err_depth(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                             const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_c_ca_err_depth(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	struct connection *conn;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3870,15 +4219,11 @@ smp_fetch_ssl_c_ca_err_depth(struct proxy *px, struct session *l4, void *l7, uns
 
 /* integer, returns the first verify error on client certificate */
 static int
-smp_fetch_ssl_c_err(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                    const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_c_err(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	struct connection *conn;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3896,15 +4241,11 @@ smp_fetch_ssl_c_err(struct proxy *px, struct session *l4, void *l7, unsigned int
 
 /* integer, returns the verify result on client cert */
 static int
-smp_fetch_ssl_c_verify(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                       const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_ssl_c_verify(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	struct connection *conn;
 
-	if (!l4)
-		return 0;
-
-	conn = objt_conn(l4->si[0].end);
+	conn = objt_conn(smp->sess->origin);
 	if (!conn || conn->xprt != &ssl_sock)
 		return 0;
 
@@ -3937,6 +4278,36 @@ static int bind_parse_ca_file(char **args, int cur_arg, struct proxy *px, struct
 	else
 		memprintf(&conf->ca_file, "%s", args[cur_arg + 1]);
 
+	return 0;
+}
+
+/* parse the "ca-sign-file" bind keyword */
+static int bind_parse_ca_sign_file(char **args, int cur_arg, struct proxy *px, struct bind_conf *conf, char **err)
+{
+	if (!*args[cur_arg + 1]) {
+		if (err)
+			memprintf(err, "'%s' : missing CAfile path", args[cur_arg]);
+		return ERR_ALERT | ERR_FATAL;
+	}
+
+	if ((*args[cur_arg + 1] != '/') && global.ca_base)
+		memprintf(&conf->ca_sign_file, "%s/%s", global.ca_base, args[cur_arg + 1]);
+	else
+		memprintf(&conf->ca_sign_file, "%s", args[cur_arg + 1]);
+
+	return 0;
+}
+
+/* parse the ca-sign-pass bind keyword */
+
+static int bind_parse_ca_sign_pass(char **args, int cur_arg, struct proxy *px, struct bind_conf *conf, char **err)
+{
+	if (!*args[cur_arg + 1]) {
+		if (err)
+			memprintf(err, "'%s' : missing CAkey password", args[cur_arg]);
+		return ERR_ALERT | ERR_FATAL;
+	}
+	memprintf(&conf->ca_sign_pass, "%s", args[cur_arg + 1]);
 	return 0;
 }
 
@@ -4272,6 +4643,18 @@ static int bind_parse_ssl(char **args, int cur_arg, struct proxy *px, struct bin
 	return 0;
 }
 
+/* parse the "generate-certificates" bind keyword */
+static int bind_parse_generate_certs(char **args, int cur_arg, struct proxy *px, struct bind_conf *conf, char **err)
+{
+#ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+	conf->generate_certs = 1;
+#else
+	memprintf(err, "%sthis version of openssl cannot generate SSL certificates.\n",
+		  err && *err ? *err : "");
+#endif
+	return 0;
+}
+
 /* parse the "strict-sni" bind keyword */
 static int bind_parse_strict_sni(char **args, int cur_arg, struct proxy *px, struct bind_conf *conf, char **err)
 {
@@ -4286,6 +4669,7 @@ static int bind_parse_tls_ticket_keys(char **args, int cur_arg, struct proxy *px
 	FILE *f;
 	int i = 0;
 	char thisline[LINESIZE];
+	struct tls_keys_ref *keys_ref;
 
 	if (!*args[cur_arg + 1]) {
 		if (err)
@@ -4293,13 +4677,22 @@ static int bind_parse_tls_ticket_keys(char **args, int cur_arg, struct proxy *px
 		return ERR_ALERT | ERR_FATAL;
 	}
 
-	conf->tls_ticket_keys = malloc(TLS_TICKETS_NO * sizeof(struct tls_sess_key));
+	keys_ref = tlskeys_ref_lookup(args[cur_arg + 1]);
+	if(keys_ref) {
+		conf->keys_ref = keys_ref;
+		return 0;
+	}
+
+	keys_ref = malloc(sizeof(struct tls_keys_ref));
+	keys_ref->tlskeys = malloc(TLS_TICKETS_NO * sizeof(struct tls_sess_key));
 
 	if ((f = fopen(args[cur_arg + 1], "r")) == NULL) {
 		if (err)
 			memprintf(err, "'%s' : unable to load ssl tickets keys file", args[cur_arg+1]);
 		return ERR_ALERT | ERR_FATAL;
 	}
+
+	keys_ref->filename = strdup(args[cur_arg + 1]);
 
 	while (fgets(thisline, sizeof(thisline), f) != NULL) {
 		int len = strlen(thisline);
@@ -4310,7 +4703,7 @@ static int bind_parse_tls_ticket_keys(char **args, int cur_arg, struct proxy *px
 		if(thisline[len - 1] == '\r')
 			thisline[--len] = 0;
 
-		if (base64dec(thisline, len, (char *) (conf->tls_ticket_keys + i % TLS_TICKETS_NO), sizeof(struct tls_sess_key)) != sizeof(struct tls_sess_key)) {
+		if (base64dec(thisline, len, (char *) (keys_ref->tlskeys + i % TLS_TICKETS_NO), sizeof(struct tls_sess_key)) != sizeof(struct tls_sess_key)) {
 			if (err)
 				memprintf(err, "'%s' : unable to decode base64 key on line %d", args[cur_arg+1], i + 1);
 			return ERR_ALERT | ERR_FATAL;
@@ -4328,7 +4721,11 @@ static int bind_parse_tls_ticket_keys(char **args, int cur_arg, struct proxy *px
 
 	/* Use penultimate key for encryption, handle when TLS_TICKETS_NO = 1 */
 	i-=2;
-	conf->tls_ticket_enc_index = i < 0 ? 0 : i;
+	keys_ref->tls_ticket_enc_index = i < 0 ? 0 : i;
+	keys_ref->unique_id = -1;
+	conf->keys_ref = keys_ref;
+
+	LIST_ADD(&tlskeys_reference, &keys_ref->list);
 
 	return 0;
 #else
@@ -4730,6 +5127,7 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {ILH, {
 	{ "ssl_fc_cipher",          smp_fetch_ssl_fc_cipher,      0,                   NULL,    SMP_T_STR,  SMP_USE_L5CLI },
 	{ "ssl_fc_has_crt",         smp_fetch_ssl_fc_has_crt,     0,                   NULL,    SMP_T_BOOL, SMP_USE_L5CLI },
 	{ "ssl_fc_has_sni",         smp_fetch_ssl_fc_has_sni,     0,                   NULL,    SMP_T_BOOL, SMP_USE_L5CLI },
+	{ "ssl_fc_is_resumed",      smp_fetch_ssl_fc_is_resumed,  0,                   NULL,    SMP_T_BOOL, SMP_USE_L5CLI },
 #ifdef OPENSSL_NPN_NEGOTIATED
 	{ "ssl_fc_npn",             smp_fetch_ssl_fc_npn,         0,                   NULL,    SMP_T_STR,  SMP_USE_L5CLI },
 #endif
@@ -4764,6 +5162,8 @@ static struct bind_kw_list bind_kws = { "SSL", { }, {
 	{ "alpn",                  bind_parse_alpn,            1 }, /* set ALPN supported protocols */
 	{ "ca-file",               bind_parse_ca_file,         1 }, /* set CAfile to process verify on client cert */
 	{ "ca-ignore-err",         bind_parse_ignore_err,      1 }, /* set error IDs to ignore on verify depth > 0 */
+	{ "ca-sign-file",          bind_parse_ca_sign_file,    1 }, /* set CAFile used to generate and sign server certs */
+	{ "ca-sign-pass",          bind_parse_ca_sign_pass,    1 }, /* set CAKey passphrase */
 	{ "ciphers",               bind_parse_ciphers,         1 }, /* set SSL cipher suite */
 	{ "crl-file",              bind_parse_crl_file,        1 }, /* set certificat revocation list file use on client cert verify */
 	{ "crt",                   bind_parse_crt,             1 }, /* load SSL certificates from this location */
@@ -4774,6 +5174,7 @@ static struct bind_kw_list bind_kws = { "SSL", { }, {
 	{ "force-tlsv10",          bind_parse_force_tlsv10,    0 }, /* force TLSv10 */
 	{ "force-tlsv11",          bind_parse_force_tlsv11,    0 }, /* force TLSv11 */
 	{ "force-tlsv12",          bind_parse_force_tlsv12,    0 }, /* force TLSv12 */
+	{ "generate-certificates", bind_parse_generate_certs,  0 }, /* enable the server certificates generation */
 	{ "no-sslv3",              bind_parse_no_sslv3,        0 }, /* disable SSLv3 */
 	{ "no-tlsv10",             bind_parse_no_tlsv10,       0 }, /* disable TLSv10 */
 	{ "no-tlsv11",             bind_parse_no_tlsv11,       0 }, /* disable TLSv11 */
@@ -4836,6 +5237,18 @@ struct xprt_ops ssl_sock = {
 	.init     = ssl_sock_init,
 };
 
+#if (OPENSSL_VERSION_NUMBER >= 0x1000200fL && !defined OPENSSL_NO_TLSEXT && !defined OPENSSL_IS_BORINGSSL)
+
+static void ssl_sock_sctl_free_func(void *parent, void *ptr, CRYPTO_EX_DATA *ad, int idx, long argl, void *argp)
+{
+	if (ptr) {
+		chunk_destroy(ptr);
+		free(ptr);
+	}
+}
+
+#endif
+
 __attribute__((constructor))
 static void __ssl_sock_init(void)
 {
@@ -4857,6 +5270,9 @@ static void __ssl_sock_init(void)
 	SSL_library_init();
 	cm = SSL_COMP_get_compression_methods();
 	sk_SSL_COMP_zero(cm);
+#if (OPENSSL_VERSION_NUMBER >= 0x1000200fL && !defined OPENSSL_NO_TLSEXT && !defined OPENSSL_IS_BORINGSSL)
+	sctl_ex_index = SSL_CTX_get_ex_new_index(0, NULL, NULL, NULL, ssl_sock_sctl_free_func);
+#endif
 	sample_register_fetches(&sample_fetch_keywords);
 	acl_register_keywords(&acl_kws);
 	bind_register_keywords(&bind_kws);
@@ -4865,7 +5281,58 @@ static void __ssl_sock_init(void)
 
 	global.ssl_session_max_cost   = SSL_SESSION_MAX_COST;
 	global.ssl_handshake_max_cost = SSL_HANDSHAKE_MAX_COST;
+
+#ifndef OPENSSL_NO_DH
+	ssl_dh_ptr_index = SSL_CTX_get_ex_new_index(0, NULL, NULL, NULL, NULL);
+#endif
+
+#ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+	/* Add a global parameter for the LRU cache size */
+	if (global.tune.ssl_ctx_cache)
+		ssl_ctx_lru_tree = lru64_new(global.tune.ssl_ctx_cache);
+	ssl_ctx_lru_seed = (unsigned int)time(NULL);
+#endif
 }
+
+__attribute__((destructor))
+static void __ssl_sock_deinit(void)
+{
+#ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+	lru64_destroy(ssl_ctx_lru_tree);
+#endif
+
+#ifndef OPENSSL_NO_DH
+        if (local_dh_1024) {
+                DH_free(local_dh_1024);
+                local_dh_1024 = NULL;
+        }
+
+        if (local_dh_2048) {
+                DH_free(local_dh_2048);
+                local_dh_2048 = NULL;
+        }
+
+        if (local_dh_4096) {
+                DH_free(local_dh_4096);
+                local_dh_4096 = NULL;
+        }
+
+	if (global_dh) {
+		DH_free(global_dh);
+		global_dh = NULL;
+	}
+#endif
+
+        ERR_remove_state(0);
+        ERR_free_strings();
+
+        EVP_cleanup();
+
+#if OPENSSL_VERSION_NUMBER >= 0x00907000L
+        CRYPTO_cleanup_all_ex_data();
+#endif
+}
+
 
 /*
  * Local variables:

@@ -13,7 +13,9 @@
 
 #include <stdio.h>
 
-#ifdef USE_ZLIB
+#if defined(USE_SLZ)
+#include <slz.h>
+#elif defined(USE_ZLIB)
 /* Note: the crappy zlib and openssl libs both define the "free_func" type.
  * That's a very clever idea to use such a generic name in general purpose
  * libraries, really... The zlib one is easier to redefine than openssl's,
@@ -34,6 +36,7 @@
 #include <proto/compression.h>
 #include <proto/freq_ctr.h>
 #include <proto/proto_http.h>
+#include <proto/stream.h>
 
 
 #ifdef USE_ZLIB
@@ -55,15 +58,48 @@ long zlib_used_memory = 0;
 unsigned int compress_min_idle = 0;
 static struct pool_head *pool_comp_ctx = NULL;
 
+static int identity_init(struct comp_ctx **comp_ctx, int level);
+static int identity_add_data(struct comp_ctx *comp_ctx, const char *in_data, int in_len, struct buffer *out);
+static int identity_flush(struct comp_ctx *comp_ctx, struct buffer *out);
+static int identity_finish(struct comp_ctx *comp_ctx, struct buffer *out);
+static int identity_end(struct comp_ctx **comp_ctx);
+
+#if defined(USE_SLZ)
+
+static int rfc1950_init(struct comp_ctx **comp_ctx, int level);
+static int rfc1951_init(struct comp_ctx **comp_ctx, int level);
+static int rfc1952_init(struct comp_ctx **comp_ctx, int level);
+static int rfc195x_add_data(struct comp_ctx *comp_ctx, const char *in_data, int in_len, struct buffer *out);
+static int rfc195x_flush(struct comp_ctx *comp_ctx, struct buffer *out);
+static int rfc195x_finish(struct comp_ctx *comp_ctx, struct buffer *out);
+static int rfc195x_end(struct comp_ctx **comp_ctx);
+
+#elif defined(USE_ZLIB)
+
+static int gzip_init(struct comp_ctx **comp_ctx, int level);
+static int raw_def_init(struct comp_ctx **comp_ctx, int level);
+static int deflate_init(struct comp_ctx **comp_ctx, int level);
+static int deflate_add_data(struct comp_ctx *comp_ctx, const char *in_data, int in_len, struct buffer *out);
+static int deflate_flush(struct comp_ctx *comp_ctx, struct buffer *out);
+static int deflate_finish(struct comp_ctx *comp_ctx, struct buffer *out);
+static int deflate_end(struct comp_ctx **comp_ctx);
+
+#endif /* USE_ZLIB */
+
 
 const struct comp_algo comp_algos[] =
 {
-	{ "identity", 8, identity_init, identity_add_data, identity_flush, identity_reset, identity_end },
-#ifdef USE_ZLIB
-	{ "deflate",  7, deflate_init,  deflate_add_data,  deflate_flush,  deflate_reset,  deflate_end },
-	{ "gzip",     4, gzip_init,     deflate_add_data,  deflate_flush,  deflate_reset,  deflate_end },
+	{ "identity",     8, "identity", 8, identity_init, identity_add_data, identity_flush, identity_finish, identity_end },
+#if defined(USE_SLZ)
+	{ "deflate",      7, "deflate",  7, rfc1950_init,  rfc195x_add_data,  rfc195x_flush,  rfc195x_finish,  rfc195x_end },
+	{ "raw-deflate", 11, "deflate",  7, rfc1951_init,  rfc195x_add_data,  rfc195x_flush,  rfc195x_finish,  rfc195x_end },
+	{ "gzip",         4, "gzip",     4, rfc1952_init,  rfc195x_add_data,  rfc195x_flush,  rfc195x_finish,  rfc195x_end },
+#elif defined(USE_ZLIB)
+	{ "deflate",      7, "deflate",  7, deflate_init,  deflate_add_data,  deflate_flush,  deflate_finish,  deflate_end },
+	{ "raw-deflate", 11, "deflate",  7, raw_def_init,  deflate_add_data,  deflate_flush,  deflate_finish,  deflate_end },
+	{ "gzip",         4, "gzip",     4, gzip_init,     deflate_add_data,  deflate_flush,  deflate_finish,  deflate_end },
 #endif /* USE_ZLIB */
-	{ NULL,       0, NULL ,         NULL,              NULL,           NULL,           NULL }
+	{ NULL,       0, NULL,          0, NULL ,         NULL,              NULL,           NULL,           NULL }
 };
 
 /*
@@ -89,8 +125,8 @@ int comp_append_algo(struct comp *comp, const char *algo)
 	struct comp_algo *comp_algo;
 	int i;
 
-	for (i = 0; comp_algos[i].name; i++) {
-		if (!strcmp(algo, comp_algos[i].name)) {
+	for (i = 0; comp_algos[i].cfg_name; i++) {
+		if (!strcmp(algo, comp_algos[i].cfg_name)) {
 			comp_algo = calloc(1, sizeof(struct comp_algo));
 			memmove(comp_algo, &comp_algos[i], sizeof(struct comp_algo));
 			comp_algo->next = comp->algos;
@@ -102,64 +138,53 @@ int comp_append_algo(struct comp *comp, const char *algo)
 }
 
 /* emit the chunksize followed by a CRLF on the output and return the number of
- * bytes written. Appends <add_crlf> additional CRLF after the first one. Chunk
- * sizes are truncated to 6 hex digits (16 MB) and padded left. The caller is
- * responsible for ensuring there is enough room left in the output buffer for
- * the string (8 bytes * add_crlf*2).
+ * bytes written. It goes backwards and starts with the byte before <end>. It
+ * returns the number of bytes written which will not exceed 10 (8 digits, CR,
+ * and LF). The caller is responsible for ensuring there is enough room left in
+ * the output buffer for the string.
  */
-int http_emit_chunk_size(char *out, unsigned int chksz, int add_crlf)
+int http_emit_chunk_size(char *end, unsigned int chksz)
 {
-	int shift;
-	int pos = 0;
+	char *beg = end;
 
-	for (shift = 20; shift >= 0; shift -= 4)
-		out[pos++] = hextab[(chksz >> shift) & 0xF];
-
+	*--beg = '\n';
+	*--beg = '\r';
 	do {
-		out[pos++] = '\r';
-		out[pos++] = '\n';
-	} while (--add_crlf >= 0);
-
-	return pos;
+		*--beg = hextab[chksz & 0xF];
+	} while (chksz >>= 4);
+	return end - beg;
 }
 
 /*
  * Init HTTP compression
  */
-int http_compression_buffer_init(struct session *s, struct buffer *in, struct buffer *out)
+int http_compression_buffer_init(struct stream *s, struct buffer *in, struct buffer *out)
 {
-	int left;
+	/* output stream requires at least 10 bytes for the gzip header, plus
+	 * at least 8 bytes for the gzip trailer (crc+len), plus a possible
+	 * plus at most 5 bytes per 32kB block and 2 bytes to close the stream.
+	 */
+	if (in->size - buffer_len(in) < 20 + 5 * ((in->i + 32767) >> 15))
+		return -1;
 
-	/* not enough space */
-	if (in->size - buffer_len(in) < 40)
-	    return -1;
-
-	/* We start by copying the current buffer's pending outgoing data into
-	 * a new temporary buffer that we initialize with a new empty chunk.
+	/* prepare an empty output buffer in which we reserve enough room for
+	 * copying the output bytes from <in>, plus 10 extra bytes to write
+	 * the chunk size. We don't copy the bytes yet so that if we have to
+	 * cancel the operation later, it's cheap.
 	 */
 	b_reset(out);
-
-	if (in->o > 0) {
-		left = in->o - bo_contig_data(in);
-		memcpy(out->data, bo_ptr(in), bo_contig_data(in));
-		out->p += bo_contig_data(in);
-		if (left > 0) { /* second part of the buffer */
-			memcpy(out->p, in->data, left);
-			out->p += left;
-		}
-		out->o = in->o;
-	}
-	out->i += http_emit_chunk_size(out->p, 0, 0);
-
+	out->o = in->o;
+	out->p += out->o;
+	out->i = 10;
 	return 0;
 }
 
 /*
  * Add data to compress
  */
-int http_compression_buffer_add_data(struct session *s, struct buffer *in, struct buffer *out)
+int http_compression_buffer_add_data(struct stream *s, struct buffer *in, struct buffer *out)
 {
-	struct http_msg *msg = &s->txn.rsp;
+	struct http_msg *msg = &s->txn->rsp;
 	int consumed_data = 0;
 	int data_process_len;
 	int block1, block2;
@@ -205,69 +230,99 @@ int http_compression_buffer_add_data(struct session *s, struct buffer *in, struc
  * Flush data in process, and write the header and footer of the chunk. Upon
  * success, in and out buffers are swapped to avoid a copy.
  */
-int http_compression_buffer_end(struct session *s, struct buffer **in, struct buffer **out, int end)
+int http_compression_buffer_end(struct stream *s, struct buffer **in, struct buffer **out, int end)
 {
 	int to_forward;
 	int left;
-	struct http_msg *msg = &s->txn.rsp;
+	struct http_msg *msg = &s->txn->rsp;
 	struct buffer *ib = *in, *ob = *out;
+	char *tail;
 
-#ifdef USE_ZLIB
+#if defined(USE_SLZ) || defined(USE_ZLIB)
 	int ret;
 
 	/* flush data here */
 
 	if (end)
-		ret = s->comp_algo->flush(s->comp_ctx, ob, Z_FINISH); /* end of data */
+		ret = s->comp_algo->finish(s->comp_ctx, ob); /* end of data */
 	else
-		ret = s->comp_algo->flush(s->comp_ctx, ob, Z_SYNC_FLUSH); /* end of buffer */
+		ret = s->comp_algo->flush(s->comp_ctx, ob); /* end of buffer */
 
 	if (ret < 0)
 		return -1; /* flush failed */
 
 #endif /* USE_ZLIB */
 
-	if (ob->i > 8) {
-		/* more than a chunk size => some data were emitted */
-		char *tail = ob->p + ob->i;
-
-		/* write real size at the begining of the chunk, no need of wrapping */
-		http_emit_chunk_size(ob->p, ob->i - 8, 0);
-
-		/* chunked encoding requires CRLF after data */
-		*tail++ = '\r';
-		*tail++ = '\n';
-
-		/* At the end of data, we must write the empty chunk 0<CRLF>,
-		 * and terminate the trailers section with a last <CRLF>. If
-		 * we're forwarding a chunked-encoded response, we'll have a
-		 * trailers section after the empty chunk which needs to be
-		 * forwarded and which will provide the last CRLF. Otherwise
-		 * we write it ourselves.
+	if (ob->i == 10) {
+		/* No data were appended, let's drop the output buffer and
+		 * keep the input buffer unchanged.
 		 */
-		if (msg->msg_state >= HTTP_MSG_TRAILERS) {
-			memcpy(tail, "0\r\n", 3);
-			tail += 3;
-			if (msg->msg_state >= HTTP_MSG_DONE) {
-				memcpy(tail, "\r\n", 2);
-				tail += 2;
-			}
-		}
-		ob->i = tail - ob->p;
-	} else {
-		/* no data were sent, cancel the chunk size */
-		ob->i = 0;
+		return 0;
 	}
+
+	/* OK so at this stage, we have an output buffer <ob> looking like this :
+	 *
+	 *        <-- o --> <------ i ----->
+	 *       +---------+---+------------+-----------+
+	 *       |   out   | c |  comp_in   |   empty   |
+	 *       +---------+---+------------+-----------+
+	 *     data        p                           size
+	 *
+	 * <out> is the room reserved to copy ib->o. It starts at ob->data and
+	 * has not yet been filled. <c> is the room reserved to write the chunk
+	 * size (10 bytes). <comp_in> is the compressed equivalent of the data
+	 * part of ib->i. <empty> is the amount of empty bytes at the end of
+	 * the buffer, into which we may have to copy the remaining bytes from
+	 * ib->i after the data (chunk size, trailers, ...).
+	 */
+
+	/* Write real size at the begining of the chunk, no need of wrapping.
+	 * We write the chunk using a dynamic length and adjust ob->p and ob->i
+	 * accordingly afterwards. That will move <out> away from <data>.
+	 */
+	left = 10 - http_emit_chunk_size(ob->p + 10, ob->i - 10);
+	ob->p += left;
+	ob->i -= left;
+
+	/* Copy previous data from ib->o into ob->o */
+	if (ib->o > 0) {
+		left = bo_contig_data(ib);
+		memcpy(ob->p - ob->o, bo_ptr(ib), left);
+		if (ib->o - left) /* second part of the buffer */
+			memcpy(ob->p - ob->o + left, ib->data, ib->o - left);
+	}
+
+	/* chunked encoding requires CRLF after data */
+	tail = ob->p + ob->i;
+	*tail++ = '\r';
+	*tail++ = '\n';
+
+	/* At the end of data, we must write the empty chunk 0<CRLF>,
+	 * and terminate the trailers section with a last <CRLF>. If
+	 * we're forwarding a chunked-encoded response, we'll have a
+	 * trailers section after the empty chunk which needs to be
+	 * forwarded and which will provide the last CRLF. Otherwise
+	 * we write it ourselves.
+	 */
+	if (msg->msg_state >= HTTP_MSG_TRAILERS) {
+		memcpy(tail, "0\r\n", 3);
+		tail += 3;
+		if (msg->msg_state >= HTTP_MSG_DONE) {
+			memcpy(tail, "\r\n", 2);
+			tail += 2;
+		}
+	}
+	ob->i = tail - ob->p;
 
 	to_forward = ob->i;
 
 	/* update input rate */
 	if (s->comp_ctx && s->comp_ctx->cur_lvl > 0) {
 		update_freq_ctr(&global.comp_bps_in, msg->next);
-		s->fe->fe_counters.comp_in += msg->next;
+		strm_fe(s)->fe_counters.comp_in += msg->next;
 		s->be->be_counters.comp_in += msg->next;
 	} else {
-		s->fe->fe_counters.comp_byp += msg->next;
+		strm_fe(s)->fe_counters.comp_byp += msg->next;
 		s->be->be_counters.comp_byp += msg->next;
 	}
 
@@ -276,12 +331,12 @@ int http_compression_buffer_end(struct session *s, struct buffer **in, struct bu
 	msg->next = 0;
 
 	if (ib->i > 0) {
-		left = ib->i - bi_contig_data(ib);
-		memcpy(bi_end(ob), bi_ptr(ib), bi_contig_data(ib));
-		ob->i += bi_contig_data(ib);
-		if (left > 0) {
-			memcpy(bi_end(ob), ib->data, left);
-			ob->i += left;
+		left = bi_contig_data(ib);
+		memcpy(ob->p + ob->i, bi_ptr(ib), left);
+		ob->i += left;
+		if (ib->i - left) {
+			memcpy(ob->p + ob->i, ib->data, ib->i - left);
+			ob->i += ib->i - left;
 		}
 	}
 
@@ -291,7 +346,7 @@ int http_compression_buffer_end(struct session *s, struct buffer **in, struct bu
 
 	if (s->comp_ctx && s->comp_ctx->cur_lvl > 0) {
 		update_freq_ctr(&global.comp_bps_out, to_forward);
-		s->fe->fe_counters.comp_out += to_forward;
+		strm_fe(s)->fe_counters.comp_out += to_forward;
 		s->be->be_counters.comp_out += to_forward;
 	}
 
@@ -319,7 +374,11 @@ static inline int init_comp_ctx(struct comp_ctx **comp_ctx)
 	*comp_ctx = pool_alloc2(pool_comp_ctx);
 	if (*comp_ctx == NULL)
 		return -1;
-#ifdef USE_ZLIB
+#if defined(USE_SLZ)
+	(*comp_ctx)->direct_ptr = NULL;
+	(*comp_ctx)->direct_len = 0;
+	(*comp_ctx)->queued = NULL;
+#elif defined(USE_ZLIB)
 	zlib_used_memory += sizeof(struct comp_ctx);
 
 	strm = &(*comp_ctx)->strm;
@@ -355,7 +414,7 @@ static inline int deinit_comp_ctx(struct comp_ctx **comp_ctx)
 /*
  * Init the identity algorithm
  */
-int identity_init(struct comp_ctx **comp_ctx, int level)
+static int identity_init(struct comp_ctx **comp_ctx, int level)
 {
 	return 0;
 }
@@ -364,7 +423,7 @@ int identity_init(struct comp_ctx **comp_ctx, int level)
  * Process data
  *   Return size of consumed data or -1 on error
  */
-int identity_add_data(struct comp_ctx *comp_ctx, const char *in_data, int in_len, struct buffer *out)
+static int identity_add_data(struct comp_ctx *comp_ctx, const char *in_data, int in_len, struct buffer *out)
 {
 	char *out_data = bi_end(out);
 	int out_len = out->size - buffer_len(out);
@@ -379,12 +438,12 @@ int identity_add_data(struct comp_ctx *comp_ctx, const char *in_data, int in_len
 	return in_len;
 }
 
-int identity_flush(struct comp_ctx *comp_ctx, struct buffer *out, int flag)
+static int identity_flush(struct comp_ctx *comp_ctx, struct buffer *out)
 {
 	return 0;
 }
 
-int identity_reset(struct comp_ctx *comp_ctx)
+static int identity_finish(struct comp_ctx *comp_ctx, struct buffer *out)
 {
 	return 0;
 }
@@ -392,13 +451,154 @@ int identity_reset(struct comp_ctx *comp_ctx)
 /*
  * Deinit the algorithm
  */
-int identity_end(struct comp_ctx **comp_ctx)
+static int identity_end(struct comp_ctx **comp_ctx)
 {
 	return 0;
 }
 
 
-#ifdef USE_ZLIB
+#ifdef USE_SLZ
+
+/* SLZ's gzip format (RFC1952). Returns < 0 on error. */
+static int rfc1952_init(struct comp_ctx **comp_ctx, int level)
+{
+	if (init_comp_ctx(comp_ctx) < 0)
+		return -1;
+
+	(*comp_ctx)->cur_lvl = !!level;
+	return slz_rfc1952_init(&(*comp_ctx)->strm, !!level);
+}
+
+/* SLZ's raw deflate format (RFC1951). Returns < 0 on error. */
+static int rfc1951_init(struct comp_ctx **comp_ctx, int level)
+{
+	if (init_comp_ctx(comp_ctx) < 0)
+		return -1;
+
+	(*comp_ctx)->cur_lvl = !!level;
+	return slz_rfc1951_init(&(*comp_ctx)->strm, !!level);
+}
+
+/* SLZ's zlib format (RFC1950). Returns < 0 on error. */
+static int rfc1950_init(struct comp_ctx **comp_ctx, int level)
+{
+	if (init_comp_ctx(comp_ctx) < 0)
+		return -1;
+
+	(*comp_ctx)->cur_lvl = !!level;
+	return slz_rfc1950_init(&(*comp_ctx)->strm, !!level);
+}
+
+/* Return the size of consumed data or -1. The output buffer is unused at this
+ * point, we only keep a reference to the input data or a copy of them if the
+ * reference is already used.
+ */
+static int rfc195x_add_data(struct comp_ctx *comp_ctx, const char *in_data, int in_len, struct buffer *out)
+{
+	static struct buffer *tmpbuf = &buf_empty;
+
+	if (in_len <= 0)
+		return 0;
+
+	if (comp_ctx->direct_ptr && !comp_ctx->queued) {
+		/* data already being pointed to, we're in front of fragmented
+		 * data and need a buffer now. We reuse the same buffer, as it's
+		 * not used out of the scope of a series of add_data()*, end().
+		 */
+		if (unlikely(!tmpbuf->size)) {
+			/* this is the first time we need the compression buffer */
+			if (b_alloc(&tmpbuf) == NULL)
+				return -1; /* no memory */
+		}
+		b_reset(tmpbuf);
+		memcpy(bi_end(tmpbuf), comp_ctx->direct_ptr, comp_ctx->direct_len);
+		tmpbuf->i += comp_ctx->direct_len;
+		comp_ctx->direct_ptr = NULL;
+		comp_ctx->direct_len = 0;
+		comp_ctx->queued = tmpbuf;
+		/* fall through buffer copy */
+	}
+
+	if (comp_ctx->queued) {
+		/* data already pending */
+		memcpy(bi_end(comp_ctx->queued), in_data, in_len);
+		comp_ctx->queued->i += in_len;
+		return in_len;
+	}
+
+	comp_ctx->direct_ptr = in_data;
+	comp_ctx->direct_len = in_len;
+	return in_len;
+}
+
+/* Compresses the data accumulated using add_data(), and optionally sends the
+ * format-specific trailer if <finish> is non-null. <out> is expected to have a
+ * large enough free non-wrapping space as verified by http_comp_buffer_init().
+ * The number of bytes emitted is reported.
+ */
+static int rfc195x_flush_or_finish(struct comp_ctx *comp_ctx, struct buffer *out, int finish)
+{
+	struct slz_stream *strm = &comp_ctx->strm;
+	const char *in_ptr;
+	int in_len;
+	int out_len;
+
+	in_ptr = comp_ctx->direct_ptr;
+	in_len = comp_ctx->direct_len;
+
+	if (comp_ctx->queued) {
+		in_ptr = comp_ctx->queued->p;
+		in_len = comp_ctx->queued->i;
+	}
+
+	out_len = out->i;
+
+	if (in_ptr)
+		out->i += slz_encode(strm, bi_end(out), in_ptr, in_len, !finish);
+
+	if (finish)
+		out->i += slz_finish(strm, bi_end(out));
+
+	out_len = out->i - out_len;
+
+	/* very important, we must wipe the data we've just flushed */
+	comp_ctx->direct_len = 0;
+	comp_ctx->direct_ptr = NULL;
+	comp_ctx->queued     = NULL;
+
+	/* Verify compression rate limiting and CPU usage */
+	if ((global.comp_rate_lim > 0 && (read_freq_ctr(&global.comp_bps_out) > global.comp_rate_lim)) ||    /* rate */
+	   (idle_pct < compress_min_idle)) {                                                                 /* idle */
+		if (comp_ctx->cur_lvl > 0)
+			strm->level = --comp_ctx->cur_lvl;
+	}
+	else if (comp_ctx->cur_lvl < global.tune.comp_maxlevel && comp_ctx->cur_lvl < 1) {
+		strm->level = ++comp_ctx->cur_lvl;
+	}
+
+	/* and that's all */
+	return out_len;
+}
+
+static int rfc195x_flush(struct comp_ctx *comp_ctx, struct buffer *out)
+{
+	return rfc195x_flush_or_finish(comp_ctx, out, 0);
+}
+
+static int rfc195x_finish(struct comp_ctx *comp_ctx, struct buffer *out)
+{
+	return rfc195x_flush_or_finish(comp_ctx, out, 1);
+}
+
+/* we just need to free the comp_ctx here, nothing was allocated */
+static int rfc195x_end(struct comp_ctx **comp_ctx)
+{
+	deinit_comp_ctx(comp_ctx);
+	return 0;
+}
+
+#elif defined(USE_ZLIB)  /* ! USE_SLZ */
+
 /*
  * This is a tricky allocation function using the zlib.
  * This is based on the allocation order in deflateInit2.
@@ -487,7 +687,7 @@ static void free_zlib(void *opaque, void *ptr)
 /**************************
 ****  gzip algorithm   ****
 ***************************/
-int gzip_init(struct comp_ctx **comp_ctx, int level)
+static int gzip_init(struct comp_ctx **comp_ctx, int level)
 {
 	z_stream *strm;
 
@@ -505,11 +705,31 @@ int gzip_init(struct comp_ctx **comp_ctx, int level)
 
 	return 0;
 }
+
+/* Raw deflate algorithm */
+static int raw_def_init(struct comp_ctx **comp_ctx, int level)
+{
+	z_stream *strm;
+
+	if (init_comp_ctx(comp_ctx) < 0)
+		return -1;
+
+	strm = &(*comp_ctx)->strm;
+
+	if (deflateInit2(strm, level, Z_DEFLATED, -global.tune.zlibwindowsize, global.tune.zlibmemlevel, Z_DEFAULT_STRATEGY) != Z_OK) {
+		deinit_comp_ctx(comp_ctx);
+		return -1;
+	}
+
+	(*comp_ctx)->cur_lvl = level;
+	return 0;
+}
+
 /**************************
 **** Deflate algorithm ****
 ***************************/
 
-int deflate_init(struct comp_ctx **comp_ctx, int level)
+static int deflate_init(struct comp_ctx **comp_ctx, int level)
 {
 	z_stream *strm;
 
@@ -529,7 +749,7 @@ int deflate_init(struct comp_ctx **comp_ctx, int level)
 }
 
 /* Return the size of consumed data or -1 */
-int deflate_add_data(struct comp_ctx *comp_ctx, const char *in_data, int in_len, struct buffer *out)
+static int deflate_add_data(struct comp_ctx *comp_ctx, const char *in_data, int in_len, struct buffer *out)
 {
 	int ret;
 	z_stream *strm = &comp_ctx->strm;
@@ -558,7 +778,7 @@ int deflate_add_data(struct comp_ctx *comp_ctx, const char *in_data, int in_len,
 	return in_len - strm->avail_in;
 }
 
-int deflate_flush(struct comp_ctx *comp_ctx, struct buffer *out, int flag)
+static int deflate_flush_or_finish(struct comp_ctx *comp_ctx, struct buffer *out, int flag)
 {
 	int ret;
 	int out_len = 0;
@@ -592,16 +812,17 @@ int deflate_flush(struct comp_ctx *comp_ctx, struct buffer *out, int flag)
 	return out_len;
 }
 
-int deflate_reset(struct comp_ctx *comp_ctx)
+static int deflate_flush(struct comp_ctx *comp_ctx, struct buffer *out)
 {
-	z_stream *strm = &comp_ctx->strm;
-
-	if (deflateReset(strm) == Z_OK)
-		return 0;
-	return -1;
+	return deflate_flush_or_finish(comp_ctx, out, Z_SYNC_FLUSH);
 }
 
-int deflate_end(struct comp_ctx **comp_ctx)
+static int deflate_finish(struct comp_ctx *comp_ctx, struct buffer *out)
+{
+	return deflate_flush_or_finish(comp_ctx, out, Z_FINISH);
+}
+
+static int deflate_end(struct comp_ctx **comp_ctx)
 {
 	z_stream *strm = &(*comp_ctx)->strm;
 	int ret;
@@ -617,26 +838,24 @@ int deflate_end(struct comp_ctx **comp_ctx)
 
 /* boolean, returns true if compression is used (either gzip or deflate) in the response */
 static int
-smp_fetch_res_comp(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                 const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_res_comp(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	smp->type = SMP_T_BOOL;
-	smp->data.uint = (l4->comp_algo != NULL);
+	smp->data.uint = (smp->strm->comp_algo != NULL);
 	return 1;
 }
 
 /* string, returns algo */
 static int
-smp_fetch_res_comp_algo(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
-                 const struct arg *args, struct sample *smp, const char *kw, void *private)
+smp_fetch_res_comp_algo(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	if (!l4->comp_algo)
+	if (!smp->strm->comp_algo)
 		return 0;
 
 	smp->type = SMP_T_STR;
 	smp->flags = SMP_F_CONST;
-	smp->data.str.str = l4->comp_algo->name;
-	smp->data.str.len = l4->comp_algo->name_len;
+	smp->data.str.str = smp->strm->comp_algo->cfg_name;
+	smp->data.str.len = smp->strm->comp_algo->cfg_name_len;
 	return 1;
 }
 
@@ -655,6 +874,10 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {ILH, {
 __attribute__((constructor))
 static void __comp_fetch_init(void)
 {
+#ifdef USE_SLZ
+	slz_make_crc_table();
+	slz_prepare_dist_table();
+#endif
 	acl_register_keywords(&acl_kws);
 	sample_register_fetches(&sample_fetch_keywords);
 }

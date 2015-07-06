@@ -28,6 +28,7 @@
 #include <eb32tree.h>
 #include <ebistree.h>
 
+#include <types/capture.h>
 #include <types/global.h>
 #include <types/obj_type.h>
 #include <types/peers.h>
@@ -41,6 +42,7 @@
 #include <proto/proto_http.h>
 #include <proto/proxy.h>
 #include <proto/signal.h>
+#include <proto/stream.h>
 #include <proto/task.h>
 
 
@@ -105,7 +107,7 @@ int get_backend_server(const char *bk_name, const char *sv_name,
 	if (*sv_name == '#')
 		sid = atoi(sv_name + 1);
 
-	p = findproxy(bk_name, PR_CAP_BE);
+	p = proxy_be_by_name(bk_name);
 	if (bk)
 		*bk = p;
 	if (!p)
@@ -336,6 +338,106 @@ static int proxy_parse_max_ka_queue(char **args, int section, struct proxy *prox
 	return retval;
 }
 
+/* This function parses a "declare" statement in a proxy section. It returns -1
+ * if there is any error, 1 for warning, otherwise 0. If it does not return zero,
+ * it will write an error or warning message into a preallocated buffer returned
+ * at <err>. The function must be called with <args> pointing to the first command
+ * line word, with <proxy> pointing to the proxy being parsed, and <defpx> to the
+ * default proxy or NULL.
+ */
+static int proxy_parse_declare(char **args, int section, struct proxy *curpx,
+                               struct proxy *defpx, const char *file, int line,
+                               char **err)
+{
+	/* Capture keyword wannot be declared in a default proxy. */
+	if (curpx == defpx) {
+		memprintf(err, "'%s' not avalaible in default section", args[0]);
+		return -1;
+	}
+
+	/* Capture keywork is only avalaible in frontend. */
+	if (!(curpx->cap & PR_CAP_FE)) {
+		memprintf(err, "'%s' only avalaible in frontend or listen section", args[0]);
+		return -1;
+	}
+
+	/* Check mandatory second keyword. */
+	if (!args[1] || !*args[1]) {
+		memprintf(err, "'%s' needs a second keyword that specify the type of declaration ('capture')", args[0]);
+		return -1;
+	}
+
+	/* Actually, declare is only avalaible for declaring capture
+	 * slot, but in the future it can declare maps or variables.
+	 * So, this section permits to check and switch acording with
+	 * the second keyword.
+	 */
+	if (strcmp(args[1], "capture") == 0) {
+		char *error = NULL;
+		long len;
+		struct cap_hdr *hdr;
+
+		/* Check the next keyword. */
+		if (!args[2] || !*args[2] ||
+		    (strcmp(args[2], "response") != 0 &&
+		     strcmp(args[2], "request") != 0)) {
+			memprintf(err, "'%s %s' requires a direction ('request' or 'response')", args[0], args[1]);
+			return -1;
+		}
+
+		/* Check the 'len' keyword. */
+		if (!args[3] || !*args[3] || strcmp(args[3], "len") != 0) {
+			memprintf(err, "'%s %s' requires a capture length ('len')", args[0], args[1]);
+			return -1;
+		}
+
+		/* Check the length value. */
+		if (!args[4] || !*args[4]) {
+			memprintf(err, "'%s %s': 'len' requires a numeric value that represents the "
+			               "capture length",
+			          args[0], args[1]);
+			return -1;
+		}
+
+		/* convert the length value. */
+		len = strtol(args[4], &error, 10);
+		if (*error != '\0') {
+			memprintf(err, "'%s %s': cannot parse the length '%s'.",
+			          args[0], args[1], args[3]);
+			return -1;
+		}
+
+		/* check length. */
+		if (len <= 0) {
+			memprintf(err, "length must be > 0");
+			return -1;
+		}
+
+		/* register the capture. */
+		hdr = calloc(sizeof(struct cap_hdr), 1);
+		hdr->name = NULL; /* not a header capture */
+		hdr->namelen = 0;
+		hdr->len = len;
+		hdr->pool = create_pool("caphdr", hdr->len + 1, MEM_F_SHARED);
+
+		if (strcmp(args[2], "request") == 0) {
+			hdr->next = curpx->req_cap;
+			hdr->index = curpx->nb_req_cap++;
+			curpx->req_cap = hdr;
+		}
+		if (strcmp(args[2], "response") == 0) {
+			hdr->next = curpx->rsp_cap;
+			hdr->index = curpx->nb_rsp_cap++;
+			curpx->rsp_cap = hdr;
+		}
+		return 0;
+	}
+	else {
+		memprintf(err, "unknown declaration type '%s' (supports 'capture')", args[1]);
+		return -1;
+	}
+}
+
 /* This function inserts proxy <px> into the tree of known proxies. The proxy's
  * name is used as the storing key so it must already have been initialized.
  */
@@ -345,76 +447,43 @@ void proxy_store_name(struct proxy *px)
 	ebis_insert(&proxy_by_name, &px->conf.by_name);
 }
 
-/*
- * This function finds a proxy with matching name, mode and with satisfying
- * capabilities. It also checks if there are more matching proxies with
- * requested name as this often leads into unexpected situations.
+/* Returns a pointer to the first proxy matching capabilities <cap> and id
+ * <id>. NULL is returned if no match is found. If <table> is non-zero, it
+ * only considers proxies having a table.
  */
+struct proxy *proxy_find_by_id(int id, int cap, int table)
+{
+	struct eb32_node *n;
 
-struct proxy *findproxy_mode(const char *name, int mode, int cap) {
+	for (n = eb32_lookup(&used_proxy_id, id); n; n = eb32_next(n)) {
+		struct proxy *px = container_of(n, struct proxy, conf.id);
 
-	struct proxy *curproxy, *target = NULL;
-	struct ebpt_node *node;
-
-	for (node = ebis_lookup(&proxy_by_name, name); node; node = ebpt_next(node)) {
-		curproxy = container_of(node, struct proxy, conf.by_name);
-
-		if (strcmp(curproxy->id, name) != 0)
+		if (px->uuid != id)
 			break;
 
-		if ((curproxy->cap & cap) != cap)
+		if ((px->cap & cap) != cap)
 			continue;
 
-		if (curproxy->mode != mode &&
-		    !(curproxy->mode == PR_MODE_HTTP && mode == PR_MODE_TCP)) {
-			Alert("Unable to use proxy '%s' with wrong mode, required: %s, has: %s.\n", 
-				name, proxy_mode_str(mode), proxy_mode_str(curproxy->mode));
-			Alert("You may want to use 'mode %s'.\n", proxy_mode_str(mode));
-			return NULL;
-		}
-
-		if (!target) {
-			target = curproxy;
+		if (table && !px->table.size)
 			continue;
-		}
 
-		Alert("Refusing to use duplicated proxy '%s' with overlapping capabilities: %s/%s!\n",
-			name, proxy_type_str(curproxy), proxy_type_str(target));
-
-		return NULL;
+		return px;
 	}
-
-	return target;
+	return NULL;
 }
 
-/* Returns a pointer to the proxy matching either name <name>, or id <name> if
- * <name> begins with a '#'. NULL is returned if no match is found, as well as
- * if multiple matches are found (eg: too large capabilities mask).
+/* Returns a pointer to the first proxy matching either name <name>, or id
+ * <name> if <name> begins with a '#'. NULL is returned if no match is found.
+ * If <table> is non-zero, it only considers proxies having a table.
  */
-struct proxy *findproxy(const char *name, int cap) {
-
-	struct proxy *curproxy, *target = NULL;
-	int pid = -1;
+struct proxy *proxy_find_by_name(const char *name, int cap, int table)
+{
+	struct proxy *curproxy;
 
 	if (*name == '#') {
-		struct eb32_node *node;
-
-		pid = atoi(name + 1);
-
-		for (node = eb32_lookup(&used_proxy_id, pid); node; node = eb32_next(node)) {
-			curproxy = container_of(node, struct proxy, conf.id);
-
-			if (curproxy->uuid != pid)
-				break;
-
-			if ((curproxy->cap & cap) != cap)
-				continue;
-
-			if (target)
-				return NULL;
-
-			target = curproxy;
-		}
+		curproxy = proxy_find_by_id(atoi(name + 1), cap, table);
+		if (curproxy)
+			return curproxy;
 	}
 	else {
 		struct ebpt_node *node;
@@ -428,13 +497,138 @@ struct proxy *findproxy(const char *name, int cap) {
 			if ((curproxy->cap & cap) != cap)
 				continue;
 
-			if (target)
-				return NULL;
+			if (table && !curproxy->table.size)
+				continue;
 
-			target = curproxy;
+			return curproxy;
 		}
 	}
-	return target;
+	return NULL;
+}
+
+/* Finds the best match for a proxy with capabilities <cap>, name <name> and id
+ * <id>. At most one of <id> or <name> may be different provided that <cap> is
+ * valid. Either <id> or <name> may be left unspecified (0). The purpose is to
+ * find a proxy based on some information from a previous configuration, across
+ * reloads or during information exchange between peers.
+ *
+ * Names are looked up first if present, then IDs are compared if present. In
+ * case of an inexact match whatever is forced in the configuration has
+ * precedence in the following order :
+ *   - 1) forced ID (proves a renaming / change of proxy type)
+ *   - 2) proxy name+type (may indicate a move if ID differs)
+ *   - 3) automatic ID+type (may indicate a renaming)
+ *
+ * Depending on what is found, we can end up in the following situations :
+ *
+ *   name id cap  | possible causes
+ *   -------------+-----------------
+ *    --  --  --  | nothing found
+ *    --  --  ok  | nothing found
+ *    --  ok  --  | proxy deleted, ID points to next one
+ *    --  ok  ok  | proxy renamed, or deleted with ID pointing to next one
+ *    ok  --  --  | proxy deleted, but other half with same name still here (before)
+ *    ok  --  ok  | proxy's ID changed (proxy moved in the config file)
+ *    ok  ok  --  | proxy deleted, but other half with same name still here (after)
+ *    ok  ok  ok  | perfect match
+ *
+ * Upon return if <diff> is not NULL, it is zeroed then filled with up to 3 bits :
+ *   - 0x01 : proxy was found but ID differs (and ID was not zero)
+ *   - 0x02 : proxy was found by ID but name differs (and name was not NULL)
+ *   - 0x04 : a proxy of different type was found with the same name and/or id
+ *
+ * Only a valid proxy is returned. If capabilities do not match, NULL is
+ * returned. The caller can check <diff> to report detailed warnings / errors,
+ * and decide whether or not to use what was found.
+ */
+struct proxy *proxy_find_best_match(int cap, const char *name, int id, int *diff)
+{
+	struct proxy *byname;
+	struct proxy *byid;
+
+	if (!name && !id)
+		return NULL;
+
+	if (diff)
+		*diff = 0;
+
+	byname = byid = NULL;
+
+	if (name) {
+		byname = proxy_find_by_name(name, cap, 0);
+		if (byname && (!id || byname->uuid == id))
+			return byname;
+	}
+
+	/* remaining possiblities :
+	 *   - name not set
+	 *   - name set but not found
+	 *   - name found, but ID doesn't match.
+	 */
+	if (id) {
+		byid = proxy_find_by_id(id, cap, 0);
+		if (byid) {
+			if (byname) {
+				/* id+type found, name+type found, but not all 3.
+				 * ID wins only if forced, otherwise name wins.
+				 */
+				if (byid->options & PR_O_FORCED_ID) {
+					if (diff)
+						*diff |= 2;
+					return byid;
+				}
+				else {
+					if (diff)
+						*diff |= 1;
+					return byname;
+				}
+			}
+
+			/* remaining possiblities :
+			 *   - name not set
+			 *   - name set but not found
+			 */
+			if (name && diff)
+				*diff |= 2;
+			return byid;
+		}
+
+		/* ID not found */
+		if (byname) {
+			if (diff)
+				*diff |= 1;
+			return byname;
+		}
+	}
+
+	/* All remaining possiblities will lead to NULL. If we can report more
+	 * detailed information to the caller about changed types and/or name,
+	 * we'll do it. For example, we could detect that "listen foo" was
+	 * split into "frontend foo_ft" and "backend foo_bk" if IDs are forced.
+	 *   - name not set, ID not found
+	 *   - name not found, ID not set
+	 *   - name not found, ID not found
+	 */
+	if (!diff)
+		return NULL;
+
+	if (name) {
+		byname = proxy_find_by_name(name, 0, 0);
+		if (byname && (!id || byname->uuid == id))
+			*diff |= 4;
+	}
+
+	if (id) {
+		byid = proxy_find_by_id(id, 0, 0);
+		if (byid) {
+			if (!name)
+				*diff |= 4; /* only type changed */
+			else if (byid->options & PR_O_FORCED_ID)
+				*diff |= 2 | 4; /* name and type changed */
+			/* otherwise it's a different proxy that was returned */
+		}
+	}
+	return NULL;
 }
 
 /*
@@ -623,7 +817,7 @@ int start_proxies(int verbose)
 
 /*
  * This is the proxy management task. It enables proxies when there are enough
- * free sessions, or stops them when the table is full. It is designed to be
+ * free streams, or stops them when the table is full. It is designed to be
  * called as a task which is woken up upon stopping or when rate limiting must
  * be enforced.
  */
@@ -658,7 +852,7 @@ struct task *manage_proxy(struct task *t)
 	/* If the proxy holds a stick table, we need to purge all unused
 	 * entries. These are all the ones in the table with ref_cnt == 0
 	 * and all the ones in the pool used to allocate new entries. Any
-	 * entry attached to an existing session waiting for a store will
+	 * entry attached to an existing stream waiting for a store will
 	 * be in neither list. Any entry being dumped will have ref_cnt > 0.
 	 * However we protect tables that are being synced to peers.
 	 */
@@ -918,15 +1112,15 @@ void resume_proxies(void)
 	}
 }
 
-/* Set current session's backend to <be>. Nothing is done if the
- * session already had a backend assigned, which is indicated by
- * s->flags & SN_BE_ASSIGNED.
+/* Set current stream's backend to <be>. Nothing is done if the
+ * stream already had a backend assigned, which is indicated by
+ * s->flags & SF_BE_ASSIGNED.
  * All flags, stats and counters which need be updated are updated.
  * Returns 1 if done, 0 in case of internal error, eg: lack of resource.
  */
-int session_set_backend(struct session *s, struct proxy *be)
+int stream_set_backend(struct stream *s, struct proxy *be)
 {
-	if (s->flags & SN_BE_ASSIGNED)
+	if (s->flags & SF_BE_ASSIGNED)
 		return 1;
 	s->be = be;
 	be->beconn++;
@@ -934,55 +1128,61 @@ int session_set_backend(struct session *s, struct proxy *be)
 		be->be_counters.conn_max = be->beconn;
 	proxy_inc_be_ctr(be);
 
-	/* assign new parameters to the session from the new backend */
+	/* assign new parameters to the stream from the new backend */
 	s->si[1].flags &= ~SI_FL_INDEP_STR;
 	if (be->options2 & PR_O2_INDEPSTR)
 		s->si[1].flags |= SI_FL_INDEP_STR;
-
-	if (be->options2 & PR_O2_RSPBUG_OK)
-		s->txn.rsp.err_pos = -1; /* let buggy responses pass */
-	s->flags |= SN_BE_ASSIGNED;
-
-	/* If the target backend requires HTTP processing, we have to allocate
-	 * a struct hdr_idx for it if we did not have one.
-	 */
-	if (unlikely(!s->txn.hdr_idx.v && be->http_needed)) {
-		s->txn.hdr_idx.size = global.tune.max_http_hdr;
-		if ((s->txn.hdr_idx.v = pool_alloc2(pool2_hdr_idx)) == NULL)
-			return 0; /* not enough memory */
-
-		/* and now initialize the HTTP transaction state */
-		http_init_txn(s);
-	}
-
-	/* If we chain to an HTTP backend running a different HTTP mode, we
-	 * have to re-adjust the desired keep-alive/close mode to accommodate
-	 * both the frontend's and the backend's modes.
-	 */
-	if (s->fe->mode == PR_MODE_HTTP && be->mode == PR_MODE_HTTP &&
-	    ((s->fe->options & PR_O_HTTP_MODE) != (be->options & PR_O_HTTP_MODE)))
-		http_adjust_conn_mode(s, &s->txn, &s->txn.req);
-
-	/* If an LB algorithm needs to access some pre-parsed body contents,
-	 * we must not start to forward anything until the connection is
-	 * confirmed otherwise we'll lose the pointer to these data and
-	 * prevent the hash from being doable again after a redispatch.
-	 */
-	if (be->mode == PR_MODE_HTTP &&
-	    (be->lbprm.algo & (BE_LB_KIND | BE_LB_PARM)) == (BE_LB_KIND_HI | BE_LB_HASH_PRM))
-		s->txn.req.flags |= HTTP_MSGF_WAIT_CONN;
-
-	if (be->options2 & PR_O2_NODELAY) {
-		s->req->flags |= CF_NEVER_WAIT;
-		s->rep->flags |= CF_NEVER_WAIT;
-	}
 
 	/* We want to enable the backend-specific analysers except those which
 	 * were already run as part of the frontend/listener. Note that it would
 	 * be more reliable to store the list of analysers that have been run,
 	 * but what we do here is OK for now.
 	 */
-	s->req->analysers |= be->be_req_ana & ~(s->listener->analysers);
+	s->req.analysers |= be->be_req_ana & ~strm_li(s)->analysers;
+
+	/* If the target backend requires HTTP processing, we have to allocate
+	 * the HTTP transaction and hdr_idx if we did not have one.
+	 */
+	if (unlikely(!s->txn && be->http_needed)) {
+		if (unlikely(!http_alloc_txn(s)))
+			return 0; /* not enough memory */
+
+		/* and now initialize the HTTP transaction state */
+		http_init_txn(s);
+	}
+
+	if (s->txn) {
+		if (be->options2 & PR_O2_RSPBUG_OK)
+			s->txn->rsp.err_pos = -1; /* let buggy responses pass */
+
+		/* If we chain to an HTTP backend running a different HTTP mode, we
+		 * have to re-adjust the desired keep-alive/close mode to accommodate
+		 * both the frontend's and the backend's modes.
+		 */
+		if (strm_fe(s)->mode == PR_MODE_HTTP && be->mode == PR_MODE_HTTP &&
+		    ((strm_fe(s)->options & PR_O_HTTP_MODE) != (be->options & PR_O_HTTP_MODE)))
+			http_adjust_conn_mode(s, s->txn, &s->txn->req);
+
+		/* If an LB algorithm needs to access some pre-parsed body contents,
+		 * we must not start to forward anything until the connection is
+		 * confirmed otherwise we'll lose the pointer to these data and
+		 * prevent the hash from being doable again after a redispatch.
+		 */
+		if (be->mode == PR_MODE_HTTP &&
+		    (be->lbprm.algo & (BE_LB_KIND | BE_LB_PARM)) == (BE_LB_KIND_HI | BE_LB_HASH_PRM))
+			s->txn->req.flags |= HTTP_MSGF_WAIT_CONN;
+
+		/* we may request to parse a request body */
+		if ((be->options & PR_O_WREQ_BODY) &&
+		    (s->txn->req.body_len || (s->txn->req.flags & HTTP_MSGF_TE_CHNK)))
+			s->req.analysers |= AN_REQ_HTTP_BODY;
+	}
+
+	s->flags |= SF_BE_ASSIGNED;
+	if (be->options2 & PR_O2_NODELAY) {
+		s->req.flags |= CF_NEVER_WAIT;
+		s->res.flags |= CF_NEVER_WAIT;
+	}
 
 	return 1;
 }
@@ -994,6 +1194,7 @@ static struct cfg_kw_list cfg_kws = {ILH, {
 	{ CFG_LISTEN, "srvtimeout", proxy_parse_timeout },
 	{ CFG_LISTEN, "rate-limit", proxy_parse_rate_limit },
 	{ CFG_LISTEN, "max-keep-alive-queue", proxy_parse_max_ka_queue },
+	{ CFG_LISTEN, "declare", proxy_parse_declare },
 	{ 0, NULL, NULL },
 }};
 

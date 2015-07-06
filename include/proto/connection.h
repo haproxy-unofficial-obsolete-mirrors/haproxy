@@ -45,6 +45,12 @@ int make_proxy_line(char *buf, int buf_len, struct server *srv, struct connectio
 int make_proxy_line_v1(char *buf, int buf_len, struct sockaddr_storage *src, struct sockaddr_storage *dst);
 int make_proxy_line_v2(char *buf, int buf_len, struct server *srv, struct connection *remote);
 
+/* raw send() directly on the socket */
+int conn_sock_send(struct connection *conn, const void *buf, int len, int flags);
+
+/* drains any pending bytes from the socket */
+int conn_sock_drain(struct connection *conn);
+
 /* returns true is the transport layer is ready */
 static inline int conn_xprt_ready(const struct connection *conn)
 {
@@ -412,12 +418,28 @@ static inline void conn_sock_shutw(struct connection *c)
 {
 	c->flags |= CO_FL_SOCK_WR_SH;
 	__conn_sock_stop_send(c);
+	if (conn_ctrl_ready(c))
+		shutdown(c->t.sock.fd, SHUT_WR);
 }
 
 static inline void conn_data_shutw(struct connection *c)
 {
 	c->flags |= CO_FL_DATA_WR_SH;
 	__conn_data_stop_send(c);
+
+	/* clean data-layer shutdown */
+	if (c->xprt && c->xprt->shutw)
+		c->xprt->shutw(c, 1);
+}
+
+static inline void conn_data_shutw_hard(struct connection *c)
+{
+	c->flags |= CO_FL_DATA_WR_SH;
+	__conn_data_stop_send(c);
+
+	/* unclean data-layer shutdown */
+	if (c->xprt && c->xprt->shutw)
+		c->xprt->shutw(c, 0);
 }
 
 /* detect sock->data read0 transition */
@@ -519,34 +541,6 @@ static inline void conn_attach(struct connection *conn, void *owner, const struc
 {
 	conn->data = data;
 	conn->owner = owner;
-}
-
-/* Drains possibly pending incoming data on the file descriptor attached to the
- * connection and update the connection's flags accordingly. This is used to
- * know whether we need to disable lingering on close. Returns non-zero if it
- * is safe to close without disabling lingering, otherwise zero. The SOCK_RD_SH
- * flag may also be updated if the incoming shutdown was reported by the drain()
- * function.
- */
-static inline int conn_drain(struct connection *conn)
-{
-	if (!conn_ctrl_ready(conn))
-		return 1;
-
-	if (conn->flags & CO_FL_SOCK_RD_SH)
-		return 1;
-
-	if (!fd_recv_ready(conn->t.sock.fd))
-		return 0;
-
-	if (!conn->ctrl->drain)
-		return 0;
-
-	if (conn->ctrl->drain(conn->t.sock.fd) <= 0)
-		return 0;
-
-	conn->flags |= CO_FL_SOCK_RD_SH;
-	return 1;
 }
 
 /* returns a human-readable error code for conn->err_code, or NULL if the code

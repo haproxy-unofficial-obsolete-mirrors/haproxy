@@ -1,7 +1,7 @@
 /*
  * Channel management functions.
  *
- * Copyright 2000-2012 Willy Tarreau <w@1wt.eu>
+ * Copyright 2000-2014 Willy Tarreau <w@1wt.eu>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -16,20 +16,10 @@
 #include <string.h>
 
 #include <common/config.h>
-#include <common/memory.h>
 #include <common/buffer.h>
 
 #include <proto/channel.h>
 
-struct pool_head *pool2_channel;
-
-
-/* perform minimal intializations, report 0 in case of error, 1 if OK. */
-int init_channel()
-{
-	pool2_channel = create_pool("channel", sizeof(struct channel), MEM_F_SHARED);
-	return pool2_channel != NULL;
-}
 
 /* Schedule up to <bytes> more bytes to be forwarded via the channel without
  * notifying the owner task. Any data pending in the buffer are scheduled to be
@@ -113,18 +103,14 @@ int bo_inject(struct channel *chn, const char *msg, int len)
  * input is closed, -2 is returned. If there is not enough room left in the
  * buffer, -1 is returned. Otherwise the number of bytes copied is returned
  * (1). Channel flag READ_PARTIAL is updated if some data can be transferred.
- * Channel flag CF_WAKE_WRITE is set if the write fails because the buffer is
- * full.
  */
 int bi_putchr(struct channel *chn, char c)
 {
 	if (unlikely(channel_input_closed(chn)))
 		return -2;
 
-	if (!channel_may_recv(chn)) {
-		chn->flags |= CF_WAKE_WRITE;
+	if (!channel_may_recv(chn))
 		return -1;
-	}
 
 	*bi_end(chn->buf) = c;
 
@@ -147,8 +133,7 @@ int bi_putchr(struct channel *chn, char c)
  * -3 is returned. If there is not enough room left in the buffer, -1 is
  * returned. Otherwise the number of bytes copied is returned (0 being a valid
  * number). Channel flag READ_PARTIAL is updated if some data can be
- * transferred. Channel flag CF_WAKE_WRITE is set if the write fails because
- * the buffer is full.
+ * transferred.
  */
 int bi_putblk(struct channel *chn, const char *blk, int len)
 {
@@ -166,7 +151,6 @@ int bi_putblk(struct channel *chn, const char *blk, int len)
 		if (len > max)
 			return -3;
 
-		chn->flags |= CF_WAKE_WRITE;
 		return -1;
 	}
 
@@ -213,10 +197,8 @@ struct buffer *bi_swpbuf(struct channel *chn, struct buffer *buf)
 	if (unlikely(channel_input_closed(chn)))
 		return NULL;
 
-	if (!chn->buf->size || !buffer_empty(chn->buf)) {
-		chn->flags |= CF_WAKE_WRITE;
+	if (!chn->buf->size || !buffer_empty(chn->buf))
 		return buf;
-	}
 
 	old = chn->buf;
 	chn->buf = buf;

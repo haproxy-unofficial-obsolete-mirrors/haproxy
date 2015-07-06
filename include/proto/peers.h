@@ -25,12 +25,12 @@
 #include <common/config.h>
 #include <common/ticks.h>
 #include <common/time.h>
-#include <types/session.h>
+#include <types/stream.h>
 #include <types/peers.h>
 
+void peers_init_sync(struct peers *peers);
 void peers_register_table(struct peers *, struct stktable *table);
-
-int peer_accept(struct session *);
+void peers_setup_frontend(struct proxy *fe);
 
 #endif /* _PROTO_PEERS_H */
 

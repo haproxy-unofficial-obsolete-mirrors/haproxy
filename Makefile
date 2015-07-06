@@ -33,9 +33,13 @@
 #   USE_ACCEPT4          : enable use of accept4() on linux. Automatic.
 #   USE_MY_ACCEPT4       : use own implemention of accept4() if glibc < 2.10.
 #   USE_ZLIB             : enable zlib library support.
+#   USE_SLZ              : enable slz library instead of zlib (pick at most one).
 #   USE_CPU_AFFINITY     : enable pinning processes to CPU on Linux. Automatic.
 #   USE_TFO              : enable TCP fast open. Supported on Linux >= 3.7.
 #   USE_NS               : enable network namespace support. Supported on Linux >= 2.6.24.
+#   USE_DL               : enable it if your system requires -ldl. Automatic on Linux.
+#   USE_DEVICEATLAS      : enable DeviceAtlas api.
+#   USE_51DEGREES        : enable third party device detection library from 51Degrees
 #
 # Options can be forced by specifying "USE_xxx=1" or can be disabled by using
 # "USE_xxx=" (empty string).
@@ -78,7 +82,7 @@
 #   LUA_LIB        : force the lib path to lua
 #   LUA_INC        : force the include path to lua
 #   LUA_LIB_NAME   : force the lib name (or automatically evaluated, by order of
-#                                        priority : lua5.2, lua52, lua).
+#                                        priority : lua5.3, lua53, lua).
 #   IGNOREGIT      : ignore GIT commit versions if set.
 #   VERSION        : force haproxy version reporting.
 #   SUBVERS        : add a sub-version (eg: platform, model, ...).
@@ -95,7 +99,7 @@ DOCDIR = $(PREFIX)/doc/haproxy
 # Use TARGET=<target_name> to optimize for a specifc target OS among the
 # following list (use the default "generic" if uncertain) :
 #    generic, linux22, linux24, linux24e, linux26, solaris,
-#    freebsd, openbsd, cygwin, custom, aix51, aix52
+#    freebsd, openbsd, netbsd, cygwin, custom, aix51, aix52
 TARGET =
 
 #### TARGET CPU
@@ -223,6 +227,7 @@ ifeq ($(TARGET),linux22)
   USE_POLL        = implicit
   USE_TPROXY      = implicit
   USE_LIBCRYPT    = implicit
+  USE_DL          = implicit
 else
 ifeq ($(TARGET),linux24)
   # This is for standard Linux 2.4 with netfilter but without epoll()
@@ -231,6 +236,7 @@ ifeq ($(TARGET),linux24)
   USE_POLL        = implicit
   USE_TPROXY      = implicit
   USE_LIBCRYPT    = implicit
+  USE_DL          = implicit
 else
 ifeq ($(TARGET),linux24e)
   # This is for enhanced Linux 2.4 with netfilter and epoll() patch > 0.21
@@ -241,6 +247,7 @@ ifeq ($(TARGET),linux24e)
   USE_MY_EPOLL    = implicit
   USE_TPROXY      = implicit
   USE_LIBCRYPT    = implicit
+  USE_DL          = implicit
 else
 ifeq ($(TARGET),linux26)
   # This is for standard Linux 2.6 with netfilter and standard epoll()
@@ -252,6 +259,7 @@ ifeq ($(TARGET),linux26)
   USE_LIBCRYPT    = implicit
   USE_FUTEX       = implicit
   EXTRA          += haproxy-systemd-wrapper
+  USE_DL          = implicit
 else
 ifeq ($(TARGET),linux2628)
   # This is for standard Linux >= 2.6.28 with netfilter, epoll, tproxy and splice
@@ -268,6 +276,7 @@ ifeq ($(TARGET),linux2628)
   USE_CPU_AFFINITY= implicit
   ASSUME_SPLICE_WORKS= implicit
   EXTRA          += haproxy-systemd-wrapper
+  USE_DL          = implicit
 else
 ifeq ($(TARGET),solaris)
   # This is for Solaris 8
@@ -300,6 +309,12 @@ ifeq ($(TARGET),openbsd)
   USE_KQUEUE     = implicit
   USE_TPROXY     = implicit
 else
+ifeq ($(TARGET),netbsd)
+  # This is for NetBSD
+  USE_POLL       = implicit
+  USE_KQUEUE     = implicit
+  USE_TPROXY     = implicit
+else
 ifeq ($(TARGET),aix51)
   # This is for AIX 5.1
   USE_POLL        = implicit
@@ -323,6 +338,7 @@ ifeq ($(TARGET),cygwin)
 endif # cygwin
 endif # aix52
 endif # aix51
+endif # netbsd
 endif # openbsd
 endif # osx
 endif # freebsd
@@ -442,6 +458,15 @@ OPTIONS_CFLAGS  += -DUSE_GETADDRINFO
 BUILD_OPTIONS   += $(call ignore_implicit,USE_GETADDRINFO)
 endif
 
+ifneq ($(USE_SLZ),)
+# Use SLZ_INC and SLZ_LIB to force path to zlib.h and libz.{a,so} if needed.
+SLZ_INC =
+SLZ_LIB =
+OPTIONS_CFLAGS  += -DUSE_SLZ $(if $(SLZ_INC),-I$(SLZ_INC))
+BUILD_OPTIONS   += $(call ignore_implicit,USE_SLZ)
+OPTIONS_LDFLAGS += $(if $(SLZ_LIB),-L$(SLZ_LIB)) -lslz
+endif
+
 ifneq ($(USE_ZLIB),)
 # Use ZLIB_INC and ZLIB_LIB to force path to zlib.h and libz.{a,so} if needed.
 ZLIB_INC =
@@ -520,6 +545,11 @@ OPTIONS_CFLAGS += -DCONFIG_REGPARM=3
 BUILD_OPTIONS  += $(call ignore_implicit,USE_REGPARM)
 endif
 
+ifneq ($(USE_DL),)
+BUILD_OPTIONS   += $(call ignore_implicit,USE_DL)
+OPTIONS_LDFLAGS += -ldl
+endif
+
 # report DLMALLOC_SRC only if explicitly specified
 ifneq ($(DLMALLOC_SRC),)
 BUILD_OPTIONS += DLMALLOC_SRC=$(DLMALLOC_SRC)
@@ -569,14 +599,40 @@ OPTIONS_CFLAGS  += -DUSE_LUA $(if $(LUA_INC),-I$(LUA_INC))
 LUA_LD_FLAGS := $(if $(LUA_LIB),-L$(LUA_LIB))
 ifeq ($(LUA_LIB_NAME),)
 # Try to automatically detect the Lua library
-LUA_LIB_NAME := $(firstword $(foreach lib,lua5.2 lua52 lua,$(call check_lua_lib,$(lib),$(LUA_LD_FLAGS))))
+LUA_LIB_NAME := $(firstword $(foreach lib,lua5.3 lua53 lua,$(call check_lua_lib,$(lib),$(LUA_LD_FLAGS))))
 ifeq ($(LUA_LIB_NAME),)
-$(error unable to automatically detect the Lua library name, you can enforce its name with LUA_LIB_NAME=<name> (where <name> can be lua5.2, lua52, lua, ...))
+$(error unable to automatically detect the Lua library name, you can enforce its name with LUA_LIB_NAME=<name> (where <name> can be lua5.3, lua53, lua, ...))
 endif
 endif
 
 OPTIONS_LDFLAGS += $(LUA_LD_FLAGS) -l$(LUA_LIB_NAME) -lm
 OPTIONS_OBJS    += src/hlua.o
+endif
+
+ifneq ($(USE_DEVICEATLAS),)
+# Use DEVICEATLAS_SRC and possibly DEVICEATLAS_INC and DEVICEATLAS_LIB to force path
+# to DeviceAtlas headers and libraries if needed.
+DEVICEATLAS_SRC =
+DEVICEATLAS_INC = $(DEVICEATLAS_SRC)
+DEVICEATLAS_LIB = $(DEVICEATLAS_SRC)
+OPTIONS_OBJS	+= $(DEVICEATLAS_LIB)/json.o
+OPTIONS_OBJS	+= $(DEVICEATLAS_LIB)/dac.o
+OPTIONS_OBJS	+= src/da.o
+OPTIONS_CFLAGS += -DUSE_DEVICEATLAS $(if $(DEVICEATLAS_INC),-I$(DEVICEATLAS_INC))
+BUILD_OPTIONS  += $(call ignore_implicit,USE_DEVICEATLAS)
+endif
+
+ifneq ($(USE_51DEGREES),)
+# Use 51DEGREES_SRC and possibly 51DEGREES_INC and 51DEGREES_LIB to force path
+# to 51degrees headers and libraries if needed.
+51DEGREES_SRC =
+51DEGREES_INC = $(51DEGREES_SRC)
+51DEGREES_LIB = $(51DEGREES_SRC)
+OPTIONS_OBJS    += $(51DEGREES_LIB)/51Degrees.o
+OPTIONS_OBJS    += src/51d.o
+OPTIONS_CFLAGS  += -DUSE_51DEGREES $(if $(51DEGREES_INC),-I$(51DEGREES_INC))
+BUILD_OPTIONS   += $(call ignore_implicit,USE_51DEGREES)
+OPTIONS_LDFLAGS += $(if $(51DEGREES_LIB),-L$(51DEGREES_LIB)) -lz
 endif
 
 ifneq ($(USE_PCRE)$(USE_STATIC_PCRE)$(USE_PCRE_JIT),)
@@ -676,17 +732,17 @@ endif
 
 OBJS = src/haproxy.o src/sessionhash.o src/base64.o src/protocol.o \
        src/uri_auth.o src/standard.o src/buffer.o src/log.o src/task.o \
-       src/chunk.o src/channel.o src/listener.o \
+       src/chunk.o src/channel.o src/listener.o src/lru.o src/xxhash.o \
        src/time.o src/fd.o src/pipe.o src/regex.o src/cfgparse.o src/server.o \
        src/checks.o src/queue.o src/frontend.o src/proxy.o src/peers.o \
        src/arg.o src/stick_table.o src/proto_uxst.o src/connection.o \
        src/proto_http.o src/raw_sock.o src/appsession.o src/backend.o \
        src/lb_chash.o src/lb_fwlc.o src/lb_fwrr.o src/lb_map.o src/lb_fas.o \
-       src/stream_interface.o src/dumpstats.o src/proto_tcp.o \
-       src/session.o src/hdr_idx.o src/ev_select.o src/signal.o \
-       src/acl.o src/sample.o src/memory.o src/freq_ctr.o src/auth.o \
+       src/stream_interface.o src/dumpstats.o src/proto_tcp.o src/applet.o \
+       src/session.o src/stream.o src/hdr_idx.o src/ev_select.o src/signal.o \
+       src/acl.o src/sample.o src/memory.o src/freq_ctr.o src/auth.o src/proto_udp.o \
        src/compression.o src/payload.o src/hash.o src/pattern.o src/map.o \
-       src/namespace.o src/mailers.o
+       src/namespace.o src/mailers.o src/dns.o src/vars.o
 
 EBTREE_OBJS = $(EBTREE_DIR)/ebtree.o \
               $(EBTREE_DIR)/eb32tree.o $(EBTREE_DIR)/eb64tree.o \

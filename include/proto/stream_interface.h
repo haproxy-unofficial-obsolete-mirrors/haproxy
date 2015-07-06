@@ -2,7 +2,7 @@
  * include/proto/stream_interface.h
  * This file contains stream_interface function prototypes
  *
- * Copyright (C) 2000-2012 Willy Tarreau - w@1wt.eu
+ * Copyright (C) 2000-2014 Willy Tarreau - w@1wt.eu
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -25,8 +25,9 @@
 #include <stdlib.h>
 
 #include <common/config.h>
-#include <types/session.h>
+#include <types/stream.h>
 #include <types/stream_interface.h>
+#include <proto/applet.h>
 #include <proto/channel.h>
 #include <proto/connection.h>
 
@@ -40,65 +41,84 @@ void stream_sock_read0(struct stream_interface *si);
 
 extern struct si_ops si_embedded_ops;
 extern struct si_ops si_conn_ops;
+extern struct si_ops si_applet_ops;
 extern struct data_cb si_conn_cb;
 extern struct data_cb si_idle_conn_cb;
 
-struct appctx *stream_int_register_handler(struct stream_interface *si, struct si_applet *app);
+struct appctx *stream_int_register_handler(struct stream_interface *si, struct applet *app);
 void stream_int_unregister_handler(struct stream_interface *si);
+void si_applet_done(struct stream_interface *si);
 
-/* Initializes all required fields for a new appctx. Note that it does the
- * minimum acceptable initialization for an appctx. This means only the
- * 3 integer states st0, st1, st2 are zeroed.
- */
-static inline void appctx_init(struct appctx *appctx)
+/* returns the channel which receives data from this stream interface (input channel) */
+static inline struct channel *si_ic(struct stream_interface *si)
 {
-	appctx->st0 = appctx->st1 = appctx->st2 = 0;
+	if (si->flags & SI_FL_ISBACK)
+		return &LIST_ELEM(si, struct stream *, si[1])->res;
+	else
+		return &LIST_ELEM(si, struct stream *, si[0])->req;
 }
 
-/* sets <appctx>'s applet to point to <applet> */
-static inline void appctx_set_applet(struct appctx *appctx, struct si_applet *applet)
+/* returns the channel which feeds data to this stream interface (output channel) */
+static inline struct channel *si_oc(struct stream_interface *si)
 {
-	appctx->applet = applet;
+	if (si->flags & SI_FL_ISBACK)
+		return &LIST_ELEM(si, struct stream *, si[1])->req;
+	else
+		return &LIST_ELEM(si, struct stream *, si[0])->res;
 }
 
-/* Tries to allocate a new appctx and initialize its main fields. The
- * appctx is returned on success, NULL on failure. The appctx must be
- * released using pool_free2(connection) or appctx_free(), since it's
- * allocated from the connection pool.
- */
-static inline struct appctx *appctx_new()
+/* returns the buffer which receives data from this stream interface (input channel's buffer) */
+static inline struct buffer *si_ib(struct stream_interface *si)
 {
-	struct appctx *appctx;
-
-	appctx = pool_alloc2(pool2_connection);
-	if (likely(appctx != NULL)) {
-		appctx->obj_type = OBJ_TYPE_APPCTX;
-		appctx->applet = NULL;
-		appctx_init(appctx);
-	}
-	return appctx;
+	return si_ic(si)->buf;
 }
 
-/* Releases an appctx previously allocated by appctx_new(). Note that
- * we share the connection pool.
- */
-static inline void appctx_free(struct appctx *appctx)
+/* returns the buffer which feeds data to this stream interface (output channel's buffer) */
+static inline struct buffer *si_ob(struct stream_interface *si)
 {
-	pool_free2(pool2_connection, appctx);
+	return si_oc(si)->buf;
+}
+
+/* returns the stream associated to a stream interface */
+static inline struct stream *si_strm(struct stream_interface *si)
+{
+	if (si->flags & SI_FL_ISBACK)
+		return LIST_ELEM(si, struct stream *, si[1]);
+	else
+		return LIST_ELEM(si, struct stream *, si[0]);
+}
+
+/* returns the task associated to this stream interface */
+static inline struct task *si_task(struct stream_interface *si)
+{
+	if (si->flags & SI_FL_ISBACK)
+		return LIST_ELEM(si, struct stream *, si[1])->task;
+	else
+		return LIST_ELEM(si, struct stream *, si[0])->task;
+}
+
+/* returns the stream interface on the other side. Used during forwarding. */
+static inline struct stream_interface *si_opposite(struct stream_interface *si)
+{
+	if (si->flags & SI_FL_ISBACK)
+		return &LIST_ELEM(si, struct stream *, si[1])->si[0];
+	else
+		return &LIST_ELEM(si, struct stream *, si[0])->si[1];
 }
 
 /* initializes a stream interface in the SI_ST_INI state. It's detached from
- * any endpoint and is only attached to an owner (generally a task).
+ * any endpoint and only keeps its side which is expected to have already been
+ * set.
  */
-static inline void si_reset(struct stream_interface *si, void *owner)
+static inline void si_reset(struct stream_interface *si)
 {
-	si->owner          = owner;
 	si->err_type       = SI_ET_NONE;
 	si->conn_retries   = 0;  /* used for logging too */
 	si->exp            = TICK_ETERNITY;
-	si->flags          = SI_FL_NONE;
+	si->flags         &= SI_FL_ISBACK;
 	si->end            = NULL;
 	si->state          = si->prev_state = SI_ST_INI;
+	si->ops            = &si_embedded_ops;
 }
 
 /* sets the current and previous state of a stream interface to <state>. This
@@ -127,16 +147,16 @@ static inline void si_release_endpoint(struct stream_interface *si)
 	}
 	else if ((appctx = objt_appctx(si->end))) {
 		if (appctx->applet->release)
-			appctx->applet->release(si);
+			appctx->applet->release(appctx);
 		appctx_free(appctx); /* we share the connection pool */
 	}
 	si->end = NULL;
+	si->ops = &si_embedded_ops;
 }
 
 static inline void si_detach(struct stream_interface *si)
 {
 	si_release_endpoint(si);
-	si->ops = &si_embedded_ops;
 }
 
 /* Turn a possibly existing connection endpoint of stream interface <si> to
@@ -176,14 +196,13 @@ static inline int si_conn_ready(struct stream_interface *si)
 }
 
 /* Attach appctx <appctx> to the stream interface <si>. The stream interface
- * is configured to work with an applet context. It is left to the caller to
- * call appctx_set_applet() to assign an applet to this context.
+ * is configured to work with an applet context.
  */
 static inline void si_attach_appctx(struct stream_interface *si, struct appctx *appctx)
 {
-	si->ops = &si_embedded_ops;
-	appctx->obj_type = OBJ_TYPE_APPCTX;
+	si->ops = &si_applet_ops;
 	si->end = &appctx->obj_type;
+	appctx->owner = si;
 }
 
 /* returns a pointer to the appctx being run in the SI or NULL if none */
@@ -192,27 +211,16 @@ static inline struct appctx *si_appctx(struct stream_interface *si)
 	return objt_appctx(si->end);
 }
 
-/* returns a pointer to the applet being run in the SI or NULL if none */
-static inline const struct si_applet *si_applet(struct stream_interface *si)
-{
-	const struct appctx *appctx;
-
-	appctx = si_appctx(si);
-	if (appctx)
-		return appctx->applet;
-	return NULL;
-}
-
 /* Call the applet's main function when an appctx is attached to the stream
  * interface. Returns zero if no call was made, or non-zero if a call was made.
  */
 static inline int si_applet_call(struct stream_interface *si)
 {
-	const struct si_applet *applet;
+	struct appctx *appctx;
 
-	applet = si_applet(si);
-	if (applet) {
-		applet->fct(si);
+	appctx = si_appctx(si);
+	if (appctx) {
+		appctx->applet->fct(appctx);
 		return 1;
 	}
 	return 0;
@@ -221,11 +229,51 @@ static inline int si_applet_call(struct stream_interface *si)
 /* call the applet's release function if any. Needs to be called upon close() */
 static inline void si_applet_release(struct stream_interface *si)
 {
-	const struct si_applet *applet;
+	struct appctx *appctx;
 
-	applet = si_applet(si);
-	if (applet && applet->release)
-		applet->release(si);
+	appctx = si_appctx(si);
+	if (appctx && appctx->applet->release)
+		appctx->applet->release(appctx);
+}
+
+/* let an applet indicate that it wants to put some data into the input buffer */
+static inline void si_applet_want_put(struct stream_interface *si)
+{
+	si->flags |= SI_FL_WANT_PUT;
+}
+
+/* let an applet indicate that it wanted to put some data into the input buffer
+ * but it couldn't.
+ */
+static inline void si_applet_cant_put(struct stream_interface *si)
+{
+	si->flags |= SI_FL_WANT_PUT | SI_FL_WAIT_ROOM;
+}
+
+/* let an applet indicate that it doesn't want to put data into the input buffer */
+static inline void si_applet_stop_put(struct stream_interface *si)
+{
+	si->flags &= ~SI_FL_WANT_PUT;
+}
+
+/* let an applet indicate that it wants to get some data from the output buffer */
+static inline void si_applet_want_get(struct stream_interface *si)
+{
+	si->flags |= SI_FL_WANT_GET;
+}
+
+/* let an applet indicate that it wanted to get some data from the output buffer
+ * but it couldn't.
+ */
+static inline void si_applet_cant_get(struct stream_interface *si)
+{
+	si->flags |= SI_FL_WANT_GET | SI_FL_WAIT_DATA;
+}
+
+/* let an applet indicate that it doesn't want to get data from the input buffer */
+static inline void si_applet_stop_get(struct stream_interface *si)
+{
+	si->flags &= ~SI_FL_WANT_GET;
 }
 
 /* Try to allocate a new connection and assign it to the interface. If
@@ -265,15 +313,15 @@ static inline struct connection *si_alloc_conn(struct stream_interface *si, int 
 
 /* Release the interface's existing endpoint (connection or appctx) and
  * allocate then initialize a new appctx which is assigned to the interface
- * and returned. NULL may be returned upon memory shortage. It is left to the
- * caller to call appctx_set_applet() to assign an applet to this context.
+ * and returned. NULL may be returned upon memory shortage. Applet <applet>
+ * is assigned to the appctx, but it may be NULL.
  */
-static inline struct appctx *si_alloc_appctx(struct stream_interface *si)
+static inline struct appctx *si_alloc_appctx(struct stream_interface *si, struct applet *applet)
 {
 	struct appctx *appctx;
 
 	si_release_endpoint(si);
-	appctx = appctx_new();
+	appctx = appctx_new(applet);
 	if (appctx)
 		si_attach_appctx(si, appctx);
 
@@ -314,14 +362,14 @@ static inline void si_chk_snd(struct stream_interface *si)
 static inline int si_connect(struct stream_interface *si)
 {
 	struct connection *conn = objt_conn(si->end);
-	int ret = SN_ERR_NONE;
+	int ret = SF_ERR_NONE;
 
 	if (unlikely(!conn || !conn->ctrl || !conn->ctrl->connect))
-		return SN_ERR_INTERNAL;
+		return SF_ERR_INTERNAL;
 
 	if (!conn_ctrl_ready(conn) || !conn_xprt_ready(conn)) {
-		ret = conn->ctrl->connect(conn, !channel_is_empty(si->ob), 0);
-		if (ret != SN_ERR_NONE)
+		ret = conn->ctrl->connect(conn, !channel_is_empty(si_oc(si)), 0);
+		if (ret != SF_ERR_NONE)
 			return ret;
 
 		/* we need to be notified about connection establishment */
@@ -330,7 +378,7 @@ static inline int si_connect(struct stream_interface *si)
 		/* we're in the process of establishing a connection */
 		si->state = SI_ST_CON;
 	}
-	else if (!channel_is_empty(si->ob)) {
+	else if (!channel_is_empty(si_oc(si))) {
 		/* reuse the existing connection, we'll have to send a
 		 * request there.
 		 */
@@ -345,12 +393,6 @@ static inline int si_connect(struct stream_interface *si)
 		conn_get_from_addr(conn);
 
 	return ret;
-}
-
-/* finds the session which owns a stream interface */
-static inline struct session *si_sess(struct stream_interface *si)
-{
-	return (struct session *)((struct task *)si->owner)->context;
 }
 
 /* for debugging, reports the stream interface state name */

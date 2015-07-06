@@ -14,6 +14,12 @@
 #define HLUA_SET_CTRLYIELD(__hlua)   do {(__hlua)->flags |= HLUA_CTRLYIELD;} while(0)
 #define HLUA_CLR_CTRLYIELD(__hlua)   do {(__hlua)->flags &= ~HLUA_CTRLYIELD;} while(0)
 #define HLUA_IS_CTRLYIELDING(__hlua) ((__hlua)->flags & HLUA_CTRLYIELD)
+#define HLUA_SET_WAKERESWR(__hlua)   do {(__hlua)->flags |= HLUA_WAKERESWR;} while(0)
+#define HLUA_CLR_WAKERESWR(__hlua)   do {(__hlua)->flags &= ~HLUA_WAKERESWR;} while(0)
+#define HLUA_IS_WAKERESWR(__hlua)    ((__hlua)->flags & HLUA_WAKERESWR)
+#define HLUA_SET_WAKEREQWR(__hlua)   do {(__hlua)->flags |= HLUA_WAKEREQWR;} while(0)
+#define HLUA_CLR_WAKEREQWR(__hlua)   do {(__hlua)->flags &= ~HLUA_WAKEREQWR;} while(0)
+#define HLUA_IS_WAKEREQWR(__hlua)    ((__hlua)->flags & HLUA_WAKEREQWR)
 
 #define HLUA_INIT(__hlua) do { (__hlua)->T = 0; } while(0)
 
@@ -31,7 +37,7 @@ int hlua_post_init();
 /* Empty function for compilation without Lua. */
 static inline void hlua_init() { }
 static inline int hlua_post_init() { return 1; }
-static inline void hlua_ctx_destroy() { }
+static inline void hlua_ctx_destroy(struct hlua *lua) { }
 
 #endif /* USE_LUA */
 

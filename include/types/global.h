@@ -26,10 +26,15 @@
 
 #include <common/config.h>
 #include <common/standard.h>
+#include <import/da.h>
 #include <types/freq_ctr.h>
 #include <types/listener.h>
 #include <types/proxy.h>
 #include <types/task.h>
+
+#ifdef USE_51DEGREES
+#include <import/51d.h>
+#endif
 
 #ifndef UNIX_MAX_PATH
 #define UNIX_MAX_PATH 108
@@ -142,12 +147,14 @@ struct global {
 		int pipesize;      /* pipe size in bytes, system defaults if zero */
 		int max_http_hdr;  /* max number of HTTP headers, use MAX_HTTP_HDR if zero */
 		int cookie_len;    /* max length of cookie captures */
+		int pattern_cache; /* max number of entries in the pattern cache. */
 		int sslcachesize;  /* SSL cache size in session, defaults to 20000 */
 #ifdef USE_OPENSSL
 		int sslprivatecache; /* Force to use a private session cache even if nbproc > 1 */
 		unsigned int ssllifetime;   /* SSL session lifetime in seconds */
 		unsigned int ssl_max_record; /* SSL max record size */
 		unsigned int ssl_default_dh_param; /* SSL maximum DH parameter size */
+		int ssl_ctx_cache; /* max number of entries in the ssl_ctx cache. */
 #endif
 #ifdef USE_ZLIB
 		int zlibmemlevel;    /* zlib memlevel */
@@ -168,6 +175,27 @@ struct global {
 	unsigned long cpu_map[LONGBITS];  /* list of CPU masks for the 32/64 first processes */
 #endif
 	struct proxy *stats_fe;     /* the frontend holding the stats settings */
+#ifdef USE_DEVICEATLAS
+	struct {
+		void *atlasimgptr;
+		char *jsonpath;
+		da_atlas_t atlas;
+		da_evidence_id_t useragentid;
+		da_severity_t loglevel;
+		char separator;
+	} deviceatlas;
+#endif
+#ifdef USE_51DEGREES
+	struct {
+		char property_separator;    /* the separator to use in the response for the values. this is taken from 51degrees-property-separator from config. */
+		struct list property_names; /* list of properties to load into the data set. this is taken from 51degrees-property-name-list from config. */
+		char *data_file_path;
+#ifdef FIFTYONEDEGREES_H_PATTERN_INCLUDED
+		fiftyoneDegreesDataSet data_set; /* data set used with the pattern detection method. */
+#endif
+		int cache_size;
+	} _51degrees;
+#endif
 };
 
 extern struct global global;
@@ -188,10 +216,11 @@ extern char localpeer[MAX_HOSTNAME_LEN];
 extern struct list global_listener_queue; /* list of the temporarily limited listeners */
 extern struct task *global_listener_queue_task;
 extern unsigned int warned;     /* bitfield of a few warnings to emit just once */
+extern struct list dns_resolvers;
 
 /* bit values to go with "warned" above */
 #define WARN_BLOCK_DEPRECATED       0x00000001
-#define WARN_REQSETBE_DEPRECATED    0x00000002
+/* unassigned : 0x00000002 */
 #define WARN_REDISPATCH_DEPRECATED  0x00000004
 #define WARN_CLITO_DEPRECATED       0x00000008
 #define WARN_SRVTO_DEPRECATED       0x00000010
