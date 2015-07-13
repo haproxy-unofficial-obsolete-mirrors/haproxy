@@ -1145,7 +1145,7 @@ ssl_sock_set_generated_cert(SSL_CTX *ssl_ctx, unsigned int serial, X509 *cacert)
 
 /* Compute the serial that will be used to create/set/get a certificate. */
 unsigned int
-ssl_sock_generated_cert_serial(void *data, size_t len)
+ssl_sock_generated_cert_serial(const void *data, size_t len)
 {
 	return XXH32(data, len, ssl_ctx_lru_seed);
 }
@@ -1159,7 +1159,7 @@ ssl_sock_generate_certificate(const char *servername, struct bind_conf *bind_con
 	struct lru64 *lru     = NULL;
 	unsigned int  serial;
 
-	serial = XXH32(servername, strlen(servername), ssl_ctx_lru_seed);
+	serial = ssl_sock_generated_cert_serial(servername, strlen(servername));
 	if (ssl_ctx_lru_tree) {
 		lru = lru64_get(serial, ssl_ctx_lru_tree, cacert, 0);
 		if (lru && lru->domain)
@@ -1188,18 +1188,20 @@ static int ssl_sock_switchctx_cbk(SSL *ssl, int *al, struct bind_conf *s)
 
 	servername = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
 	if (!servername) {
-		struct sockaddr to;
-		int             fd;
+		if (s->generate_certs) {
+			struct connection *conn = (struct connection *)SSL_get_app_data(ssl);
+			unsigned int serial;
+			SSL_CTX *ctx;
 
-		if (s->generate_certs &&
-		    (fd = SSL_get_fd(ssl)) != -1 &&
-		    tcp_get_dst(fd, &to, sizeof(to), 0) != -1) {
-			unsigned int serial = ssl_sock_generated_cert_serial(&to, sizeof(to));
-			SSL_CTX *ctx = ssl_sock_get_generated_cert(serial, s->ca_sign_cert);
-			if (ctx) {
-				/* switch ctx */
-				SSL_set_SSL_CTX(ssl, ctx);
-				return SSL_TLSEXT_ERR_OK;
+			conn_get_to_addr(conn);
+			if (conn->flags & CO_FL_ADDR_TO_SET) {
+				serial = ssl_sock_generated_cert_serial(&conn->addr.to, get_addr_len(&conn->addr.to));
+				ctx = ssl_sock_get_generated_cert(serial, s->ca_sign_cert);
+				if (ctx) {
+					/* switch ctx */
+					SSL_set_SSL_CTX(ssl, ctx);
+					return SSL_TLSEXT_ERR_OK;
+				}
 			}
 		}
 
@@ -3290,6 +3292,16 @@ char *ssl_sock_get_version(struct connection *conn)
 	return (char *)SSL_get_version(conn->xprt_ctx);
 }
 
+void ssl_sock_set_servername(struct connection *conn, const char *hostname)
+{
+#ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+	if (!ssl_sock_is_ssl(conn))
+		return;
+
+	SSL_set_tlsext_host_name(conn->xprt_ctx, hostname);
+#endif
+}
+
 /* Extract peer certificate's common name into the chunk dest
  * Returns
  *  the len of the extracted common name
@@ -4940,6 +4952,42 @@ static int srv_parse_send_proxy_cn(char **args, int *cur_arg, struct proxy *px, 
 	return 0;
 }
 
+/* parse the "sni" server keyword */
+static int srv_parse_sni(char **args, int *cur_arg, struct proxy *px, struct server *newsrv, char **err)
+{
+#ifndef SSL_CTRL_SET_TLSEXT_HOSTNAME
+	memprintf(err, "'%s' : the current SSL library doesn't support the SNI TLS extension", args[*cur_arg]);
+	return ERR_ALERT | ERR_FATAL;
+#else
+	struct sample_expr *expr;
+
+	if (!*args[*cur_arg + 1]) {
+		memprintf(err, "'%s' : missing sni expression", args[*cur_arg]);
+		return ERR_ALERT | ERR_FATAL;
+	}
+
+	(*cur_arg)++;
+	proxy->conf.args.ctx = ARGC_SRV;
+
+	expr = sample_parse_expr((char **)args, cur_arg, px->conf.file, px->conf.line, err, &proxy->conf.args);
+	if (!expr) {
+		memprintf(err, "error detected while parsing sni expression : %s", *err);
+		return ERR_ALERT | ERR_FATAL;
+	}
+
+	if (!(expr->fetch->val & SMP_VAL_BE_SRV_CON)) {
+		memprintf(err, "error detected while parsing sni expression : "
+		          " fetch method '%s' extracts information from '%s', none of which is available here.\n",
+		          args[*cur_arg-1], sample_src_names(expr->fetch->use));
+		return ERR_ALERT | ERR_FATAL;
+	}
+
+	px->http_needed |= !!(expr->fetch->use & SMP_USE_HTTP_ANY);
+	newsrv->ssl_ctx.sni = expr;
+	return 0;
+#endif
+}
+
 /* parse the "ssl" server keyword */
 static int srv_parse_ssl(char **args, int *cur_arg, struct proxy *px, struct server *newsrv, char **err)
 {
@@ -5213,6 +5261,7 @@ static struct srv_kw_list srv_kws = { "SSL", { }, {
 	{ "no-tls-tickets",        srv_parse_no_tls_tickets, 0, 0 }, /* disable session resumption tickets */
 	{ "send-proxy-v2-ssl",     srv_parse_send_proxy_ssl, 0, 0 }, /* send PROXY protocol header v2 with SSL info */
 	{ "send-proxy-v2-ssl-cn",  srv_parse_send_proxy_cn,  0, 0 }, /* send PROXY protocol header v2 with CN */
+	{ "sni",                   srv_parse_sni,            1, 0 }, /* send SNI extension */
 	{ "ssl",                   srv_parse_ssl,            0, 0 }, /* enable SSL processing */
 	{ "verify",                srv_parse_verify,         1, 0 }, /* set SSL verify method */
 	{ "verifyhost",            srv_parse_verifyhost,     1, 0 }, /* require that SSL cert verifies for hostname */
