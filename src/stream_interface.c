@@ -375,13 +375,11 @@ static void stream_int_chk_snd(struct stream_interface *si)
 		task_wakeup(si_task(si), TASK_WOKEN_IO);
 }
 
-/* Register an applet to handle a stream_interface as part of the
- * stream interface's owner task. The SI will wake it up everytime it
- * is solicited.  The task's processing function must call the applet's
- * function before returning. It must be deleted by the task handler
- * using stream_int_unregister_handler(), possibly from within the
- * function itself. It also pre-initializes the applet's context and
- * returns it (or NULL in case it could not be allocated).
+/* Register an applet to handle a stream_interface as a new appctx. The SI will
+ * wake it up everytime it is solicited. The appctx must be deleted by the task
+ * handler using si_release_endpoint(), possibly from within the function itself.
+ * It also pre-initializes the applet's context and returns it (or NULL in case
+ * it could not be allocated).
  */
 struct appctx *stream_int_register_handler(struct stream_interface *si, struct applet *app)
 {
@@ -396,14 +394,6 @@ struct appctx *stream_int_register_handler(struct stream_interface *si, struct a
 	si_applet_cant_get(si);
 	appctx_wakeup(appctx);
 	return si_appctx(si);
-}
-
-/* Unregister a stream interface handler. This must be called by the handler task
- * itself when it detects that it is in the SI_ST_DIS state.
- */
-void stream_int_unregister_handler(struct stream_interface *si)
-{
-	si_detach(si);
 }
 
 /* This callback is used to send a valid PROXY protocol line to a socket being

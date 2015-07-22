@@ -317,10 +317,6 @@ static int hlua_arg2lua(lua_State *L, const struct arg *arg)
 {
 	switch (arg->type) {
 	case ARGT_SINT:
-		lua_pushinteger(L, arg->data.sint);
-		break;
-
-	case ARGT_UINT:
 	case ARGT_TIME:
 	case ARGT_SIZE:
 		lua_pushinteger(L, arg->data.sint);
@@ -374,7 +370,7 @@ static int hlua_lua2arg(lua_State *L, int ud, struct arg *arg)
 	case LUA_TTHREAD:
 	case LUA_TLIGHTUSERDATA:
 		arg->type = ARGT_SINT;
-		arg->data.uint = 0;
+		arg->data.sint = 0;
 		break;
 	}
 	return 1;
@@ -389,7 +385,6 @@ static int hlua_smp2lua(lua_State *L, struct sample *smp)
 	switch (smp->type) {
 	case SMP_T_SINT:
 	case SMP_T_BOOL:
-	case SMP_T_UINT:
 		lua_pushinteger(L, smp->data.sint);
 		break;
 
@@ -467,7 +462,6 @@ static int hlua_smp2lua_str(lua_State *L, struct sample *smp)
 
 	case SMP_T_SINT:
 	case SMP_T_BOOL:
-	case SMP_T_UINT:
 	case SMP_T_IPV4:
 	case SMP_T_IPV6:
 	case SMP_T_ADDR: /* This type is never used to qualify a sample. */
@@ -500,7 +494,7 @@ static int hlua_lua2smp(lua_State *L, int ud, struct sample *smp)
 
 	case LUA_TBOOLEAN:
 		smp->type = SMP_T_BOOL;
-		smp->data.uint = lua_toboolean(L, ud);
+		smp->data.sint = lua_toboolean(L, ud);
 		break;
 
 	case LUA_TSTRING:
@@ -516,7 +510,7 @@ static int hlua_lua2smp(lua_State *L, int ud, struct sample *smp)
 	case LUA_TTHREAD:
 	case LUA_TLIGHTUSERDATA:
 		smp->type = SMP_T_BOOL;
-		smp->data.uint = 0;
+		smp->data.sint = 0;
 		break;
 	}
 	return 1;
@@ -605,12 +599,6 @@ __LJMP int hlua_lua2arg_check(lua_State *L, int first, struct arg *argp,
 		/* Convert some argument types. */
 		switch (mask & ARGT_MASK) {
 		case ARGT_SINT:
-			if (argp[idx].type != ARGT_SINT)
-				WILL_LJMP(luaL_argerror(L, first + idx, "integer expected"));
-			argp[idx].type = ARGT_SINT;
-			break;
-
-		case ARGT_UINT:
 			if (argp[idx].type != ARGT_SINT)
 				WILL_LJMP(luaL_argerror(L, first + idx, "integer expected"));
 			argp[idx].type = ARGT_SINT;
@@ -1336,7 +1324,7 @@ __LJMP static int hlua_map_new(struct lua_State *L)
 	case PAT_MATCH_DOM: conv.in_type = SMP_T_STR;  break;
 	case PAT_MATCH_END: conv.in_type = SMP_T_STR;  break;
 	case PAT_MATCH_REG: conv.in_type = SMP_T_STR;  break;
-	case PAT_MATCH_INT: conv.in_type = SMP_T_UINT; break;
+	case PAT_MATCH_INT: conv.in_type = SMP_T_SINT; break;
 	case PAT_MATCH_IP:  conv.in_type = SMP_T_ADDR; break;
 	default:
 		WILL_LJMP(luaL_error(L, "'new' doesn't support this match mode."));
@@ -1380,9 +1368,9 @@ __LJMP static inline int _hlua_map_lookup(struct lua_State *L, int str)
 
 	MAY_LJMP(check_args(L, 2, "lookup"));
 	desc = MAY_LJMP(hlua_checkmap(L, 1));
-	if (desc->pat.expect_type == SMP_T_UINT) {
-		smp.type = SMP_T_UINT;
-		smp.data.uint = MAY_LJMP(luaL_checkinteger(L, 2));
+	if (desc->pat.expect_type == SMP_T_SINT) {
+		smp.type = SMP_T_SINT;
+		smp.data.sint = MAY_LJMP(luaL_checkinteger(L, 2));
 	}
 	else {
 		smp.type = SMP_T_STR;

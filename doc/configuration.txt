@@ -6896,6 +6896,8 @@ source <addr>[:<port>] [interface <name>]
   is possible at the server level using the "source" server option. Refer to
   section 5 for more information.
 
+  In order to work, "usesrc" requires root privileges.
+
   Examples :
         backend private
             # Connect to the servers using our 192.168.1.200 source address
@@ -11028,12 +11030,30 @@ bool) which make it possible to report a match without having to write an ACL.
 The currently available list of transformation keywords include :
 
 add(<value>)
-  Adds <value> to the input value of type unsigned integer, and returns the
-  result as an unsigned integer.
+  Adds <value> to the input value of type signed integer, and returns the
+  result as a signed integer. <value> can be a numeric value or a variable
+  name. The name of the variable starts by an indication about its scope. The
+  allowed scopes are:
+    "sess" : the variable is shared with all the session,
+    "txn"  : the variable is shared with all the transaction (request and
+             response),
+    "req"  : the variable is shared only during the request processing,
+    "res"  : the variable is shared only during the response processing.
+  This prefix is followed by a name. The separator is a '.'. The name may only
+  contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
 and(<value>)
-  Performs a bitwise "AND" between <value> and the input value of type unsigned
-  integer, and returns the result as an unsigned integer.
+  Performs a bitwise "AND" between <value> and the input value of type signed
+  integer, and returns the result as an signed integer. <value> can be a
+  numeric value or a variable name. The name of the variable starts by an
+  indication about its scope. The allowed scopes are:
+    "sess" : the variable is shared with all the session,
+    "txn"  : the variable is shared with all the transaction (request and
+             response),
+    "req"  : the variable is shared only during the request processing,
+    "res"  : the variable is shared only during the response processing.
+  This prefix is followed by a name. The separator is a '.'. The name may only
+  contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
 base64
   Converts a binary input sample to a base64 string. It is used to log or
@@ -11041,7 +11061,7 @@ base64
   an SSL ID can be copied in a header).
 
 bool
-  Returns a boolean TRUE if the input value of type unsigned integer is
+  Returns a boolean TRUE if the input value of type signed integer is
   non-null, otherwise returns FALSE. Used in conjunction with and(), it can be
   used to report true/false for bit testing on input values (eg: verify the
   presence of a flag).
@@ -11052,8 +11072,8 @@ bytes(<offset>[,<length>])
   optionnaly truncated at the given length.
 
 cpl
-  Takes the input value of type unsigned integer, applies a twos-complement
-  (flips all bits) and returns the result as an unsigned integer.
+  Takes the input value of type signed integer, applies a ones-complement
+  (flips all bits) and returns the result as an signed integer.
 
 crc32([<avalanche>])
   Hashes a binary input sample into an unsigned 32-bit quantity using the CRC32
@@ -11088,9 +11108,18 @@ debug
   converter only exists when haproxy was built with debugging enabled.
 
 div(<value>)
-  Divides the input value of type unsigned integer by <value>, and returns the
-  result as an unsigned integer. If <value> is null, the largest unsigned
-  integer is returned (typically 2^32-1).
+  Divides the input value of type signed integer by <value>, and returns the
+  result as an signed integer. If <value> is null, the largest unsigned
+  integer is returned (typically 2^63-1). <value> can be a numeric value or a
+  variable name. The name of the variable starts by an indication about it
+  scope. The scope allowed are:
+    "sess" : the variable is shared with all the session,
+    "txn"  : the variable is shared with all the transaction (request and
+             response),
+    "req"  : the variable is shared only during the request processing,
+    "res"  : the variable is shared only during the response processing.
+  This prefix is followed by a name. The separator is a '.'. The name may only
+  contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
 djb2([<avalanche>])
   Hashes a binary input sample into an unsigned 32-bit quantity using the DJB2
@@ -11104,7 +11133,7 @@ djb2([<avalanche>])
   "hash-type" directive.
 
 even
-  Returns a boolean TRUE if the input value of type unsigned integer is even
+  Returns a boolean TRUE if the input value of type signed integer is even
   otherwise returns FALSE. It is functionally equivalent to "not,and(1),bool".
 
 field(<index>,<delimiters>)
@@ -11283,33 +11312,60 @@ map_<match_type>_<output_type>(<map_file>[,<default_value>])
       `------------------------------------ leading spaces ignored
 
 mod(<value>)
-  Divides the input value of type unsigned integer by <value>, and returns the
-  remainder as an unsigned integer. If <value> is null, then zero is returned.
+  Divides the input value of type signed integer by <value>, and returns the
+  remainder as an signed integer. If <value> is null, then zero is returned.
+  <value> can be a numeric value or a variable name. The name of the variable
+  starts by an indication about its scope. The allowed scopes are:
+    "sess" : the variable is shared with all the session,
+    "txn"  : the variable is shared with all the transaction (request and
+             response),
+    "req"  : the variable is shared only during the request processing,
+    "res"  : the variable is shared only during the response processing.
+  This prefix is followed by a name. The separator is a '.'. The name may only
+  contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
 mul(<value>)
-  Multiplies the input value of type unsigned integer by <value>, and returns
-  the product as an unsigned integer. In case of overflow, the higher bits are
-  lost, leading to seemingly strange values.
+  Multiplies the input value of type signed integer by <value>, and returns
+  the product as an signed integer. In case of overflow, the largest possible
+  value for the sign is returned so that the operation doesn't wrap around.
+  <value> can be a numeric value or a variable name. The name of the variable
+  starts by an indication about its scope. The allowed scopes are:
+    "sess" : the variable is shared with all the session,
+    "txn"  : the variable is shared with all the transaction (request and
+             response),
+    "req"  : the variable is shared only during the request processing,
+    "res"  : the variable is shared only during the response processing.
+  This prefix is followed by a name. The separator is a '.'. The name may only
+  contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
 neg
-  Takes the input value of type unsigned integer, computes the opposite value,
-  and returns the remainder as an unsigned integer. 0 is identity. This
-  operator is provided for reversed subtracts : in order to subtract the input
-  from a constant, simply perform a "neg,add(value)".
+  Takes the input value of type signed integer, computes the opposite value,
+  and returns the remainder as an signed integer. 0 is identity. This operator
+  is provided for reversed subtracts : in order to subtract the input from a
+  constant, simply perform a "neg,add(value)".
 
 not
-  Returns a boolean FALSE if the input value of type unsigned integer is
+  Returns a boolean FALSE if the input value of type signed integer is
   non-null, otherwise returns TRUE. Used in conjunction with and(), it can be
   used to report true/false for bit testing on input values (eg: verify the
   absence of a flag).
 
 odd
-  Returns a boolean TRUE if the input value of type unsigned integer is odd
+  Returns a boolean TRUE if the input value of type signed integer is odd
   otherwise returns FALSE. It is functionally equivalent to "and(1),bool".
 
 or(<value>)
-  Performs a bitwise "OR" between <value> and the input value of type unsigned
-  integer, and returns the result as an unsigned integer.
+  Performs a bitwise "OR" between <value> and the input value of type signed
+  integer, and returns the result as an signed integer. <value> can be a
+  numeric value or a variable name. The name of the variable starts by an
+  indication about its scope. The allowed scopes are:
+    "sess" : the variable is shared with all the session,
+    "txn"  : the variable is shared with all the transaction (request and
+             response),
+    "req"  : the variable is shared only during the request processing,
+    "res"  : the variable is shared only during the response processing.
+  This prefix is followed by a name. The separator is a '.'. The name may only
+  contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
 regsub(<regex>,<subst>[,<flags>])
   Applies a regex-based substitution to the input string. It does the same
@@ -11373,9 +11429,18 @@ set-var(<var name>)
   contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
 sub(<value>)
-  Subtracts <value> from the input value of type unsigned integer, and returns
-  the result as an unsigned integer. Note: in order to subtract the input from
-  a constant, simply perform a "neg,add(value)".
+  Subtracts <value> from the input value of type signed integer, and returns
+  the result as an signed integer. Note: in order to subtract the input from
+  a constant, simply perform a "neg,add(value)". <value> can be a numeric value
+  or a variable name. The name of the variable starts by an indication about its
+  scope. The allowed scopes are:
+    "sess" : the variable is shared with all the session,
+    "txn"  : the variable is shared with all the transaction (request and
+             response),
+    "req"  : the variable is shared only during the request processing,
+    "res"  : the variable is shared only during the response processing.
+  This prefix is followed by a name. The separator is a '.'. The name may only
+  contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
 table_bytes_in_rate(<table>)
   Uses the string representation of the input sample to perform a look up in
@@ -11556,7 +11621,16 @@ wt6([<avalanche>])
 
 xor(<value>)
   Performs a bitwise "XOR" (exclusive OR) between <value> and the input value
-  of type unsigned integer, and returns the result as an unsigned integer.
+  of type signed integer, and returns the result as an signed integer.
+  <value> can be a numeric value or a variable name. The name of the variable
+  starts by an indication about its scope. The allowed scopes are:
+    "sess" : the variable is shared with all the session,
+    "txn"  : the variable is shared with all the transaction (request and
+             response),
+    "req"  : the variable is shared only during the request processing,
+    "res"  : the variable is shared only during the response processing.
+  This prefix is followed by a name. The separator is a '.'. The name may only
+  contain characters 'a-z', 'A-Z', '0-9' and '_'.
 
 
 7.3.2. Fetching samples from internal states
@@ -11707,6 +11781,9 @@ fe_sess_rate([<frontend>]) : integer
             tcp-request content accept if ! too_fast
             tcp-request content accept if WAIT_END
 
+int(<integer>) : signed integer
+  Returns a signed integer.
+
 ipv4(<ipv4>) : ipv4
   Returns an ipv4.
 
@@ -11750,9 +11827,6 @@ rand([<range>]) : integer
   gives numbers between 0 and 4294967295. It can be useful to pass some values
   needed to take some routing decisions for example, or just for debugging
   purposes. This random must not be used for security purposes.
-
-sint(<sint>) : signed integer
-  Returns a signed integer.
 
 srv_conn([<backend>/]<server>) : integer
   Returns an integer value corresponding to the number of currently established
@@ -11803,9 +11877,6 @@ table_cnt([<table>]) : integer
   Returns the total number of entries currently in use in the current proxy's
   stick-table or in the designated stick-table. See also src_conn_cnt and
   table_avl for other entry counting methods.
-
-uint(<uint>) : unsigned integer
-  Returns an unsigned integer.
 
 var(<var-name>) : undefined
   Returns a variable with the stored type. If the variable is not set, the
