@@ -4477,7 +4477,7 @@ int http_process_request(struct stream *s, struct channel *req, int an_bit)
 		char *path;
 
 		/* Note that for now we don't reuse existing proxy connections */
-		if (unlikely((conn = si_alloc_conn(&s->si[1], 0)) == NULL)) {
+		if (unlikely((conn = si_alloc_conn(&s->si[1])) == NULL)) {
 			txn->req.msg_state = HTTP_MSG_ERROR;
 			txn->status = 500;
 			req->analysers = 0;
@@ -5030,12 +5030,16 @@ void http_end_txn_clean_session(struct stream *s)
 {
 	int prev_status = s->txn->status;
 	struct proxy *fe = strm_fe(s);
+	struct connection *srv_conn;
+	struct server *srv;
+	unsigned int prev_flags = s->txn->flags;
 
 	/* FIXME: We need a more portable way of releasing a backend's and a
 	 * server's connections. We need a safer way to reinitialize buffer
 	 * flags. We also need a more accurate method for computing per-request
 	 * data.
 	 */
+	srv_conn = objt_conn(s->si[1].end);
 
 	/* unless we're doing keep-alive, we want to quickly close the connection
 	 * to the server.
@@ -5125,6 +5129,7 @@ void http_end_txn_clean_session(struct stream *s)
 	if (((s->txn->flags & TX_CON_WANT_MSK) != TX_CON_WANT_KAL) ||
 	    !si_conn_ready(&s->si[1])) {
 		si_release_endpoint(&s->si[1]);
+		srv_conn = NULL;
 	}
 
 	s->si[1].state     = s->si[1].prev_state = SI_ST_INI;
@@ -5151,6 +5156,7 @@ void http_end_txn_clean_session(struct stream *s)
 		 * it's better to do it (at least it helps with debugging).
 		 */
 		s->txn->flags |= TX_PREFER_LAST;
+		srv_conn->flags |= CO_FL_PRIVATE;
 	}
 
 	if (fe->options2 & PR_O2_INDEPSTR)
@@ -5182,7 +5188,22 @@ void http_end_txn_clean_session(struct stream *s)
 	channel_auto_close(&s->res);
 
 	/* we're in keep-alive with an idle connection, monitor it */
-	si_idle_conn(&s->si[1]);
+	if (srv_conn) {
+		srv = objt_server(srv_conn->target);
+		if (!srv)
+			si_idle_conn(&s->si[1], NULL);
+		else if ((srv_conn->flags & CO_FL_PRIVATE) ||
+			 ((s->be->options & PR_O_REUSE_MASK) == PR_O_REUSE_NEVR))
+			si_idle_conn(&s->si[1], &srv->priv_conns);
+		else if (prev_flags & TX_NOT_FIRST)
+			/* note: we check the request, not the connection, but
+			 * this is valid for strategies SAFE and AGGR, and in
+			 * case of ALWS, we don't care anyway.
+			 */
+			si_idle_conn(&s->si[1], &srv->safe_conns);
+		else
+			si_idle_conn(&s->si[1], &srv->idle_conns);
+	}
 
 	s->req.analysers = strm_li(s)->analysers;
 	s->res.analysers = 0;

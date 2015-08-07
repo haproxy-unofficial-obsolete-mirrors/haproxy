@@ -1025,13 +1025,83 @@ int connect_server(struct stream *s)
 {
 	struct connection *cli_conn;
 	struct connection *srv_conn;
+	struct connection *old_conn;
 	struct server *srv;
 	int reuse = 0;
 	int err;
 
+	srv = objt_server(s->target);
 	srv_conn = objt_conn(s->si[1].end);
 	if (srv_conn)
 		reuse = s->target == srv_conn->target;
+
+	if (srv && !reuse) {
+		old_conn = srv_conn;
+		if (old_conn) {
+			srv_conn = NULL;
+			old_conn->owner = NULL;
+			si_detach_endpoint(&s->si[1]);
+			/* note: if the connection was in a server's idle
+			 * queue, it doesn't get dequeued.
+			 */
+		}
+
+		/* Below we pick connections from the safe or idle lists based
+		 * on the strategy, the fact that this is a first or second
+		 * (retryable) request, with the indicated priority (1 or 2) :
+		 *
+		 *          SAFE                 AGGR                ALWS
+		 *
+		 *      +-----+-----+        +-----+-----+       +-----+-----+
+		 *   req| 1st | 2nd |     req| 1st | 2nd |    req| 1st | 2nd |
+		 *  ----+-----+-----+    ----+-----+-----+   ----+-----+-----+
+		 *  safe|  -  |  2  |    safe|  1  |  2  |   safe|  1  |  2  |
+		 *  ----+-----+-----+    ----+-----+-----+   ----+-----+-----+
+		 *  idle|  -  |  1  |    idle|  -  |  1  |   idle|  2  |  1  |
+		 *  ----+-----+-----+    ----+-----+-----+   ----+-----+-----+
+		 */
+
+		if (!LIST_ISEMPTY(&srv->idle_conns) &&
+		    ((s->be->options & PR_O_REUSE_MASK) != PR_O_REUSE_NEVR &&
+		     s->txn && (s->txn->flags & TX_NOT_FIRST))) {
+			srv_conn = LIST_ELEM(srv->idle_conns.n, struct connection *, list);
+		}
+		else if (!LIST_ISEMPTY(&srv->safe_conns) &&
+			 ((s->txn && (s->txn->flags & TX_NOT_FIRST)) ||
+			  (s->be->options & PR_O_REUSE_MASK) >= PR_O_REUSE_AGGR)) {
+			srv_conn = LIST_ELEM(srv->safe_conns.n, struct connection *, list);
+		}
+		else if (!LIST_ISEMPTY(&srv->idle_conns) &&
+			 (s->be->options & PR_O_REUSE_MASK) == PR_O_REUSE_ALWS) {
+			srv_conn = LIST_ELEM(srv->idle_conns.n, struct connection *, list);
+		}
+
+		/* If we've picked a connection from the pool, we now have to
+		 * detach it. We may have to get rid of the previous idle
+		 * connection we had, so for this we try to swap it with the
+		 * other owner's. That way it may remain alive for others to
+		 * pick.
+		 */
+		if (srv_conn) {
+			LIST_DEL(&srv_conn->list);
+			LIST_INIT(&srv_conn->list);
+
+			if (srv_conn->owner) {
+				si_detach_endpoint(srv_conn->owner);
+				if (old_conn && !(old_conn->flags & CO_FL_PRIVATE))
+					si_attach_conn(srv_conn->owner, old_conn);
+			}
+			si_attach_conn(&s->si[1], srv_conn);
+			reuse = 1;
+		}
+
+		/* we may have to release our connection if we couldn't swap it */
+		if (old_conn && !old_conn->owner) {
+			LIST_DEL(&old_conn->list);
+			conn_force_close(old_conn);
+			conn_free(old_conn);
+		}
+	}
 
 	if (reuse) {
 		/* Disable connection reuse if a dynamic source is used.
@@ -1039,7 +1109,6 @@ int connect_server(struct stream *s)
 		 * we don't need to disable connection reuse on no-idempotent
 		 * requests nor when PROXY protocol is used.
 		 */
-		srv = objt_server(s->target);
 		if (srv && srv->conn_src.opts & CO_SRC_BIND) {
 			if ((srv->conn_src.opts & CO_SRC_TPROXY_MASK) == CO_SRC_TPROXY_DYN)
 				reuse = 0;
@@ -1050,7 +1119,14 @@ int connect_server(struct stream *s)
 		}
 	}
 
-	srv_conn = si_alloc_conn(&s->si[1], reuse);
+	if (!reuse)
+		srv_conn = si_alloc_conn(&s->si[1]);
+	else {
+		/* reusing our connection, take it out of the idle list */
+		LIST_DEL(&srv_conn->list);
+		LIST_INIT(&srv_conn->list);
+	}
+
 	if (!srv_conn)
 		return SF_ERR_RESOURCE;
 
@@ -1065,8 +1141,8 @@ int connect_server(struct stream *s)
 		srv_conn->target = s->target;
 
 		/* set the correct protocol on the output stream interface */
-		if (objt_server(s->target)) {
-			conn_prepare(srv_conn, protocol_by_family(srv_conn->addr.to.ss_family), objt_server(s->target)->xprt);
+		if (srv) {
+			conn_prepare(srv_conn, protocol_by_family(srv_conn->addr.to.ss_family), srv->xprt);
 		}
 		else if (obj_type(s->target) == OBJ_TYPE_PROXY) {
 			/* proxies exclusively run on raw_sock right now */
@@ -1079,7 +1155,8 @@ int connect_server(struct stream *s)
 
 		/* process the case where the server requires the PROXY protocol to be sent */
 		srv_conn->send_proxy_ofs = 0;
-		if (objt_server(s->target) && objt_server(s->target)->pp_opts) {
+		if (srv && srv->pp_opts) {
+			srv_conn->flags |= CO_FL_PRIVATE;
 			srv_conn->send_proxy_ofs = 1; /* must compute size */
 			cli_conn = objt_conn(strm_orig(s));
 			if (cli_conn)
@@ -1112,7 +1189,6 @@ int connect_server(struct stream *s)
 	/* set connect timeout */
 	s->si[1].exp = tick_add_ifset(now_ms, s->be->timeout.connect);
 
-	srv = objt_server(s->target);
 	if (srv) {
 		s->flags |= SF_CURR_SESS;
 		srv->cur_sess++;
@@ -1146,6 +1222,7 @@ int connect_server(struct stream *s)
 					smp->data.str.len = smp->data.str.size - 1;
 				smp->data.str.str[smp->data.str.len] = 0;
 				ssl_sock_set_servername(srv_conn, smp->data.str.str);
+				srv_conn->flags |= CO_FL_PRIVATE;
 			}
 		}
 #endif /* USE_OPENSSL */

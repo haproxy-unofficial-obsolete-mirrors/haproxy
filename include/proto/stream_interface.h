@@ -25,6 +25,7 @@
 #include <stdlib.h>
 
 #include <common/config.h>
+#include <types/server.h>
 #include <types/stream.h>
 #include <types/stream_interface.h>
 #include <proto/applet.h>
@@ -129,6 +130,19 @@ static inline void si_set_state(struct stream_interface *si, int state)
 	si->state = si->prev_state = state;
 }
 
+/* only detaches the endpoint from the SI, which means that it's set to
+ * NULL and that ->ops is mapped to si_embedded_ops. The previous endpoint
+ * is returned.
+ */
+static inline enum obj_type *si_detach_endpoint(struct stream_interface *si)
+{
+	enum obj_type *prev = si->end;
+
+	si->end = NULL;
+	si->ops = &si_embedded_ops;
+	return prev;
+}
+
 /* Release the endpoint if it's a connection or an applet, then nullify it.
  * Note: released connections are closed then freed.
  */
@@ -141,6 +155,7 @@ static inline void si_release_endpoint(struct stream_interface *si)
 		return;
 
 	if ((conn = objt_conn(si->end))) {
+		LIST_DEL(&conn->list);
 		conn_force_close(conn);
 		conn_free(conn);
 	}
@@ -149,20 +164,21 @@ static inline void si_release_endpoint(struct stream_interface *si)
 			appctx->applet->release(appctx);
 		appctx_free(appctx); /* we share the connection pool */
 	}
-	si->end = NULL;
-	si->ops = &si_embedded_ops;
+	si_detach_endpoint(si);
 }
 
-/* Turn a possibly existing connection endpoint of stream interface <si> to
- * idle mode, which means that the connection will be polled for incoming events
- * and might be killed by the underlying I/O handler.
+/* Turn an existing connection endpoint of stream interface <si> to idle mode,
+ * which means that the connection will be polled for incoming events and might
+ * be killed by the underlying I/O handler. If <pool> is not null, the
+ * connection will also be added at the head of this list. This connection
+ * remains assigned to the stream interface it is currently attached to.
  */
-static inline void si_idle_conn(struct stream_interface *si)
+static inline void si_idle_conn(struct stream_interface *si, struct list *pool)
 {
-	struct connection *conn = objt_conn(si->end);
+	struct connection *conn = __objt_conn(si->end);
 
-	if (!conn)
-		return;
+	if (pool)
+		LIST_ADD(pool, &conn->list);
 
 	conn_attach(conn, si, &si_idle_conn_cb);
 	conn_data_want_recv(conn);
@@ -271,27 +287,15 @@ static inline void si_applet_stop_get(struct stream_interface *si)
 }
 
 /* Try to allocate a new connection and assign it to the interface. If
- * a connection was previously allocated and the <reuse> flag is set,
- * it is returned unmodified. Otherwise it is reset.
+ * an endpoint was previously allocated, it is released first. The newly
+ * allocated connection is initialized, assigned to the stream interface,
+ * and returned.
  */
-/* Returns the stream interface's existing connection if one such already
- * exists, or tries to allocate and initialize a new one which is then
- * assigned to the stream interface.
- */
-static inline struct connection *si_alloc_conn(struct stream_interface *si, int reuse)
+static inline struct connection *si_alloc_conn(struct stream_interface *si)
 {
 	struct connection *conn;
 
-	/* If we find a reusable connection, we return it, otherwise we start
-	 * by releasing what we have (non-reusable conn or applet).
-	 */
-	if (si->end) {
-		conn = objt_conn(si->end);
-		if (conn && reuse)
-			return conn;
-
-		si_release_endpoint(si);
-	}
+	si_release_endpoint(si);
 
 	conn = conn_new();
 	if (conn)

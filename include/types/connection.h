@@ -119,7 +119,10 @@ enum {
 	 */
 	CO_FL_POLL_SOCK     = CO_FL_HANDSHAKE | CO_FL_WAIT_L4_CONN | CO_FL_WAIT_L6_CONN,
 
-	/* unused : 0x10000000, 0x20000000, 0x40000000 */
+	/* This connection may not be shared between clients */
+	CO_FL_PRIVATE       = 0x10000000,
+
+	/* unused : 0x20000000, 0x40000000 */
 
 	/* This last flag indicates that the transport layer is used (for instance
 	 * by logs) and must not be cleared yet. The last call to conn_xprt_close()
@@ -261,6 +264,7 @@ struct connection {
 		} sock;
 	} t;
 	enum obj_type *target;        /* the target to connect to (server, proxy, applet, ...) */
+	struct list list;             /* attach point to various connection lists (idle, ...) */
 	const struct netns_entry *proxy_netns;
 	struct {
 		struct sockaddr_storage from;	/* client address, or address to spoof when connecting to the server */
