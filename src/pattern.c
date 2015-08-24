@@ -425,9 +425,9 @@ int pat_parse_ip(const char *text, struct pattern *pattern, int mflags, char **e
 /* always return false */
 struct pattern *pat_match_nothing(struct sample *smp, struct pattern_expr *expr, int fill)
 {
-	if (smp->data.sint) {
+	if (smp->data.u.sint) {
 		if (fill) {
-			static_pattern.smp = NULL;
+			static_pattern.data = NULL;
 			static_pattern.ref = NULL;
 			static_pattern.type = 0;
 			static_pattern.ptr.str = NULL;
@@ -454,17 +454,17 @@ struct pattern *pat_match_str(struct sample *smp, struct pattern_expr *expr, int
 	/* Lookup a string in the expression's pattern tree. */
 	if (!eb_is_empty(&expr->pattern_tree)) {
 		/* we may have to force a trailing zero on the test pattern */
-		prev = smp->data.str.str[smp->data.str.len];
+		prev = smp->data.u.str.str[smp->data.u.str.len];
 		if (prev)
-			smp->data.str.str[smp->data.str.len] = '\0';
-		node = ebst_lookup(&expr->pattern_tree, smp->data.str.str);
+			smp->data.u.str.str[smp->data.u.str.len] = '\0';
+		node = ebst_lookup(&expr->pattern_tree, smp->data.u.str.str);
 		if (prev)
-			smp->data.str.str[smp->data.str.len] = prev;
+			smp->data.u.str.str[smp->data.u.str.len] = prev;
 
 		if (node) {
 			if (fill) {
 				elt = ebmb_entry(node, struct pattern_tree, node);
-				static_pattern.smp = elt->smp;
+				static_pattern.data = elt->data;
 				static_pattern.ref = elt->ref;
 				static_pattern.sflags = PAT_SF_TREE;
 				static_pattern.type = SMP_T_STR;
@@ -478,7 +478,7 @@ struct pattern *pat_match_str(struct sample *smp, struct pattern_expr *expr, int
 	if (pat_lru_tree) {
 		unsigned long long seed = pat_lru_seed ^ (long)expr;
 
-		lru = lru64_get(XXH64(smp->data.str.str, smp->data.str.len, seed),
+		lru = lru64_get(XXH64(smp->data.u.str.str, smp->data.u.str.len, seed),
 				pat_lru_tree, expr, expr->revision);
 		if (lru && lru->domain)
 			return lru->data;
@@ -487,12 +487,12 @@ struct pattern *pat_match_str(struct sample *smp, struct pattern_expr *expr, int
 	list_for_each_entry(lst, &expr->patterns, list) {
 		pattern = &lst->pat;
 
-		if (pattern->len != smp->data.str.len)
+		if (pattern->len != smp->data.u.str.len)
 			continue;
 
 		icase = expr->mflags & PAT_MF_IGNORE_CASE;
-		if ((icase && strncasecmp(pattern->ptr.str, smp->data.str.str, smp->data.str.len) == 0) ||
-		    (!icase && strncmp(pattern->ptr.str, smp->data.str.str, smp->data.str.len) == 0)) {
+		if ((icase && strncasecmp(pattern->ptr.str, smp->data.u.str.str, smp->data.u.str.len) == 0) ||
+		    (!icase && strncmp(pattern->ptr.str, smp->data.u.str.str, smp->data.u.str.len) == 0)) {
 			ret = pattern;
 			break;
 		}
@@ -515,7 +515,7 @@ struct pattern *pat_match_bin(struct sample *smp, struct pattern_expr *expr, int
 	if (pat_lru_tree) {
 		unsigned long long seed = pat_lru_seed ^ (long)expr;
 
-		lru = lru64_get(XXH64(smp->data.str.str, smp->data.str.len, seed),
+		lru = lru64_get(XXH64(smp->data.u.str.str, smp->data.u.str.len, seed),
 				pat_lru_tree, expr, expr->revision);
 		if (lru && lru->domain)
 			return lru->data;
@@ -524,10 +524,10 @@ struct pattern *pat_match_bin(struct sample *smp, struct pattern_expr *expr, int
 	list_for_each_entry(lst, &expr->patterns, list) {
 		pattern = &lst->pat;
 
-		if (pattern->len != smp->data.str.len)
+		if (pattern->len != smp->data.u.str.len)
 			continue;
 
-		if (memcmp(pattern->ptr.str, smp->data.str.str, smp->data.str.len) == 0) {
+		if (memcmp(pattern->ptr.str, smp->data.u.str.str, smp->data.u.str.len) == 0) {
 			ret = pattern;
 			break;
 		}
@@ -552,7 +552,7 @@ struct pattern *pat_match_reg(struct sample *smp, struct pattern_expr *expr, int
 	if (pat_lru_tree) {
 		unsigned long long seed = pat_lru_seed ^ (long)expr;
 
-		lru = lru64_get(XXH64(smp->data.str.str, smp->data.str.len, seed),
+		lru = lru64_get(XXH64(smp->data.u.str.str, smp->data.u.str.len, seed),
 				pat_lru_tree, expr, expr->revision);
 		if (lru && lru->domain)
 			return lru->data;
@@ -561,7 +561,7 @@ struct pattern *pat_match_reg(struct sample *smp, struct pattern_expr *expr, int
 	list_for_each_entry(lst, &expr->patterns, list) {
 		pattern = &lst->pat;
 
-		if (regex_exec2(pattern->ptr.reg, smp->data.str.str, smp->data.str.len)) {
+		if (regex_exec2(pattern->ptr.reg, smp->data.u.str.str, smp->data.u.str.len)) {
 			ret = pattern;
 			break;
 		}
@@ -588,17 +588,17 @@ struct pattern *pat_match_beg(struct sample *smp, struct pattern_expr *expr, int
 	/* Lookup a string in the expression's pattern tree. */
 	if (!eb_is_empty(&expr->pattern_tree)) {
 		/* we may have to force a trailing zero on the test pattern */
-		prev = smp->data.str.str[smp->data.str.len];
+		prev = smp->data.u.str.str[smp->data.u.str.len];
 		if (prev)
-			smp->data.str.str[smp->data.str.len] = '\0';
-		node = ebmb_lookup_longest(&expr->pattern_tree, smp->data.str.str);
+			smp->data.u.str.str[smp->data.u.str.len] = '\0';
+		node = ebmb_lookup_longest(&expr->pattern_tree, smp->data.u.str.str);
 		if (prev)
-			smp->data.str.str[smp->data.str.len] = prev;
+			smp->data.u.str.str[smp->data.u.str.len] = prev;
 
 		if (node) {
 			if (fill) {
 				elt = ebmb_entry(node, struct pattern_tree, node);
-				static_pattern.smp = elt->smp;
+				static_pattern.data = elt->data;
 				static_pattern.ref = elt->ref;
 				static_pattern.sflags = PAT_SF_TREE;
 				static_pattern.type = SMP_T_STR;
@@ -612,7 +612,7 @@ struct pattern *pat_match_beg(struct sample *smp, struct pattern_expr *expr, int
 	if (pat_lru_tree) {
 		unsigned long long seed = pat_lru_seed ^ (long)expr;
 
-		lru = lru64_get(XXH64(smp->data.str.str, smp->data.str.len, seed),
+		lru = lru64_get(XXH64(smp->data.u.str.str, smp->data.u.str.len, seed),
 				pat_lru_tree, expr, expr->revision);
 		if (lru && lru->domain)
 			return lru->data;
@@ -621,12 +621,12 @@ struct pattern *pat_match_beg(struct sample *smp, struct pattern_expr *expr, int
 	list_for_each_entry(lst, &expr->patterns, list) {
 		pattern = &lst->pat;
 
-		if (pattern->len > smp->data.str.len)
+		if (pattern->len > smp->data.u.str.len)
 			continue;
 
 		icase = expr->mflags & PAT_MF_IGNORE_CASE;
-		if ((icase && strncasecmp(pattern->ptr.str, smp->data.str.str, pattern->len) != 0) ||
-		    (!icase && strncmp(pattern->ptr.str, smp->data.str.str, pattern->len) != 0))
+		if ((icase && strncasecmp(pattern->ptr.str, smp->data.u.str.str, pattern->len) != 0) ||
+		    (!icase && strncmp(pattern->ptr.str, smp->data.u.str.str, pattern->len) != 0))
 			continue;
 
 		ret = pattern;
@@ -651,7 +651,7 @@ struct pattern *pat_match_end(struct sample *smp, struct pattern_expr *expr, int
 	if (pat_lru_tree) {
 		unsigned long long seed = pat_lru_seed ^ (long)expr;
 
-		lru = lru64_get(XXH64(smp->data.str.str, smp->data.str.len, seed),
+		lru = lru64_get(XXH64(smp->data.u.str.str, smp->data.u.str.len, seed),
 				pat_lru_tree, expr, expr->revision);
 		if (lru && lru->domain)
 			return lru->data;
@@ -660,12 +660,12 @@ struct pattern *pat_match_end(struct sample *smp, struct pattern_expr *expr, int
 	list_for_each_entry(lst, &expr->patterns, list) {
 		pattern = &lst->pat;
 
-		if (pattern->len > smp->data.str.len)
+		if (pattern->len > smp->data.u.str.len)
 			continue;
 
 		icase = expr->mflags & PAT_MF_IGNORE_CASE;
-		if ((icase && strncasecmp(pattern->ptr.str, smp->data.str.str + smp->data.str.len - pattern->len, pattern->len) != 0) ||
-		    (!icase && strncmp(pattern->ptr.str, smp->data.str.str + smp->data.str.len - pattern->len, pattern->len) != 0))
+		if ((icase && strncasecmp(pattern->ptr.str, smp->data.u.str.str + smp->data.u.str.len - pattern->len, pattern->len) != 0) ||
+		    (!icase && strncmp(pattern->ptr.str, smp->data.u.str.str + smp->data.u.str.len - pattern->len, pattern->len) != 0))
 			continue;
 
 		ret = pattern;
@@ -694,7 +694,7 @@ struct pattern *pat_match_sub(struct sample *smp, struct pattern_expr *expr, int
 	if (pat_lru_tree) {
 		unsigned long long seed = pat_lru_seed ^ (long)expr;
 
-		lru = lru64_get(XXH64(smp->data.str.str, smp->data.str.len, seed),
+		lru = lru64_get(XXH64(smp->data.u.str.str, smp->data.u.str.len, seed),
 				pat_lru_tree, expr, expr->revision);
 		if (lru && lru->domain)
 			return lru->data;
@@ -703,13 +703,13 @@ struct pattern *pat_match_sub(struct sample *smp, struct pattern_expr *expr, int
 	list_for_each_entry(lst, &expr->patterns, list) {
 		pattern = &lst->pat;
 
-		if (pattern->len > smp->data.str.len)
+		if (pattern->len > smp->data.u.str.len)
 			continue;
 
-		end = smp->data.str.str + smp->data.str.len - pattern->len;
+		end = smp->data.u.str.str + smp->data.u.str.len - pattern->len;
 		icase = expr->mflags & PAT_MF_IGNORE_CASE;
 		if (icase) {
-			for (c = smp->data.str.str; c <= end; c++) {
+			for (c = smp->data.u.str.str; c <= end; c++) {
 				if (tolower(*c) != tolower(*pattern->ptr.str))
 					continue;
 				if (strncasecmp(pattern->ptr.str, c, pattern->len) == 0) {
@@ -718,7 +718,7 @@ struct pattern *pat_match_sub(struct sample *smp, struct pattern_expr *expr, int
 				}
 			}
 		} else {
-			for (c = smp->data.str.str; c <= end; c++) {
+			for (c = smp->data.u.str.str; c <= end; c++) {
 				if (*c != *pattern->ptr.str)
 					continue;
 				if (strncmp(pattern->ptr.str, c, pattern->len) == 0) {
@@ -759,13 +759,13 @@ static int match_word(struct sample *smp, struct pattern *pattern, int mflags, u
 	while (pl > 0 && is_delimiter(ps[pl - 1], delimiters))
 		pl--;
 
-	if (pl > smp->data.str.len)
+	if (pl > smp->data.u.str.len)
 		return PAT_NOMATCH;
 
 	may_match = 1;
 	icase = mflags & PAT_MF_IGNORE_CASE;
-	end = smp->data.str.str + smp->data.str.len - pl;
-	for (c = smp->data.str.str; c <= end; c++) {
+	end = smp->data.u.str.str + smp->data.u.str.len - pl;
+	for (c = smp->data.u.str.str; c <= end; c++) {
 		if (is_delimiter(*c, delimiters)) {
 			may_match = 1;
 			continue;
@@ -832,8 +832,8 @@ struct pattern *pat_match_int(struct sample *smp, struct pattern_expr *expr, int
 
 	list_for_each_entry(lst, &expr->patterns, list) {
 		pattern = &lst->pat;
-		if ((!pattern->val.range.min_set || pattern->val.range.min <= smp->data.sint) &&
-		    (!pattern->val.range.max_set || smp->data.sint <= pattern->val.range.max))
+		if ((!pattern->val.range.min_set || pattern->val.range.min <= smp->data.u.sint) &&
+		    (!pattern->val.range.max_set || smp->data.u.sint <= pattern->val.range.max))
 			return pattern;
 	}
 	return NULL;
@@ -847,8 +847,8 @@ struct pattern *pat_match_len(struct sample *smp, struct pattern_expr *expr, int
 
 	list_for_each_entry(lst, &expr->patterns, list) {
 		pattern = &lst->pat;
-		if ((!pattern->val.range.min_set || pattern->val.range.min <= smp->data.str.len) &&
-		    (!pattern->val.range.max_set || smp->data.str.len <= pattern->val.range.max))
+		if ((!pattern->val.range.min_set || pattern->val.range.min <= smp->data.u.str.len) &&
+		    (!pattern->val.range.max_set || smp->data.u.str.len <= pattern->val.range.max))
 			return pattern;
 	}
 	return NULL;
@@ -865,16 +865,16 @@ struct pattern *pat_match_ip(struct sample *smp, struct pattern_expr *expr, int 
 	struct pattern *pattern;
 
 	/* The input sample is IPv4. Try to match in the trees. */
-	if (smp->type == SMP_T_IPV4) {
+	if (smp->data.type == SMP_T_IPV4) {
 		/* Lookup an IPv4 address in the expression's pattern tree using
 		 * the longest match method.
 		 */
-		s = &smp->data.ipv4;
+		s = &smp->data.u.ipv4;
 		node = ebmb_lookup_longest(&expr->pattern_tree, &s->s_addr);
 		if (node) {
 			if (fill) {
 				elt = ebmb_entry(node, struct pattern_tree, node);
-				static_pattern.smp = elt->smp;
+				static_pattern.data = elt->data;
 				static_pattern.ref = elt->ref;
 				static_pattern.sflags = PAT_SF_TREE;
 				static_pattern.type = SMP_T_IPV4;
@@ -891,12 +891,12 @@ struct pattern *pat_match_ip(struct sample *smp, struct pattern_expr *expr, int 
 		 */
 		memset(&tmp6, 0, 10);
 		*(uint16_t*)&tmp6.s6_addr[10] = htons(0xffff);
-		*(uint32_t*)&tmp6.s6_addr[12] = smp->data.ipv4.s_addr;
+		*(uint32_t*)&tmp6.s6_addr[12] = smp->data.u.ipv4.s_addr;
 		node = ebmb_lookup_longest(&expr->pattern_tree_2, &tmp6);
 		if (node) {
 			if (fill) {
 				elt = ebmb_entry(node, struct pattern_tree, node);
-				static_pattern.smp = elt->smp;
+				static_pattern.data = elt->data;
 				static_pattern.ref = elt->ref;
 				static_pattern.sflags = PAT_SF_TREE;
 				static_pattern.type = SMP_T_IPV6;
@@ -908,15 +908,15 @@ struct pattern *pat_match_ip(struct sample *smp, struct pattern_expr *expr, int 
 	}
 
 	/* The input sample is IPv6. Try to match in the trees. */
-	if (smp->type == SMP_T_IPV6) {
+	if (smp->data.type == SMP_T_IPV6) {
 		/* Lookup an IPv6 address in the expression's pattern tree using
 		 * the longest match method.
 		 */
-		node = ebmb_lookup_longest(&expr->pattern_tree_2, &smp->data.ipv6);
+		node = ebmb_lookup_longest(&expr->pattern_tree_2, &smp->data.u.ipv6);
 		if (node) {
 			if (fill) {
 				elt = ebmb_entry(node, struct pattern_tree, node);
-				static_pattern.smp = elt->smp;
+				static_pattern.data = elt->data;
 				static_pattern.ref = elt->ref;
 				static_pattern.sflags = PAT_SF_TREE;
 				static_pattern.type = SMP_T_IPV6;
@@ -932,16 +932,16 @@ struct pattern *pat_match_ip(struct sample *smp, struct pattern_expr *expr, int 
 		 *   - ::0000:ip:v4 (old ipv4 mapped)
 		 *   - 2002:ip:v4:: (6to4)
 		 */
-		if ((*(uint32_t*)&smp->data.ipv6.s6_addr[0] == 0 &&
-		     *(uint32_t*)&smp->data.ipv6.s6_addr[4]  == 0 &&
-		     (*(uint32_t*)&smp->data.ipv6.s6_addr[8] == 0 ||
-		      *(uint32_t*)&smp->data.ipv6.s6_addr[8] == htonl(0xFFFF))) ||
-		    *(uint16_t*)&smp->data.ipv6.s6_addr[0] == htons(0x2002)) {
-			if (*(uint32_t*)&smp->data.ipv6.s6_addr[0] == 0)
-				v4 = *(uint32_t*)&smp->data.ipv6.s6_addr[12];
+		if ((*(uint32_t*)&smp->data.u.ipv6.s6_addr[0] == 0 &&
+		     *(uint32_t*)&smp->data.u.ipv6.s6_addr[4]  == 0 &&
+		     (*(uint32_t*)&smp->data.u.ipv6.s6_addr[8] == 0 ||
+		      *(uint32_t*)&smp->data.u.ipv6.s6_addr[8] == htonl(0xFFFF))) ||
+		    *(uint16_t*)&smp->data.u.ipv6.s6_addr[0] == htons(0x2002)) {
+			if (*(uint32_t*)&smp->data.u.ipv6.s6_addr[0] == 0)
+				v4 = *(uint32_t*)&smp->data.u.ipv6.s6_addr[12];
 			else
-				v4 = htonl((ntohs(*(uint16_t*)&smp->data.ipv6.s6_addr[2]) << 16) +
-				            ntohs(*(uint16_t*)&smp->data.ipv6.s6_addr[4]));
+				v4 = htonl((ntohs(*(uint16_t*)&smp->data.u.ipv6.s6_addr[2]) << 16) +
+				            ntohs(*(uint16_t*)&smp->data.u.ipv6.s6_addr[4]));
 
 			/* Lookup an IPv4 address in the expression's pattern tree using the longest
 			 * match method.
@@ -950,7 +950,7 @@ struct pattern *pat_match_ip(struct sample *smp, struct pattern_expr *expr, int 
 			if (node) {
 				if (fill) {
 					elt = ebmb_entry(node, struct pattern_tree, node);
-					static_pattern.smp = elt->smp;
+					static_pattern.data = elt->data;
 					static_pattern.ref = elt->ref;
 					static_pattern.sflags = PAT_SF_TREE;
 					static_pattern.type = SMP_T_IPV4;
@@ -968,25 +968,25 @@ struct pattern *pat_match_ip(struct sample *smp, struct pattern_expr *expr, int 
 		pattern = &lst->pat;
 
 		/* The input sample is IPv4, use it as is. */
-		if (smp->type == SMP_T_IPV4) {
-			v4 = smp->data.ipv4.s_addr;
+		if (smp->data.type == SMP_T_IPV4) {
+			v4 = smp->data.u.ipv4.s_addr;
 		}
-		else if (smp->type == SMP_T_IPV6) {
+		else if (smp->data.type == SMP_T_IPV6) {
 			/* v4 match on a V6 sample. We want to check at least for
 			 * the following forms :
 			 *   - ::ffff:ip:v4 (ipv4 mapped)
 			 *   - ::0000:ip:v4 (old ipv4 mapped)
 			 *   - 2002:ip:v4:: (6to4)
 			 */
-			if (*(uint32_t*)&smp->data.ipv6.s6_addr[0] == 0 &&
-			    *(uint32_t*)&smp->data.ipv6.s6_addr[4]  == 0 &&
-			    (*(uint32_t*)&smp->data.ipv6.s6_addr[8] == 0 ||
-			     *(uint32_t*)&smp->data.ipv6.s6_addr[8] == htonl(0xFFFF))) {
-				v4 = *(uint32_t*)&smp->data.ipv6.s6_addr[12];
+			if (*(uint32_t*)&smp->data.u.ipv6.s6_addr[0] == 0 &&
+			    *(uint32_t*)&smp->data.u.ipv6.s6_addr[4]  == 0 &&
+			    (*(uint32_t*)&smp->data.u.ipv6.s6_addr[8] == 0 ||
+			     *(uint32_t*)&smp->data.u.ipv6.s6_addr[8] == htonl(0xFFFF))) {
+				v4 = *(uint32_t*)&smp->data.u.ipv6.s6_addr[12];
 			}
-			else if (*(uint16_t*)&smp->data.ipv6.s6_addr[0] == htons(0x2002)) {
-				v4 = htonl((ntohs(*(uint16_t*)&smp->data.ipv6.s6_addr[2]) << 16) +
-				            ntohs(*(uint16_t*)&smp->data.ipv6.s6_addr[4]));
+			else if (*(uint16_t*)&smp->data.u.ipv6.s6_addr[0] == htons(0x2002)) {
+				v4 = htonl((ntohs(*(uint16_t*)&smp->data.u.ipv6.s6_addr[2]) << 16) +
+				            ntohs(*(uint16_t*)&smp->data.u.ipv6.s6_addr[4]));
 			}
 			else
 				continue;
@@ -1009,7 +1009,7 @@ void free_pattern_tree(struct eb_root *root)
 		next = eb_next(node);
 		eb_delete(node);
 		elt = container_of(node, struct pattern_tree, node);
-		free(elt->smp);
+		free(elt->data);
 		free(elt);
 		node = next;
 	}
@@ -1020,7 +1020,7 @@ void pat_prune_val(struct pattern_expr *expr)
 	struct pattern_list *pat, *tmp;
 
 	list_for_each_entry_safe(pat, tmp, &expr->patterns, list) {
-		free(pat->pat.smp);
+		free(pat->pat.data);
 		free(pat);
 	}
 
@@ -1035,7 +1035,7 @@ void pat_prune_ptr(struct pattern_expr *expr)
 
 	list_for_each_entry_safe(pat, tmp, &expr->patterns, list) {
 		free(pat->pat.ptr.ptr);
-		free(pat->pat.smp);
+		free(pat->pat.data);
 		free(pat);
 	}
 
@@ -1050,7 +1050,7 @@ void pat_prune_reg(struct pattern_expr *expr)
 
 	list_for_each_entry_safe(pat, tmp, &expr->patterns, list) {
 		regex_free(pat->pat.ptr.ptr);
-		free(pat->pat.smp);
+		free(pat->pat.data);
 		free(pat);
 	}
 
@@ -1207,7 +1207,7 @@ int pat_idx_tree_ip(struct pattern_expr *expr, struct pattern *pat, char **err)
 			}
 
 			/* copy the pointer to sample associated to this node */
-			node->smp = pat->smp;
+			node->data = pat->data;
 			node->ref = pat->ref;
 
 			/* FIXME: insert <addr>/<mask> into the tree here */
@@ -1235,7 +1235,7 @@ int pat_idx_tree_ip(struct pattern_expr *expr, struct pattern *pat, char **err)
 		}
 
 		/* copy the pointer to sample associated to this node */
-		node->smp = pat->smp;
+		node->data = pat->data;
 		node->ref = pat->ref;
 
 		/* FIXME: insert <addr>/<mask> into the tree here */
@@ -1280,7 +1280,7 @@ int pat_idx_tree_str(struct pattern_expr *expr, struct pattern *pat, char **err)
 	}
 
 	/* copy the pointer to sample associated to this node */
-	node->smp = pat->smp;
+	node->data = pat->data;
 	node->ref = pat->ref;
 
 	/* copy the string */
@@ -1321,7 +1321,7 @@ int pat_idx_tree_pfx(struct pattern_expr *expr, struct pattern *pat, char **err)
 	}
 
 	/* copy the pointer to sample associated to this node */
-	node->smp = pat->smp;
+	node->data = pat->data;
 	node->ref = pat->ref;
 
 	/* copy the string and the trailing zero */
@@ -1348,7 +1348,7 @@ void pat_del_list_val(struct pattern_expr *expr, struct pat_ref_elt *ref)
 
 		/* Delete and free entry. */
 		LIST_DEL(&pat->list);
-		free(pat->pat.smp);
+		free(pat->pat.data);
 		free(pat);
 	}
 	expr->revision = rdtsc();
@@ -1372,7 +1372,7 @@ void pat_del_tree_ip(struct pattern_expr *expr, struct pat_ref_elt *ref)
 
 		/* Delete and free entry. */
 		ebmb_delete(node);
-		free(elt->smp);
+		free(elt->data);
 		free(elt);
 	}
 
@@ -1392,7 +1392,7 @@ void pat_del_tree_ip(struct pattern_expr *expr, struct pat_ref_elt *ref)
 
 		/* Delete and free entry. */
 		ebmb_delete(node);
-		free(elt->smp);
+		free(elt->data);
 		free(elt);
 	}
 	expr->revision = rdtsc();
@@ -1411,7 +1411,7 @@ void pat_del_list_ptr(struct pattern_expr *expr, struct pat_ref_elt *ref)
 		/* Delete and free entry. */
 		LIST_DEL(&pat->list);
 		free(pat->pat.ptr.ptr);
-		free(pat->pat.smp);
+		free(pat->pat.data);
 		free(pat);
 	}
 	expr->revision = rdtsc();
@@ -1439,7 +1439,7 @@ void pat_del_tree_str(struct pattern_expr *expr, struct pat_ref_elt *ref)
 
 		/* Delete and free entry. */
 		ebmb_delete(node);
-		free(elt->smp);
+		free(elt->data);
 		free(elt);
 	}
 	expr->revision = rdtsc();
@@ -1458,7 +1458,7 @@ void pat_del_list_reg(struct pattern_expr *expr, struct pat_ref_elt *ref)
 		/* Delete and free entry. */
 		LIST_DEL(&pat->list);
 		regex_free(pat->pat.ptr.ptr);
-		free(pat->pat.smp);
+		free(pat->pat.data);
 		free(pat);
 	}
 	expr->revision = rdtsc();
@@ -1606,9 +1606,9 @@ static inline int pat_ref_set_elt(struct pat_ref *ref, struct pat_ref_elt *elt,
                                   const char *value, char **err)
 {
 	struct pattern_expr *expr;
-	struct sample_storage **smp;
+	struct sample_data **data;
 	char *sample;
-	struct sample_storage test;
+	struct sample_data test;
 
 	/* Try all needed converters. */
 	list_for_each_entry(expr, &ref->pat, list) {
@@ -1637,9 +1637,9 @@ static inline int pat_ref_set_elt(struct pat_ref *ref, struct pat_ref_elt *elt,
 		if (!expr->pat_head->parse_smp)
 			continue;
 
-		smp = pattern_find_smp(expr, elt);
-		if (smp && *smp && !expr->pat_head->parse_smp(sample, *smp))
-			*smp = NULL;
+		data = pattern_find_smp(expr, elt);
+		if (data && *data && !expr->pat_head->parse_smp(sample, *data))
+			*data = NULL;
 	}
 
 	return 1;
@@ -1823,41 +1823,41 @@ static inline
 int pat_ref_push(struct pat_ref_elt *elt, struct pattern_expr *expr,
                  int patflags, char **err)
 {
-	struct sample_storage *smp;
+	struct sample_data *data;
 	struct pattern pattern;
 
 	/* Create sample */
 	if (elt->sample && expr->pat_head->parse_smp) {
 		/* New sample. */
-		smp = malloc(sizeof(*smp));
-		if (!smp)
+		data = malloc(sizeof(*data));
+		if (!data)
 			return 0;
 
 		/* Parse value. */
-		if (!expr->pat_head->parse_smp(elt->sample, smp)) {
+		if (!expr->pat_head->parse_smp(elt->sample, data)) {
 			memprintf(err, "unable to parse '%s'", elt->sample);
-			free(smp);
+			free(data);
 			return 0;
 		}
 
 	}
 	else
-		smp = NULL;
+		data = NULL;
 
 	/* initialise pattern */
 	memset(&pattern, 0, sizeof(pattern));
-	pattern.smp = smp;
+	pattern.data = data;
 	pattern.ref = elt;
 
 	/* parse pattern */
 	if (!expr->pat_head->parse(elt->pattern, &pattern, expr->mflags, err)) {
-		free(smp);
+		free(data);
 		return 0;
 	}
 
 	/* index pattern */
 	if (!expr->pat_head->index(expr, &pattern, err)) {
-		free(smp);
+		free(data);
 		return 0;
 	}
 
@@ -2334,7 +2334,7 @@ struct pattern *pattern_exec_match(struct pattern_head *head, struct sample *smp
 
 	if (!head->match) {
 		if (fill) {
-			static_pattern.smp = NULL;
+			static_pattern.data = NULL;
 			static_pattern.ref = NULL;
 			static_pattern.sflags = 0;
 			static_pattern.type = SMP_T_SINT;
@@ -2376,7 +2376,7 @@ void pattern_prune(struct pattern_head *head)
  * the function returns NULL. If the key cannot be parsed, the function
  * fill <err>.
  */
-struct sample_storage **pattern_find_smp(struct pattern_expr *expr, struct pat_ref_elt *ref)
+struct sample_data **pattern_find_smp(struct pattern_expr *expr, struct pat_ref_elt *ref)
 {
 	struct ebmb_node *node;
 	struct pattern_tree *elt;
@@ -2387,7 +2387,7 @@ struct sample_storage **pattern_find_smp(struct pattern_expr *expr, struct pat_r
 	     node = ebmb_next(node)) {
 		elt = container_of(node, struct pattern_tree, node);
 		if (elt->ref == ref)
-			return &elt->smp;
+			return &elt->data;
 	}
 
 	for (node = ebmb_first(&expr->pattern_tree_2);
@@ -2395,12 +2395,12 @@ struct sample_storage **pattern_find_smp(struct pattern_expr *expr, struct pat_r
 	     node = ebmb_next(node)) {
 		elt = container_of(node, struct pattern_tree, node);
 		if (elt->ref == ref)
-			return &elt->smp;
+			return &elt->data;
 	}
 
 	list_for_each_entry(pat, &expr->patterns, list)
 		if (pat->pat.ref == ref)
-			return &pat->pat.smp;
+			return &pat->pat.data;
 
 	return NULL;
 }

@@ -584,20 +584,20 @@ static int stats_dump_table_entry_to_buffer(struct chunk *msg, struct stream_int
 
 	chunk_appendf(msg, "%p:", entry);
 
-	if (proxy->table.type == STKTABLE_TYPE_IP) {
+	if (proxy->table.type == SMP_T_IPV4) {
 		char addr[INET_ADDRSTRLEN];
 		inet_ntop(AF_INET, (const void *)&entry->key.key, addr, sizeof(addr));
 		chunk_appendf(msg, " key=%s", addr);
 	}
-	else if (proxy->table.type == STKTABLE_TYPE_IPV6) {
+	else if (proxy->table.type == SMP_T_IPV6) {
 		char addr[INET6_ADDRSTRLEN];
 		inet_ntop(AF_INET6, (const void *)&entry->key.key, addr, sizeof(addr));
 		chunk_appendf(msg, " key=%s", addr);
 	}
-	else if (proxy->table.type == STKTABLE_TYPE_INTEGER) {
+	else if (proxy->table.type == SMP_T_SINT) {
 		chunk_appendf(msg, " key=%u", *(unsigned int *)entry->key.key);
 	}
-	else if (proxy->table.type == STKTABLE_TYPE_STRING) {
+	else if (proxy->table.type == SMP_T_STR) {
 		chunk_appendf(msg, " key=");
 		dump_text(msg, (const char *)entry->key.key, proxy->table.key_size);
 	}
@@ -669,15 +669,15 @@ static void stats_sock_table_key_request(struct stream_interface *si, char **arg
 	}
 
 	switch (px->table.type) {
-	case STKTABLE_TYPE_IP:
+	case SMP_T_IPV4:
 		uint32_key = htonl(inetaddr_host(args[4]));
 		static_table_key->key = &uint32_key;
 		break;
-	case STKTABLE_TYPE_IPV6:
+	case SMP_T_IPV6:
 		inet_pton(AF_INET6, args[4], ip6_key);
 		static_table_key->key = &ip6_key;
 		break;
-	case STKTABLE_TYPE_INTEGER:
+	case SMP_T_SINT:
 		{
 			char *endptr;
 			unsigned long val;
@@ -695,7 +695,7 @@ static void stats_sock_table_key_request(struct stream_interface *si, char **arg
 			break;
 		}
 		break;
-	case STKTABLE_TYPE_STRING:
+	case SMP_T_STR:
 		static_table_key->key = args[4];
 		static_table_key->key_len = strlen(args[4]);
 		break;
@@ -1933,8 +1933,8 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 					return 1;
 				}
 
-				memcpy(appctx->ctx.tlskeys.ref->tlskeys + 2 % TLS_TICKETS_NO, trash.str, trash.len);
-				appctx->ctx.tlskeys.ref->tls_ticket_enc_index = appctx->ctx.tlskeys.ref->tls_ticket_enc_index + 1 % TLS_TICKETS_NO;
+				memcpy(appctx->ctx.tlskeys.ref->tlskeys + ((appctx->ctx.tlskeys.ref->tls_ticket_enc_index + 2) % TLS_TICKETS_NO), trash.str, trash.len);
+				appctx->ctx.tlskeys.ref->tls_ticket_enc_index = (appctx->ctx.tlskeys.ref->tls_ticket_enc_index + 1) % TLS_TICKETS_NO;
 
 				appctx->ctx.cli.msg = "TLS ticket key updated!";
 				appctx->st0 = STAT_CLI_PRINT;
@@ -5628,10 +5628,10 @@ static int stats_map_lookup(struct stream_interface *si)
 			chunk_reset(&trash);
 
 			/* execute pattern matching */
-			sample.type = SMP_T_STR;
+			sample.data.type = SMP_T_STR;
 			sample.flags |= SMP_F_CONST;
-			sample.data.str.len = appctx->ctx.map.chunk.len;
-			sample.data.str.str = appctx->ctx.map.chunk.str;
+			sample.data.u.str.len = appctx->ctx.map.chunk.len;
+			sample.data.u.str.str = appctx->ctx.map.chunk.str;
 			if (appctx->ctx.map.expr->pat_head->match &&
 			    sample_convert(&sample, appctx->ctx.map.expr->pat_head->expect_type))
 				pat = appctx->ctx.map.expr->pat_head->match(&sample, appctx->ctx.map.expr, 1);
@@ -5691,9 +5691,9 @@ static int stats_map_lookup(struct stream_interface *si)
 
 				/* display return value */
 				if (appctx->ctx.map.display_flags == PAT_REF_MAP) {
-					if (pat->smp && pat->ref && pat->ref->sample)
-						chunk_appendf(&trash, ", value=\"%s\", type=\"%s\"",
-						              pat->ref->sample, smp_to_type[pat->smp->type]);
+					if (pat->data && pat->ref && pat->ref->sample)
+						chunk_appendf(&trash, ", value=\"%s\", type=\"%s\"", pat->ref->sample,
+						              smp_to_type[pat->data->type]);
 					else
 						chunk_appendf(&trash, ", value=none");
 				}

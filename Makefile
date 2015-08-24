@@ -5,7 +5,6 @@
 #
 # Valid USE_* options are the following. Most of them are automatically set by
 # the TARGET, others have to be explictly specified :
-#   USE_CTTPROXY         : enable CTTPROXY on Linux (needs kernel patch).
 #   USE_DLMALLOC         : enable use of dlmalloc (see DLMALLOC_SRC)
 #   USE_EPOLL            : enable epoll() on Linux 2.6. Automatic.
 #   USE_GETSOCKNAME      : enable getsockname() on Linux 2.2. Automatic.
@@ -426,12 +425,6 @@ OPTIONS_CFLAGS += -DCONFIG_HAP_LINUX_SPLICE
 BUILD_OPTIONS  += $(call ignore_implicit,USE_LINUX_SPLICE)
 endif
 
-ifneq ($(USE_CTTPROXY),)
-OPTIONS_CFLAGS += -DCONFIG_HAP_CTTPROXY
-OPTIONS_OBJS   += src/cttproxy.o
-BUILD_OPTIONS  += $(call ignore_implicit,USE_CTTPROXY)
-endif
-
 ifneq ($(USE_TPROXY),)
 OPTIONS_CFLAGS += -DTPROXY
 BUILD_OPTIONS  += $(call ignore_implicit,USE_TPROXY)
@@ -595,6 +588,7 @@ endif
 ifneq ($(USE_LUA),)
 check_lua_lib = $(shell echo "int main(){}" | $(CC) -o /dev/null -x c - $(2) -l$(1) 2>/dev/null && echo $(1))
 
+BUILD_OPTIONS   += $(call ignore_implicit,USE_LUA)
 OPTIONS_CFLAGS  += -DUSE_LUA $(if $(LUA_INC),-I$(LUA_INC))
 LUA_LD_FLAGS := $(if $(LUA_LIB),-L$(LUA_LIB))
 ifeq ($(LUA_LIB_NAME),)
@@ -733,13 +727,13 @@ else
 all: haproxy $(EXTRA)
 endif
 
-OBJS = src/haproxy.o src/sessionhash.o src/base64.o src/protocol.o \
+OBJS = src/haproxy.o src/base64.o src/protocol.o \
        src/uri_auth.o src/standard.o src/buffer.o src/log.o src/task.o \
        src/chunk.o src/channel.o src/listener.o src/lru.o src/xxhash.o \
        src/time.o src/fd.o src/pipe.o src/regex.o src/cfgparse.o src/server.o \
        src/checks.o src/queue.o src/frontend.o src/proxy.o src/peers.o \
        src/arg.o src/stick_table.o src/proto_uxst.o src/connection.o \
-       src/proto_http.o src/raw_sock.o src/appsession.o src/backend.o \
+       src/proto_http.o src/raw_sock.o src/backend.o \
        src/lb_chash.o src/lb_fwlc.o src/lb_fwrr.o src/lb_map.o src/lb_fas.o \
        src/stream_interface.o src/dumpstats.o src/proto_tcp.o src/applet.o \
        src/session.o src/stream.o src/hdr_idx.o src/ev_select.o src/signal.o \

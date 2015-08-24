@@ -23,6 +23,8 @@
 #include <ebsttree.h>
 
 #include <proto/arg.h>
+#include <proto/proto_http.h>
+#include <proto/proto_tcp.h>
 #include <proto/proxy.h>
 #include <proto/sample.h>
 #include <proto/stream.h>
@@ -64,7 +66,7 @@ void stksess_kill(struct stktable *t, struct stksess *ts)
  */
 void stksess_setkey(struct stktable *t, struct stksess *ts, struct stktable_key *key)
 {
-	if (t->type != STKTABLE_TYPE_STRING)
+	if (t->type != SMP_T_STR)
 		memcpy(ts->key.key, key->key, t->key_size);
 	else {
 		memcpy(ts->key.key, key->key, MIN(t->key_size - 1, key->key_len));
@@ -187,7 +189,7 @@ struct stksess *stktable_lookup_key(struct stktable *t, struct stktable_key *key
 {
 	struct ebmb_node *eb;
 
-	if (t->type == STKTABLE_TYPE_STRING)
+	if (t->type == SMP_T_STR)
 		eb = ebst_lookup_len(&t->keys, key->key, key->key_len+1 < t->key_size ? key->key_len : t->key_size-1);
 	else
 		eb = ebmb_lookup(&t->keys, key->key, t->key_size);
@@ -228,7 +230,7 @@ struct stksess *stktable_lookup(struct stktable *t, struct stksess *ts)
 {
 	struct ebmb_node *eb;
 
-	if (t->type == STKTABLE_TYPE_STRING)
+	if (t->type == SMP_T_STR)
 		eb = ebst_lookup(&(t->keys), (char *)ts->key.key);
 	else
 		eb = ebmb_lookup(&(t->keys), ts->key.key, t->key_size);
@@ -413,12 +415,13 @@ int stktable_init(struct stktable *t)
 /*
  * Configuration keywords of known table types
  */
-struct stktable_type stktable_types[STKTABLE_TYPES] =  {{ "ip", 0, 4 },
-						        { "ipv6", 0, 16 },
-						        { "integer", 0, 4 },
-						        { "string", STK_F_CUSTOM_KEYSIZE, 32 },
-						        { "binary", STK_F_CUSTOM_KEYSIZE, 32 } };
-
+struct stktable_type stktable_types[SMP_TYPES] = {
+	[SMP_T_SINT] = { "integer", 0,                     4 },
+	[SMP_T_IPV4] = { "ip",      0,                     4 },
+	[SMP_T_IPV6] = { "ipv6",    0,                    16 },
+	[SMP_T_STR]  = { "string",  STK_F_CUSTOM_KEYSIZE, 32 },
+	[SMP_T_BIN]  = { "binary",  STK_F_CUSTOM_KEYSIZE, 32 }
+};
 
 /*
  * Parse table type configuration.
@@ -427,7 +430,9 @@ struct stktable_type stktable_types[STKTABLE_TYPES] =  {{ "ip", 0, 4 },
  */
 int stktable_parse_type(char **args, int *myidx, unsigned long *type, size_t *key_size)
 {
-	for (*type = 0; *type < STKTABLE_TYPES; (*type)++) {
+	for (*type = 0; *type < SMP_TYPES; (*type)++) {
+		if (!stktable_types[*type].kw)
+			continue;
 		if (strcmp(args[*myidx], stktable_types[*type].kw) != 0)
 			continue;
 
@@ -440,7 +445,7 @@ int stktable_parse_type(char **args, int *myidx, unsigned long *type, size_t *ke
 				*key_size = atol(args[*myidx]);
 				if (!*key_size)
 					break;
-				if (*type == STKTABLE_TYPE_STRING) {
+				if (*type == SMP_T_STR) {
 					/* null terminated string needs +1 for '\0'. */
 					(*key_size)++;
 				}
@@ -452,175 +457,6 @@ int stktable_parse_type(char **args, int *myidx, unsigned long *type, size_t *ke
 	return 1;
 }
 
-/*****************************************************************/
-/*    typed sample to typed table key functions                  */
-/*****************************************************************/
-
-static void *k_int2int(struct sample *smp, union stktable_key_data *kdata, size_t *len)
-{
-	kdata->integer = smp->data.sint;
-	return (void *)&kdata->integer;
-}
-
-static void *k_ip2ip(struct sample *smp, union stktable_key_data *kdata, size_t *len)
-{
-	if (smp->type == SMP_T_IPV6) {
-		v6tov4(&kdata->ip, &smp->data.ipv6);
-		return (void *)&kdata->ip.s_addr;
-	}
-	else {
-		return (void *)&smp->data.ipv4.s_addr;
-	}
-}
-
-static void *k_ip2ipv6(struct sample *smp, union stktable_key_data *kdata, size_t *len)
-{
-	if (smp->type == SMP_T_IPV6) {
-		return (void *)&smp->data.ipv6.s6_addr;
-	}
-	else {
-		v4tov6(&kdata->ipv6, &smp->data.ipv4);
-		return (void *)&kdata->ipv6.s6_addr;
-	}
-}
-
-static void *k_ip2int(struct sample *smp, union stktable_key_data *kdata, size_t *len)
-{
-	if (smp->type == SMP_T_IPV6) {
-		if (!v6tov4(&kdata->ip, &smp->data.ipv6))
-			return NULL;
-		kdata->integer = ntohl(kdata->ip.s_addr);
-	}
-	else {
-		kdata->integer = ntohl(smp->data.ipv4.s_addr);
-	}
-	return (void *)&kdata->integer;
-}
-
-static void *k_int2ip(struct sample *smp, union stktable_key_data *kdata, size_t *len)
-{
-	kdata->ip.s_addr = htonl((unsigned int)smp->data.sint);
-	return (void *)&kdata->ip.s_addr;
-}
-
-static void *k_str2str(struct sample *smp, union stktable_key_data *kdata, size_t *len)
-{
-	*len = smp->data.str.len;
-	return (void *)smp->data.str.str;
-}
-
-static void *k_ip2str(struct sample *smp, union stktable_key_data *kdata, size_t *len)
-{
-	if (smp->type == SMP_T_IPV6) {
-		if (!inet_ntop(AF_INET6, &smp->data.ipv6, kdata->buf, *len))
-			return NULL;
-	}
-	else {
-		if (!inet_ntop(AF_INET, &smp->data.ipv4, kdata->buf, *len))
-			return NULL;
-	}
-
-	*len = strlen((const char *)kdata->buf);
-	return (void *)kdata->buf;
-}
-
-static void *k_ip2bin(struct sample *smp, union stktable_key_data *kdata, size_t *len)
-{
-	if (smp->type == SMP_T_IPV4) {
-		if (*len > 4)
-			*len = 4;
-		memcpy(kdata->buf, &smp->data.ipv4, *len);
-	}
-	else if (smp->type == SMP_T_IPV6) {
-		if (*len > 16)
-			*len = 16;
-		memcpy(kdata->buf, &smp->data.ipv6, *len);
-	}
-	else
-		*len = 0;
-	return (void *)kdata->buf;
-}
-
-static void *k_bin2str(struct sample *smp, union stktable_key_data *kdata, size_t *len)
-{
-	unsigned char c;
-	int ptr = 0;
-	int max = *len;
-	int size = 0;
-
-	while (ptr < smp->data.str.len && size <= max - 2) {
-		c = smp->data.str.str[ptr++];
-		kdata->buf[size++] = hextab[(c >> 4) & 0xF];
-		kdata->buf[size++] = hextab[c & 0xF];
-	}
-	*len = size;
-	return (void *)kdata->buf;
-}
-
-static void *k_int2str(struct sample *smp, union stktable_key_data *kdata, size_t *len)
-{
-	void *key;
-
-	key = (void *)lltoa_r(smp->data.sint, kdata->buf, *len);
-	if (!key)
-		return NULL;
-
-	*len = strlen((const char *)key);
-	return key;
-}
-
-static void *k_str2ip(struct sample *smp, union stktable_key_data *kdata, size_t *len)
-{
-	if (!buf2ip(smp->data.str.str, smp->data.str.len, &kdata->ip))
-		return NULL;
-
-	return (void *)&kdata->ip.s_addr;
-}
-
-static void *k_str2ipv6(struct sample *smp, union stktable_key_data *kdata, size_t *len)
-{
-	if (!inet_pton(AF_INET6, smp->data.str.str, &kdata->ipv6))
-		return NULL;
-
-	return (void *)&kdata->ipv6.s6_addr;
-}
-
-static void *k_str2int(struct sample *smp, union stktable_key_data *kdata, size_t *len)
-{
-	int i;
-
-	kdata->integer = 0;
-	for (i = 0; i < smp->data.str.len; i++) {
-		uint32_t val = smp->data.str.str[i] - '0';
-
-		if (val > 9)
-			break;
-
-		kdata->integer = kdata->integer * 10 + val;
-	}
-	return (void *)&kdata->integer;
-}
-
-/*****************************************************************/
-/*      typed sample to typed table key matrix:                  */
-/*         sample_to_key[from sample type][to table key type]    */
-/*         NULL pointer used for impossible sample casts         */
-/*****************************************************************/
-
-typedef void *(*sample_to_key_fct)(struct sample *smp, union stktable_key_data *kdata, size_t *len);
-static sample_to_key_fct sample_to_key[SMP_TYPES][STKTABLE_TYPES] = {
-/*       table type:   IP          IPV6         INTEGER    STRING      BINARY    */
-/* patt. type: ANY  */ { k_ip2ip,  k_ip2ipv6,   k_int2int, k_str2str,  k_str2str },
-/*             BOOL */ { NULL,     NULL,        k_int2int, k_int2str,  NULL      },
-/*             SINT */ { k_int2ip, NULL,        k_int2int, k_int2str,  NULL      },
-/*             ADDR */ { k_ip2ip,  k_ip2ipv6,   k_ip2int,  k_ip2str,   NULL      },
-/*             IPV4 */ { k_ip2ip,  k_ip2ipv6,   k_ip2int,  k_ip2str,   k_ip2bin  },
-/*             IPV6 */ { k_ip2ip,  k_ip2ipv6,   k_ip2int,  k_ip2str,   k_ip2bin  },
-/*              STR */ { k_str2ip, k_str2ipv6,  k_str2int, k_str2str,  k_str2str },
-/*              BIN */ { NULL,     NULL,        NULL,      k_bin2str,  k_str2str },
-};
-
-
 /* Prepares a stktable_key from a sample <smp> to search into table <t>.
  * Returns NULL if the sample could not be converted (eg: no matching type),
  * otherwise a pointer to the static stktable_key filled with what is needed
@@ -628,42 +464,64 @@ static sample_to_key_fct sample_to_key[SMP_TYPES][STKTABLE_TYPES] = {
  */
 struct stktable_key *smp_to_stkey(struct sample *smp, struct stktable *t)
 {
-	if (!sample_to_key[smp->type][t->type])
+	/* Convert sample. */
+	if (!sample_convert(smp, t->type))
 		return NULL;
 
-	static_table_key->key_len = t->key_size;
-	static_table_key->key = sample_to_key[smp->type][t->type](smp, &static_table_key->data, &static_table_key->key_len);
+	/* Fill static_table_key. */
+	switch (t->type) {
 
-	if (!static_table_key->key)
-		return NULL;
+	case SMP_T_IPV4:
+		static_table_key->key = &smp->data.u.ipv4;
+		static_table_key->key_len = 4;
+		break;
 
-	if (static_table_key->key_len == 0)
-		return NULL;
+	case SMP_T_IPV6:
+		static_table_key->key = &smp->data.u.ipv6;
+		static_table_key->key_len = 16;
+		break;
 
-	if ((static_table_key->key_len < t->key_size) && (t->type != STKTABLE_TYPE_STRING)) {
-		/* need padding with null */
+	case SMP_T_SINT:
+		/* The stick table require a 32bit unsigned int, "sint" is a
+		 * signed 64 it, so we can convert it inplace.
+		 */
+		*(unsigned int *)&smp->data.u.sint = (unsigned int)smp->data.u.sint;
+		static_table_key->key = &smp->data.u.sint;
+		static_table_key->key_len = 4;
+		break;
 
-		/* assume static_table_key.key_len is less than sizeof(static_table_key.data.buf)
-		cause t->key_size is necessary less than sizeof(static_table_key.data) */
-
-		if ((char *)static_table_key->key > (char *)&static_table_key->data &&
-		    (char *)static_table_key->key <  (char *)&static_table_key->data + global.tune.bufsize) {
-			/* key buffer is part of the static_table_key private data buffer, but is not aligned */
-
-			if (global.tune.bufsize - ((char *)static_table_key->key - (char *)&static_table_key->data) < t->key_size) {
-				/* if not remain enough place for padding , process a realign */
-				memmove(static_table_key->data.buf, static_table_key->key, static_table_key->key_len);
-				static_table_key->key = static_table_key->data.buf;
-			}
+	case SMP_T_STR:
+		/* Must be NULL terminated. */
+		if (smp->data.u.str.len >= smp->data.u.str.size ||
+		    smp->data.u.str.str[smp->data.u.str.len] != '\0') {
+			if (!smp_dup(smp))
+				return NULL;
+			if (smp->data.u.str.len >= smp->data.u.str.size)
+				return NULL;
+			smp->data.u.str.str[smp->data.u.str.len] = '\0';
 		}
-		else if (static_table_key->key != static_table_key->data.buf) {
-			/* key definitly not part of the static_table_key private data buffer */
+		static_table_key->key = smp->data.u.str.str;
+		static_table_key->key_len = smp->data.u.str.len;
+		break;
 
-			memcpy(static_table_key->data.buf, static_table_key->key, static_table_key->key_len);
-			static_table_key->key = static_table_key->data.buf;
+	case SMP_T_BIN:
+		if (smp->data.u.str.len < t->key_size) {
+			/* This type needs padding with 0. */
+			if (smp->data.u.str.size < t->key_size)
+				if (!smp_dup(smp))
+					return NULL;
+			if (smp->data.u.str.size < t->key_size)
+				return NULL;
+			memset(smp->data.u.str.str + smp->data.u.str.len, 0,
+			       t->key_size - smp->data.u.str.len);
+			smp->data.u.str.len = t->key_size;
 		}
+		static_table_key->key = smp->data.u.str.str;
+		static_table_key->key_len = smp->data.u.str.len;
+		break;
 
-		memset(static_table_key->key + static_table_key->key_len, 0, t->key_size - static_table_key->key_len);
+	default: /* impossible case. */
+		return NULL;
 	}
 
 	return static_table_key;
@@ -710,11 +568,13 @@ int stktable_compatible_sample(struct sample_expr *expr, unsigned long table_typ
 {
 	int out_type;
 
-	if (table_type >= STKTABLE_TYPES)
+	if (table_type >= SMP_TYPES || !stktable_types[table_type].kw)
 		return 0;
 
 	out_type = smp_expr_output_type(expr);
-	if (!sample_to_key[out_type][table_type])
+
+	/* Convert sample. */
+	if (!sample_casts[out_type][table_type])
 		return 0;
 
 	return 1;
@@ -726,6 +586,7 @@ int stktable_compatible_sample(struct sample_expr *expr, unsigned long table_typ
  */
 struct stktable_data_type stktable_data_types[STKTABLE_DATA_TYPES] = {
 	[STKTABLE_DT_SERVER_ID]     = { .name = "server_id",      .std_type = STD_T_SINT  },
+	[STKTABLE_DT_GPT0]          = { .name = "gpt0",           .std_type = STD_T_UINT  },
 	[STKTABLE_DT_GPC0]          = { .name = "gpc0",           .std_type = STD_T_UINT  },
 	[STKTABLE_DT_GPC0_RATE]     = { .name = "gpc0_rate",      .std_type = STD_T_FRQP, .arg_type = ARG_T_DELAY  },
 	[STKTABLE_DT_CONN_CNT]      = { .name = "conn_cnt",       .std_type = STD_T_UINT  },
@@ -811,8 +672,8 @@ static int sample_conv_in_table(const struct arg *arg_p, struct sample *smp, voi
 
 	ts = stktable_lookup_key(t, key);
 
-	smp->type = SMP_T_BOOL;
-	smp->data.sint = !!ts;
+	smp->data.type = SMP_T_BOOL;
+	smp->data.u.sint = !!ts;
 	smp->flags = SMP_F_VOL_TEST;
 	return 1;
 }
@@ -837,8 +698,8 @@ static int sample_conv_table_bytes_in_rate(const struct arg *arg_p, struct sampl
 		return 0;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_SINT;
-	smp->data.sint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	ts = stktable_lookup_key(t, key);
 	if (!ts) /* key not present */
@@ -848,7 +709,7 @@ static int sample_conv_table_bytes_in_rate(const struct arg *arg_p, struct sampl
 	if (!ptr)
 		return 0; /* parameter not stored */
 
-	smp->data.sint = read_freq_ctr_period(&stktable_data_cast(ptr, bytes_in_rate),
+	smp->data.u.sint = read_freq_ctr_period(&stktable_data_cast(ptr, bytes_in_rate),
 					       t->data_arg[STKTABLE_DT_BYTES_IN_RATE].u);
 	return 1;
 }
@@ -873,8 +734,8 @@ static int sample_conv_table_conn_cnt(const struct arg *arg_p, struct sample *sm
 		return 0;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_SINT;
-	smp->data.sint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	ts = stktable_lookup_key(t, key);
 	if (!ts) /* key not present */
@@ -884,7 +745,7 @@ static int sample_conv_table_conn_cnt(const struct arg *arg_p, struct sample *sm
 	if (!ptr)
 		return 0; /* parameter not stored */
 
-	smp->data.sint = stktable_data_cast(ptr, conn_cnt);
+	smp->data.u.sint = stktable_data_cast(ptr, conn_cnt);
 	return 1;
 }
 
@@ -908,8 +769,8 @@ static int sample_conv_table_conn_cur(const struct arg *arg_p, struct sample *sm
 		return 0;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_SINT;
-	smp->data.sint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	ts = stktable_lookup_key(t, key);
 	if (!ts) /* key not present */
@@ -919,7 +780,7 @@ static int sample_conv_table_conn_cur(const struct arg *arg_p, struct sample *sm
 	if (!ptr)
 		return 0; /* parameter not stored */
 
-	smp->data.sint = stktable_data_cast(ptr, conn_cur);
+	smp->data.u.sint = stktable_data_cast(ptr, conn_cur);
 	return 1;
 }
 
@@ -943,8 +804,8 @@ static int sample_conv_table_conn_rate(const struct arg *arg_p, struct sample *s
 		return 0;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_SINT;
-	smp->data.sint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	ts = stktable_lookup_key(t, key);
 	if (!ts) /* key not present */
@@ -954,7 +815,7 @@ static int sample_conv_table_conn_rate(const struct arg *arg_p, struct sample *s
 	if (!ptr)
 		return 0; /* parameter not stored */
 
-	smp->data.sint = read_freq_ctr_period(&stktable_data_cast(ptr, conn_rate),
+	smp->data.u.sint = read_freq_ctr_period(&stktable_data_cast(ptr, conn_rate),
 					       t->data_arg[STKTABLE_DT_CONN_RATE].u);
 	return 1;
 }
@@ -979,8 +840,8 @@ static int sample_conv_table_bytes_out_rate(const struct arg *arg_p, struct samp
 		return 0;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_SINT;
-	smp->data.sint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	ts = stktable_lookup_key(t, key);
 	if (!ts) /* key not present */
@@ -990,8 +851,43 @@ static int sample_conv_table_bytes_out_rate(const struct arg *arg_p, struct samp
 	if (!ptr)
 		return 0; /* parameter not stored */
 
-	smp->data.sint = read_freq_ctr_period(&stktable_data_cast(ptr, bytes_out_rate),
+	smp->data.u.sint = read_freq_ctr_period(&stktable_data_cast(ptr, bytes_out_rate),
 					       t->data_arg[STKTABLE_DT_BYTES_OUT_RATE].u);
+	return 1;
+}
+
+/* Casts sample <smp> to the type of the table specified in arg(0), and looks
+ * it up into this table. Returns the value of the GPT0 tag for the key
+ * if the key is present in the table, otherwise false, so that comparisons can
+ * be easily performed. If the inspected parameter is not stored in the table,
+ * <not found> is returned.
+ */
+static int sample_conv_table_gpt0(const struct arg *arg_p, struct sample *smp, void *private)
+{
+	struct stktable *t;
+	struct stktable_key *key;
+	struct stksess *ts;
+	void *ptr;
+
+	t = &arg_p[0].data.prx->table;
+
+	key = smp_to_stkey(smp, t);
+	if (!key)
+		return 0;
+
+	smp->flags = SMP_F_VOL_TEST;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
+
+	ts = stktable_lookup_key(t, key);
+	if (!ts) /* key not present */
+		return 1;
+
+	ptr = stktable_data_ptr(t, ts, STKTABLE_DT_GPT0);
+	if (!ptr)
+		return 0; /* parameter not stored */
+
+	smp->data.u.sint = stktable_data_cast(ptr, gpt0);
 	return 1;
 }
 
@@ -1015,8 +911,8 @@ static int sample_conv_table_gpc0(const struct arg *arg_p, struct sample *smp, v
 		return 0;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_SINT;
-	smp->data.sint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	ts = stktable_lookup_key(t, key);
 	if (!ts) /* key not present */
@@ -1026,7 +922,7 @@ static int sample_conv_table_gpc0(const struct arg *arg_p, struct sample *smp, v
 	if (!ptr)
 		return 0; /* parameter not stored */
 
-	smp->data.sint = stktable_data_cast(ptr, gpc0);
+	smp->data.u.sint = stktable_data_cast(ptr, gpc0);
 	return 1;
 }
 
@@ -1050,8 +946,8 @@ static int sample_conv_table_gpc0_rate(const struct arg *arg_p, struct sample *s
 		return 0;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_SINT;
-	smp->data.sint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	ts = stktable_lookup_key(t, key);
 	if (!ts) /* key not present */
@@ -1061,7 +957,7 @@ static int sample_conv_table_gpc0_rate(const struct arg *arg_p, struct sample *s
 	if (!ptr)
 		return 0; /* parameter not stored */
 
-	smp->data.sint = read_freq_ctr_period(&stktable_data_cast(ptr, gpc0_rate),
+	smp->data.u.sint = read_freq_ctr_period(&stktable_data_cast(ptr, gpc0_rate),
 	                                      t->data_arg[STKTABLE_DT_GPC0_RATE].u);
 	return 1;
 }
@@ -1086,8 +982,8 @@ static int sample_conv_table_http_err_cnt(const struct arg *arg_p, struct sample
 		return 0;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_SINT;
-	smp->data.sint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	ts = stktable_lookup_key(t, key);
 	if (!ts) /* key not present */
@@ -1097,7 +993,7 @@ static int sample_conv_table_http_err_cnt(const struct arg *arg_p, struct sample
 	if (!ptr)
 		return 0; /* parameter not stored */
 
-	smp->data.sint = stktable_data_cast(ptr, http_err_cnt);
+	smp->data.u.sint = stktable_data_cast(ptr, http_err_cnt);
 	return 1;
 }
 
@@ -1121,8 +1017,8 @@ static int sample_conv_table_http_err_rate(const struct arg *arg_p, struct sampl
 		return 0;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_SINT;
-	smp->data.sint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	ts = stktable_lookup_key(t, key);
 	if (!ts) /* key not present */
@@ -1132,7 +1028,7 @@ static int sample_conv_table_http_err_rate(const struct arg *arg_p, struct sampl
 	if (!ptr)
 		return 0; /* parameter not stored */
 
-	smp->data.sint = read_freq_ctr_period(&stktable_data_cast(ptr, http_err_rate),
+	smp->data.u.sint = read_freq_ctr_period(&stktable_data_cast(ptr, http_err_rate),
 					       t->data_arg[STKTABLE_DT_HTTP_ERR_RATE].u);
 	return 1;
 }
@@ -1157,8 +1053,8 @@ static int sample_conv_table_http_req_cnt(const struct arg *arg_p, struct sample
 		return 0;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_SINT;
-	smp->data.sint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	ts = stktable_lookup_key(t, key);
 	if (!ts) /* key not present */
@@ -1168,7 +1064,7 @@ static int sample_conv_table_http_req_cnt(const struct arg *arg_p, struct sample
 	if (!ptr)
 		return 0; /* parameter not stored */
 
-	smp->data.sint = stktable_data_cast(ptr, http_req_cnt);
+	smp->data.u.sint = stktable_data_cast(ptr, http_req_cnt);
 	return 1;
 }
 
@@ -1192,8 +1088,8 @@ static int sample_conv_table_http_req_rate(const struct arg *arg_p, struct sampl
 		return 0;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_SINT;
-	smp->data.sint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	ts = stktable_lookup_key(t, key);
 	if (!ts) /* key not present */
@@ -1203,7 +1099,7 @@ static int sample_conv_table_http_req_rate(const struct arg *arg_p, struct sampl
 	if (!ptr)
 		return 0; /* parameter not stored */
 
-	smp->data.sint = read_freq_ctr_period(&stktable_data_cast(ptr, http_req_rate),
+	smp->data.u.sint = read_freq_ctr_period(&stktable_data_cast(ptr, http_req_rate),
 					       t->data_arg[STKTABLE_DT_HTTP_REQ_RATE].u);
 	return 1;
 }
@@ -1228,8 +1124,8 @@ static int sample_conv_table_kbytes_in(const struct arg *arg_p, struct sample *s
 		return 0;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_SINT;
-	smp->data.sint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	ts = stktable_lookup_key(t, key);
 	if (!ts) /* key not present */
@@ -1239,7 +1135,7 @@ static int sample_conv_table_kbytes_in(const struct arg *arg_p, struct sample *s
 	if (!ptr)
 		return 0; /* parameter not stored */
 
-	smp->data.sint = stktable_data_cast(ptr, bytes_in_cnt) >> 10;
+	smp->data.u.sint = stktable_data_cast(ptr, bytes_in_cnt) >> 10;
 	return 1;
 }
 
@@ -1263,8 +1159,8 @@ static int sample_conv_table_kbytes_out(const struct arg *arg_p, struct sample *
 		return 0;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_SINT;
-	smp->data.sint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	ts = stktable_lookup_key(t, key);
 	if (!ts) /* key not present */
@@ -1274,7 +1170,7 @@ static int sample_conv_table_kbytes_out(const struct arg *arg_p, struct sample *
 	if (!ptr)
 		return 0; /* parameter not stored */
 
-	smp->data.sint = stktable_data_cast(ptr, bytes_out_cnt) >> 10;
+	smp->data.u.sint = stktable_data_cast(ptr, bytes_out_cnt) >> 10;
 	return 1;
 }
 
@@ -1298,8 +1194,8 @@ static int sample_conv_table_server_id(const struct arg *arg_p, struct sample *s
 		return 0;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_SINT;
-	smp->data.sint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	ts = stktable_lookup_key(t, key);
 	if (!ts) /* key not present */
@@ -1309,7 +1205,7 @@ static int sample_conv_table_server_id(const struct arg *arg_p, struct sample *s
 	if (!ptr)
 		return 0; /* parameter not stored */
 
-	smp->data.sint = stktable_data_cast(ptr, server_id);
+	smp->data.u.sint = stktable_data_cast(ptr, server_id);
 	return 1;
 }
 
@@ -1333,8 +1229,8 @@ static int sample_conv_table_sess_cnt(const struct arg *arg_p, struct sample *sm
 		return 0;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_SINT;
-	smp->data.sint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	ts = stktable_lookup_key(t, key);
 	if (!ts) /* key not present */
@@ -1344,7 +1240,7 @@ static int sample_conv_table_sess_cnt(const struct arg *arg_p, struct sample *sm
 	if (!ptr)
 		return 0; /* parameter not stored */
 
-	smp->data.sint = stktable_data_cast(ptr, sess_cnt);
+	smp->data.u.sint = stktable_data_cast(ptr, sess_cnt);
 	return 1;
 }
 
@@ -1368,8 +1264,8 @@ static int sample_conv_table_sess_rate(const struct arg *arg_p, struct sample *s
 		return 0;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_SINT;
-	smp->data.sint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	ts = stktable_lookup_key(t, key);
 	if (!ts) /* key not present */
@@ -1379,7 +1275,7 @@ static int sample_conv_table_sess_rate(const struct arg *arg_p, struct sample *s
 	if (!ptr)
 		return 0; /* parameter not stored */
 
-	smp->data.sint = read_freq_ctr_period(&stktable_data_cast(ptr, sess_rate),
+	smp->data.u.sint = read_freq_ctr_period(&stktable_data_cast(ptr, sess_rate),
 					       t->data_arg[STKTABLE_DT_SESS_RATE].u);
 	return 1;
 }
@@ -1403,16 +1299,192 @@ static int sample_conv_table_trackers(const struct arg *arg_p, struct sample *sm
 		return 0;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_SINT;
-	smp->data.sint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	ts = stktable_lookup_key(t, key);
 	if (ts)
-		smp->data.sint = ts->ref_cnt;
+		smp->data.u.sint = ts->ref_cnt;
 
 	return 1;
 }
 
+/* Always returns 1. */
+static enum act_return action_inc_gpc0(struct act_rule *rule, struct proxy *px,
+                                       struct session *sess, struct stream *s)
+{
+	void *ptr;
+	struct stksess *ts;
+	struct stkctr *stkctr;
+
+	/* Extract the stksess, return OK if no stksess available. */
+	if (s)
+		stkctr = &s->stkctr[rule->arg.gpc.sc];
+	else
+		stkctr = &sess->stkctr[rule->arg.gpc.sc];
+	ts = stkctr_entry(stkctr);
+	if (!ts)
+		return ACT_RET_CONT;
+
+	/* Store the sample in the required sc, and ignore errors. */
+	ptr = stktable_data_ptr(stkctr->table, ts, STKTABLE_DT_GPC0);
+	if (!ptr)
+		return ACT_RET_CONT;
+
+	stktable_data_cast(ptr, gpc0)++;
+	return ACT_RET_CONT;
+}
+
+/* This function is a common parser for using variables. It understands
+ * the formats:
+ *
+ *   sc-inc-gpc0(<stick-table ID>)
+ *
+ * It returns 0 if fails and <err> is filled with an error message. Otherwise,
+ * it returns 1 and the variable <expr> is filled with the pointer to the
+ * expression to execute.
+ */
+static enum act_parse_ret parse_inc_gpc0(const char **args, int *arg, struct proxy *px,
+                                         struct act_rule *rule, char **err)
+{
+	const char *cmd_name = args[*arg-1];
+	char *error;
+
+	cmd_name += strlen("sc-inc-gpc0");
+	if (*cmd_name == '\0') {
+		/* default stick table id. */
+		rule->arg.gpc.sc = 0;
+	} else {
+		/* parse the stick table id. */
+		if (*cmd_name != '(') {
+			memprintf(err, "invalid stick table track ID. Expects %s(<Track ID>)", args[*arg-1]);
+			return ACT_RET_PRS_ERR;
+		}
+		cmd_name++; /* jump the '(' */
+		rule->arg.gpc.sc = strtol(cmd_name, &error, 10); /* Convert stick table id. */
+		if (*error != ')') {
+			memprintf(err, "invalid stick table track ID. Expects %s(<Track ID>)", args[*arg-1]);
+			return ACT_RET_PRS_ERR;
+		}
+
+		if (rule->arg.gpc.sc >= ACT_ACTION_TRK_SCMAX) {
+			memprintf(err, "invalid stick table track ID. The max allowed ID is %d",
+			          ACT_ACTION_TRK_SCMAX-1);
+			return ACT_RET_PRS_ERR;
+		}
+	}
+	rule->action = ACT_ACTION_CONT;
+	rule->action_ptr = action_inc_gpc0;
+	return ACT_RET_PRS_OK;
+}
+
+/* Always returns 1. */
+static enum act_return action_set_gpt0(struct act_rule *rule, struct proxy *px,
+                                       struct session *sess, struct stream *s)
+{
+	void *ptr;
+	struct stksess *ts;
+	struct stkctr *stkctr;
+
+	/* Extract the stksess, return OK if no stksess available. */
+	if (s)
+		stkctr = &s->stkctr[rule->arg.gpt.sc];
+	else
+		stkctr = &sess->stkctr[rule->arg.gpt.sc];
+	ts = stkctr_entry(stkctr);
+	if (!ts)
+		return ACT_RET_CONT;
+
+	/* Store the sample in the required sc, and ignore errors. */
+	ptr = stktable_data_ptr(stkctr->table, ts, STKTABLE_DT_GPT0);
+	if (ptr)
+		stktable_data_cast(ptr, gpt0) = rule->arg.gpt.value;
+	return ACT_RET_CONT;
+}
+
+/* This function is a common parser for using variables. It understands
+ * the format:
+ *
+ *   set-gpt0(<stick-table ID>) <expression>
+ *
+ * It returns 0 if fails and <err> is filled with an error message. Otherwise,
+ * it returns 1 and the variable <expr> is filled with the pointer to the
+ * expression to execute.
+ */
+static enum act_parse_ret parse_set_gpt0(const char **args, int *arg, struct proxy *px,
+                                         struct act_rule *rule, char **err)
+
+
+{
+	const char *cmd_name = args[*arg-1];
+	char *error;
+
+	cmd_name += strlen("sc-set-gpt0");
+	if (*cmd_name == '\0') {
+		/* default stick table id. */
+		rule->arg.gpt.sc = 0;
+	} else {
+		/* parse the stick table id. */
+		if (*cmd_name != '(') {
+			memprintf(err, "invalid stick table track ID '%s'. Expects sc-set-gpt0(<Track ID>)", args[*arg-1]);
+			return ACT_RET_PRS_ERR;
+		}
+		cmd_name++; /* jump the '(' */
+		rule->arg.gpt.sc = strtol(cmd_name, &error, 10); /* Convert stick table id. */
+		if (*error != ')') {
+			memprintf(err, "invalid stick table track ID '%s'. Expects sc-set-gpt0(<Track ID>)", args[*arg-1]);
+			return ACT_RET_PRS_ERR;
+		}
+
+		if (rule->arg.gpt.sc >= ACT_ACTION_TRK_SCMAX) {
+			memprintf(err, "invalid stick table track ID '%s'. The max allowed ID is %d",
+			          args[*arg-1], ACT_ACTION_TRK_SCMAX-1);
+			return ACT_RET_PRS_ERR;
+		}
+	}
+
+	rule->arg.gpt.value = strtol(args[*arg], &error, 10);
+	if (*error != '\0') {
+		memprintf(err, "invalid integer value '%s'", args[*arg]);
+		return ACT_RET_PRS_ERR;
+	}
+	(*arg)++;
+
+	rule->action = ACT_ACTION_CONT;
+	rule->action_ptr = action_set_gpt0;
+
+	return ACT_RET_PRS_OK;
+}
+
+static struct action_kw_list tcp_conn_kws = { { }, {
+	{ "sc-inc-gpc0", parse_inc_gpc0, 1 },
+	{ "sc-set-gpt0", parse_set_gpt0, 1 },
+	{ /* END */ }
+}};
+
+static struct action_kw_list tcp_req_kws = { { }, {
+	{ "sc-inc-gpc0", parse_inc_gpc0, 1 },
+	{ "sc-set-gpt0", parse_set_gpt0, 1 },
+	{ /* END */ }
+}};
+
+static struct action_kw_list tcp_res_kws = { { }, {
+	{ "sc-inc-gpc0", parse_inc_gpc0, 1 },
+	{ "sc-set-gpt0", parse_set_gpt0, 1 },
+	{ /* END */ }
+}};
+
+static struct action_kw_list http_req_kws = { { }, {
+	{ "sc-inc-gpc0", parse_inc_gpc0, 1 },
+	{ "sc-set-gpt0", parse_set_gpt0, 1 },
+	{ /* END */ }
+}};
+
+static struct action_kw_list http_res_kws = { { }, {
+	{ "sc-inc-gpc0", parse_inc_gpc0, 1 },
+	{ "sc-set-gpt0", parse_set_gpt0, 1 },
+	{ /* END */ }
+}};
 
 /* Note: must not be declared <const> as its list will be overwritten */
 static struct sample_conv_kw_list sample_conv_kws = {ILH, {
@@ -1422,6 +1494,7 @@ static struct sample_conv_kw_list sample_conv_kws = {ILH, {
 	{ "table_conn_cnt",       sample_conv_table_conn_cnt,       ARG1(1,TAB),  NULL, SMP_T_STR,  SMP_T_SINT  },
 	{ "table_conn_cur",       sample_conv_table_conn_cur,       ARG1(1,TAB),  NULL, SMP_T_STR,  SMP_T_SINT  },
 	{ "table_conn_rate",      sample_conv_table_conn_rate,      ARG1(1,TAB),  NULL, SMP_T_STR,  SMP_T_SINT  },
+	{ "table_gpt0",           sample_conv_table_gpt0,           ARG1(1,TAB),  NULL, SMP_T_STR,  SMP_T_SINT  },
 	{ "table_gpc0",           sample_conv_table_gpc0,           ARG1(1,TAB),  NULL, SMP_T_STR,  SMP_T_SINT  },
 	{ "table_gpc0_rate",      sample_conv_table_gpc0_rate,      ARG1(1,TAB),  NULL, SMP_T_STR,  SMP_T_SINT  },
 	{ "table_http_err_cnt",   sample_conv_table_http_err_cnt,   ARG1(1,TAB),  NULL, SMP_T_STR,  SMP_T_SINT  },
@@ -1440,6 +1513,13 @@ static struct sample_conv_kw_list sample_conv_kws = {ILH, {
 __attribute__((constructor))
 static void __stick_table_init(void)
 {
+	/* register som action keywords. */
+	tcp_req_conn_keywords_register(&tcp_conn_kws);
+	tcp_req_cont_keywords_register(&tcp_req_kws);
+	tcp_res_cont_keywords_register(&tcp_res_kws);
+	http_req_keywords_register(&http_req_kws);
+	http_res_keywords_register(&http_res_kws);
+
 	/* register sample fetch and format conversion keywords */
 	sample_register_convs(&sample_conv_kws);
 }

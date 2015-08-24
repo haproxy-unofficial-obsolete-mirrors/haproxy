@@ -1456,7 +1456,7 @@ It is possible to send email alerts when the state of servers changes.
 If configured email alerts are sent to each mailer that is configured
 in a mailers section. Email is sent to mailers using SMTP.
 
-mailer <mailersect>
+mailers <mailersect>
   Creates a new mailer list with the name <mailersect>. It is an
   independent section which is referenced by one or more proxies.
 
@@ -1582,7 +1582,7 @@ specified in a previous "defaults" section.
  keyword                              defaults   frontend   listen    backend
 ------------------------------------+----------+----------+---------+---------
 acl                                       -          X         X         X
-appsession                                -          -         X         X
+appsession                                -          -         -         -
 backlog                                   X          X         X         -
 balance                                   X          -         X         X
 bind                                      -          X         X         -
@@ -1830,24 +1830,9 @@ appsession <cookie> len <length> timeout <holdtime>
                  In this mode, the parser will look for the appsession in the
                  query string.
 
-  When an application cookie is defined in a backend, HAProxy will check when
-  the server sets such a cookie, and will store its value in a table, and
-  associate it with the server's identifier. Up to <length> characters from
-  the value will be retained. On each connection, haproxy will look for this
-  cookie both in the "Cookie:" headers, and as a URL parameter (depending on
-  the mode used). If a known value is found, the client will be directed to the
-  server associated with this value. Otherwise, the load balancing algorithm is
-  applied. Cookies are automatically removed from memory when they have been
-  unused for a duration longer than <holdtime>.
-
-  The definition of an application cookie is limited to one per backend.
-
-  Note : Consider not using this feature in multi-process mode (nbproc > 1)
-         unless you know what you do : memory is not shared between the
-         processes, which can result in random behaviours.
-
-  Example :
-        appsession JSESSIONID len 52 timeout 3h
+  As of version 1.6, appsessions was removed. It is more flexible and more
+  convenient to use stick-tables instead, and stick-tables support multi-master
+  replication and data conservation across reloads, which appsessions did not.
 
   See also : "cookie", "capture cookie", "balance", "stick", "stick-table",
              "ignore-persist", "nbproc" and "bind-process".
@@ -2091,8 +2076,7 @@ balance url_param <param> [check_post]
       might be a URL parameter list. This is probably not a concern with SGML
       type message bodies.
 
-  See also : "dispatch", "cookie", "appsession", "transparent", "hash-type" and
-             "http_proxy".
+  See also : "dispatch", "cookie", "transparent", "hash-type" and "http_proxy".
 
 
 bind [<address>]:<port_range> [, ...] [param*]
@@ -2708,8 +2692,7 @@ cookie <name> [ rewrite | insert | prefix ] [ indirect ] [ nocache ]
         cookie SRV insert postonly indirect
         cookie SRV insert indirect nocache maxidle 30m maxlife 8h
 
-  See also : "appsession", "balance source", "capture cookie", "server"
-             and "ignore-persist".
+  See also : "balance source", "capture cookie", "server" and "ignore-persist".
 
 
 declare capture [ request | response ] len <length>
@@ -3382,6 +3365,8 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
               set-map(<file name>) <key fmt> <value fmt> |
               set-var(<var name>) <expr> |
               { track-sc0 | track-sc1 | track-sc2 } <key> [table <table>] |
+              sc-inc-gpc0(<sc-id>) |
+              sc-set-gpt0(<sc-id>) <int> |
               lua <function name>
              }
              [ { if | unless } <condition> ]
@@ -3645,6 +3630,17 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
       advantage over just checking the keys, because only one table lookup is
       performed for all ACL checks that make use of it.
 
+    - sc-set-gpt0(<sc-id>) <int> :
+      This action sets the GPT0 tag according to the sticky counter designated
+      by <sc-id> and the value of <int>. The expected result is a boolean. If
+      an error occurs, this action silently fails and the actions evaluation
+      continues.
+
+    - sc-inc-gpc0(<sc-id>):
+      This action increments the GPC0 counter according with the sticky counter
+      designated by <sc-id>. If an error occurs, this action silently fails and
+      the actions evaluation continues.
+
     - "lua" is used to run a Lua function if the action is executed. The single
       parameter is the name of the function to run. The prototype of the
       function is documented in the API documentation.
@@ -3755,6 +3751,8 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
                 del-map(<file name>) <key fmt> |
                 set-map(<file name>) <key fmt> <value fmt> |
                 set-var(<var-name>) <expr> |
+                sc-inc-gpc0(<sc-id>) |
+                sc-set-gpt0(<sc-id>) <int> |
                 lua <function name>
               }
               [ { if | unless } <condition> ]
@@ -3953,6 +3951,17 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
 
          http-response set-var(sess.last_redir) res.hdr(location)
 
+    - sc-set-gpt0(<sc-id>) <int> :
+      This action sets the GPT0 tag according to the sticky counter designated
+      by <sc-id> and the value of <int>. The expected result is a boolean. If
+      an error occurs, this action silently fails and the actions evaluation
+      continues.
+
+    - sc-inc-gpc0(<sc-id>):
+      This action increments the GPC0 counter according with the sticky counter
+      designated by <sc-id>. If an error occurs, this action silently fails and
+      the actions evaluation continues.
+
   There is no limit to the number of http-response statements per instance.
 
   It is important to know that http-response rules are processed very early in
@@ -4103,9 +4112,6 @@ ignore-persist { if | unless } <condition>
   This is sometimes useful to load balance requests for static files, which
   often don't require persistence. This can also be used to fully disable
   persistence for a specific User-Agent (for example, some web crawler bots).
-
-  Combined with "appsession", it can also help reduce HAProxy memory usage, as
-  the appsession table won't grow if persistence is ignored.
 
   The persistence is ignored when an "if" condition is met, or unless an
   "unless" condition is met.
@@ -5471,8 +5477,8 @@ option mysql-check [ user <username> [ post-41 ] ]
   various purposes, including IP privilege matching and connection logging.
   When possible, it is often wise to masquerade the client's IP address when
   connecting to the server using the "usesrc" argument of the "source" keyword,
-  which requires the cttproxy feature to be compiled in, and the MySQL server
-  to route the client via the machine hosting haproxy.
+  which requires the transparent proxy feature to be compiled in, and the MySQL
+  server to route the client via the machine hosting haproxy.
 
   See also: "option httpchk"
 
@@ -5719,7 +5725,7 @@ option smtpchk <hello> <domain>
   various purposes, including spam filtering, anti-spoofing and logging. When
   possible, it is often wise to masquerade the client's IP address when
   connecting to the server using the "usesrc" argument of the "source" keyword,
-  which requires the cttproxy feature to be compiled in.
+  which requires the transparent proxy feature to be compiled in.
 
   Example :
         option smtpchk HELO mydomain.org
@@ -6966,13 +6972,6 @@ source <addr>[:<port>] [interface <name>]
       However, since the upstream and downstream ports are different, local IP
       connection tracking on the machine will not be upset by the reuse of the
       same session.
-
-  Note that depending on the transparent proxy technology used, it may be
-  required to force the source address. In fact, cttproxy version 2 requires an
-  IP address in <addr> above, and does not support setting of "0.0.0.0" as the
-  IP address because it creates NAT entries which much match the exact outgoing
-  address. Tproxy version 4 and some other kernel patches which work in pure
-  forwarding mode generally will not have this limitation.
 
   This option sets the default source for all servers in the backend. It may
   also be specified in a "defaults" section. Finer source address specification
@@ -8318,6 +8317,17 @@ tcp-request connection <action> [{if | unless} <condition>]
         advantage over just checking the keys, because only one table lookup is
         performed for all ACL checks that make use of it.
 
+    - sc-inc-gpc0(<sc-id>):
+        The "sc-inc-gpc0" increments the GPC0 counter according to the sticky
+        counter designated by <sc-id>. If an error occurs, this action silently
+        fails and the actions evaluation continues.
+
+    - sc-set-gpt0(<sc-id>) <int>:
+        This action sets the GPT0 tag according to the sticky counter designated
+        by <sc-id> and the value of <int>. The expected result is a boolean. If
+        an error occurs, this action silently fails and the actions evaluation
+        continues.
+
   Note that the "if/unless" condition is optional. If no condition is set on
   the action, it is simply performed unconditionally. That can be useful for
   "track-sc*" actions as well as for changing the default action to a reject.
@@ -8354,8 +8364,8 @@ tcp-request content <action> [{if | unless} <condition>]
   Arguments :
     <action>    defines the action to perform if the condition applies. Valid
                 actions include : "accept", "reject", "track-sc0", "track-sc1",
-                "track-sc2", "capture" and "lua". See "tcp-request connection"
-                above for their signification.
+                "track-sc2", "sc-inc-gpc0", "sc-set-gpt0", "capture" and "lua".
+                See "tcp-request connection" above for their signification.
 
     <condition> is a standard layer 4-7 ACL-based condition (see section 7).
 
@@ -8383,11 +8393,13 @@ tcp-request content <action> [{if | unless} <condition>]
   contents. There is no specific limit to the number of rules which may be
   inserted.
 
-  Four types of actions are supported :
+  Several types of actions are supported :
     - accept : the request is accepted
     - reject : the request is rejected and the connection is closed
     - capture : the specified sample expression is captured
     - { track-sc0 | track-sc1 | track-sc2 } <key> [table <table>]
+    - sc-inc-gpc0(<sc-id>)
+    - set-gpt0(<sc-id>) <int>
     - lua <function>
     - set-var(<var-name>) <expr>
 
@@ -8555,7 +8567,8 @@ tcp-response content <action> [{if | unless} <condition>]
                                  no    |    no    |   yes  |   yes
   Arguments :
     <action>    defines the action to perform if the condition applies. Valid
-                actions include : "accept", "close", "reject", "lua".
+                actions include : "accept", "close", "reject", "lua",
+                "sc-inc-gpc0" and "sc-set-gpt0".
 
     <condition> is a standard layer 4-7 ACL-based condition (see section 7).
 
@@ -8572,7 +8585,7 @@ tcp-response content <action> [{if | unless} <condition>]
   contents. There is no specific limit to the number of rules which may be
   inserted.
 
-  Two types of actions are supported :
+  Several types of actions are supported :
     - accept :
         accepts the response if the condition is true (when used with "if")
         or false (when used with "unless"). The first such rule executed ends
@@ -8598,6 +8611,17 @@ tcp-response content <action> [{if | unless} <condition>]
 
     - set-var(<var-name>) <expr>
         Sets a variable.
+
+    - sc-inc-gpc0(<sc-id>):
+        This action increments the GPC0 counter according to the sticky
+        counter designated by <sc-id>. If an error occurs, this action fails
+        silently and the actions evaluation continues.
+
+    - sc-set-gpt0(<sc-id>) <int> :
+        This action sets the GPT0 tag according to the sticky counter designated
+        by <sc-id> and the value of <int>. The expected result is a boolean. If
+        an error occurs, this action silently fails and the actions evaluation
+        continues.
 
   Note that the "if/unless" condition is optional. If no condition is set on
   the action, it is simply performed unconditionally. That can be useful for
@@ -11565,6 +11589,13 @@ table_conn_rate(<table>)
   rate associated with the input sample in the designated table. See also the
   sc_conn_rate sample fetch keyword.
 
+table_gpt0(<table>)
+  Uses the string representation of the input sample to perform a look up in
+  the specified table. If the key is not found in the table, boolean value zero
+  is returned. Otherwise the converter returns the current value of the first
+  general purpose tag associated with the input sample in the designated table.
+  See also the sc_get_gpt0 sample fetch keyword.
+
 table_gpc0(<table>)
   Uses the string representation of the input sample to perform a look up in
   the specified table. If the key is not found in the table, integer value zero
@@ -12089,6 +12120,13 @@ sc2_get_gpc0([<table>]) : integer
   Returns the value of the first General Purpose Counter associated to the
   currently tracked counters. See also src_get_gpc0 and sc/sc0/sc1/sc2_inc_gpc0.
 
+sc_get_gpt0(<ctr>[,<table>]) : integer
+sc0_get_gpt0([<table>]) : integer
+sc1_get_gpt0([<table>]) : integer
+sc2_get_gpt0([<table>]) : integer
+  Returns the value of the first General Purpose Tag associated to the
+  currently tracked counters. See also src_get_gpt0.
+
 sc_gpc0_rate(<ctr>[,<table>]) : integer
 sc0_gpc0_rate([<table>]) : integer
 sc1_gpc0_rate([<table>]) : integer
@@ -12276,6 +12314,12 @@ src_get_gpc0([<table>]) : integer
   incoming connection's source address in the current proxy's stick-table or in
   the designated stick-table. If the address is not found, zero is returned.
   See also sc/sc0/sc1/sc2_get_gpc0 and src_inc_gpc0.
+
+src_get_gpt0([<table>]) : integer
+  Returns the value of the first General Purpose Tag associated to the
+  incoming connection's source address in the current proxy's stick-table or in
+  the designated stick-table. If the address is not found, zero is returned.
+  See also sc/sc0/sc1/sc2_get_gpt0.
 
 src_gpc0_rate([<table>]) : integer
   Returns the average increment rate of the first General Purpose Counter
@@ -13062,12 +13106,11 @@ cookie([<name>]) : string (deprecated)
   header line from the request, or a "Set-Cookie" header from the response, and
   returns its value as a string. A typical use is to get multiple clients
   sharing a same profile use the same server. This can be similar to what
-  "appsession" does with the "request-learn" statement, but with support for
+  "appsession" did with the "request-learn" statement, but with support for
   multi-peer synchronization and state keeping across restarts. If no name is
   specified, the first cookie value is returned. This fetch should not be used
   anymore and should be replaced by req.cook() or res.cook() instead as it
   ambiguously uses the direction based on the context where it is used.
-  See also : "appsession".
 
 hdr([<name>[,<occ>]]) : string
   This is equivalent to req.hdr() when used on requests, and to res.hdr() when
@@ -13346,13 +13389,11 @@ resp_ver : string (deprecated)
 set-cookie([<name>]) : string (deprecated)
   This extracts the last occurrence of the cookie name <name> on a "Set-Cookie"
   header line from the response and uses the corresponding value to match. This
-  can be comparable to what "appsession" does with default options, but with
+  can be comparable to what "appsession" did with default options, but with
   support for multi-peer synchronization and state keeping across restarts.
 
   This fetch function is deprecated and has been superseded by the "res.cook"
   fetch. This keyword will disappear soon.
-
-  See also : "appsession"
 
 status : integer
   Returns an integer containing the HTTP status code in the HTTP response, for
@@ -14072,6 +14113,7 @@ Please refer to the table below for currently defined variables :
   |   | %H   | hostname                                      | string      |
   | H | %HM  | HTTP method (ex: POST)                        | string      |
   | H | %HP  | HTTP request URI without query string (path)  | string      |
+  | H | %HQ  | HTTP request URI query string (ex: ?bar=baz)  | string      |
   | H | %HU  | HTTP request URI (ex: /foo?bar=baz)           | string      |
   | H | %HV  | HTTP version (ex: HTTP/1.0)                   | string      |
   |   | %ID  | unique-id                                     | string      |
@@ -14103,7 +14145,7 @@ Please refer to the table below for currently defined variables :
   |   | %hrl | captured_request_headers CLF style            | string list |
   |   | %hs  | captured_response_headers default style       | string      |
   |   | %hsl | captured_response_headers CLF style           | string list |
-  |   | %ms  | accept date milliseconds                      | numeric     |
+  |   | %ms  | accept date milliseconds (left-padded with 0) | numeric     |
   |   | %pid | PID                                           | numeric     |
   | H | %r   | http_request                                  | string      |
   |   | %rc  | retries                                       | numeric     |

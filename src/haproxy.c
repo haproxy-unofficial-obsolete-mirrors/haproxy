@@ -56,7 +56,6 @@
 #include <assert.h>
 #endif
 
-#include <common/appsession.h>
 #include <common/base64.h>
 #include <common/cfgparse.h>
 #include <common/chunk.h>
@@ -75,7 +74,6 @@
 
 #include <types/capture.h>
 #include <types/global.h>
-#include <types/proto_tcp.h>
 #include <types/acl.h>
 #include <types/peers.h>
 
@@ -103,10 +101,6 @@
 #include <proto/signal.h>
 #include <proto/task.h>
 #include <proto/dns.h>
-
-#ifdef CONFIG_HAP_CTTPROXY
-#include <proto/cttproxy.h>
-#endif
 
 #ifdef USE_OPENSSL
 #include <proto/ssl_sock.h>
@@ -195,8 +189,8 @@ struct global global = {
 		.data_file_path = NULL,
 #ifdef FIFTYONEDEGREES_H_PATTERN_INCLUDED
 		.data_set = { },
-		.cache_size = 0,
 #endif
+		.cache_size = 0,
 	},
 #endif
 	/* others NULL OK */
@@ -370,11 +364,8 @@ void display_build_opts()
 	printf("Built without Lua support\n");
 #endif
 
-#if defined(CONFIG_HAP_TRANSPARENT) || defined(CONFIG_HAP_CTTPROXY)
+#if defined(CONFIG_HAP_TRANSPARENT)
 	printf("Built with transparent proxy support using:"
-#if defined(CONFIG_HAP_CTTPROXY)
-	       " CTTPROXY"
-#endif
 #if defined(IP_TRANSPARENT)
 	       " IP_TRANSPARENT"
 #endif
@@ -745,7 +736,6 @@ void init(int argc, char **argv)
 		exit(1);
 	}
 
-	have_appsession = 0;
 	global.maxsock = 10; /* reserve 10 fds ; will be incremented by socket eaters */
 
 	init_default_instance();
@@ -824,9 +814,6 @@ void init(int argc, char **argv)
 #ifdef USE_51DEGREES
 	init_51degrees();
 #endif
-
-	if (have_appsession)
-		appsession_init();
 
 	if (start_checks() < 0)
 		exit(1);
@@ -1057,7 +1044,7 @@ void init(int argc, char **argv)
 
 	swap_buffer = (char *)calloc(1, global.tune.bufsize);
 	get_http_auth_buff = (char *)calloc(1, global.tune.bufsize);
-	static_table_key = calloc(1, sizeof(*static_table_key) + global.tune.bufsize);
+	static_table_key = calloc(1, sizeof(*static_table_key));
 
 	fdinfo = (struct fdinfo *)calloc(1,
 				       sizeof(struct fdinfo) * (global.maxsock));
@@ -1135,7 +1122,7 @@ static void deinit_acl_cond(struct acl_cond *cond)
 
 static void deinit_tcp_rules(struct list *rules)
 {
-	struct tcp_rule *trule, *truleb;
+	struct act_rule *trule, *truleb;
 
 	list_for_each_entry_safe(trule, truleb, rules, list) {
 		LIST_DEL(&trule->list);
@@ -1343,8 +1330,6 @@ void deinit(void)
 		deinit_stick_rules(&p->storersp_rules);
 		deinit_stick_rules(&p->sticking_rules);
 
-		free(p->appsession_name);
-
 		h = p->req_cap;
 		while (h) {
 			h_next = h->next;
@@ -1490,17 +1475,11 @@ void deinit(void)
 	pool_destroy2(pool2_requri);
 	pool_destroy2(pool2_task);
 	pool_destroy2(pool2_capture);
-	pool_destroy2(pool2_appsess);
 	pool_destroy2(pool2_pendconn);
 	pool_destroy2(pool2_sig_handlers);
 	pool_destroy2(pool2_hdr_idx);
 	pool_destroy2(pool2_http_txn);
     
-	if (have_appsession) {
-		pool_destroy2(apools.serverid);
-		pool_destroy2(apools.sessid);
-	}
-
 	deinit_pollers();
 } /* end deinit() */
 
@@ -1666,7 +1645,7 @@ int main(int argc, char **argv)
 	}
 
 	if (listeners == 0) {
-		Alert("[%s.main()] No enabled listener found (check the <listen> keywords) ! Exiting.\n", argv[0]);
+		Alert("[%s.main()] No enabled listener found (check for 'bind' directives) ! Exiting.\n", argv[0]);
 		/* Note: we don't have to send anything to the old pids because we
 		 * never stopped them. */
 		exit(1);
@@ -1710,22 +1689,6 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 	}
-
-#ifdef CONFIG_HAP_CTTPROXY
-	if (global.last_checks & LSTCHK_CTTPROXY) {
-		int ret;
-
-		ret = check_cttproxy_version();
-		if (ret < 0) {
-			Alert("[%s.main()] Cannot enable cttproxy.\n%s",
-			      argv[0],
-			      (ret == -1) ? "  Incorrect module version.\n"
-			      : "  Make sure you have enough permissions and that the module is loaded.\n");
-			protocol_unbind_all();
-			exit(1);
-		}
-	}
-#endif
 
 	if ((global.last_checks & LSTCHK_NETADM) && global.uid) {
 		Alert("[%s.main()] Some configuration options require full privileges, so global.uid cannot be changed.\n"
@@ -1886,8 +1849,6 @@ int main(int argc, char **argv)
 	 */
 	run_poll_loop();
 
-	/* Free all Hash Keys and all Hash elements */
-	appsession_cleanup();
 	/* Do some cleanup */ 
 	deinit();
     

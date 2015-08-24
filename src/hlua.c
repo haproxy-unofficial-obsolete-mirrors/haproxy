@@ -16,7 +16,6 @@
 
 #include <types/connection.h>
 #include <types/hlua.h>
-#include <types/proto_tcp.h>
 #include <types/proxy.h>
 
 #include <proto/arg.h>
@@ -382,19 +381,19 @@ static int hlua_lua2arg(lua_State *L, int ud, struct arg *arg)
  */
 static int hlua_smp2lua(lua_State *L, struct sample *smp)
 {
-	switch (smp->type) {
+	switch (smp->data.type) {
 	case SMP_T_SINT:
 	case SMP_T_BOOL:
-		lua_pushinteger(L, smp->data.sint);
+		lua_pushinteger(L, smp->data.u.sint);
 		break;
 
 	case SMP_T_BIN:
 	case SMP_T_STR:
-		lua_pushlstring(L, smp->data.str.str, smp->data.str.len);
+		lua_pushlstring(L, smp->data.u.str.str, smp->data.u.str.len);
 		break;
 
 	case SMP_T_METH:
-		switch (smp->data.meth.meth) {
+		switch (smp->data.u.meth.meth) {
 		case HTTP_METH_OPTIONS: lua_pushstring(L, "OPTIONS"); break;
 		case HTTP_METH_GET:     lua_pushstring(L, "GET");     break;
 		case HTTP_METH_HEAD:    lua_pushstring(L, "HEAD");    break;
@@ -404,7 +403,7 @@ static int hlua_smp2lua(lua_State *L, struct sample *smp)
 		case HTTP_METH_TRACE:   lua_pushstring(L, "TRACE");   break;
 		case HTTP_METH_CONNECT: lua_pushstring(L, "CONNECT"); break;
 		case HTTP_METH_OTHER:
-			lua_pushlstring(L, smp->data.meth.str.str, smp->data.meth.str.len);
+			lua_pushlstring(L, smp->data.u.meth.str.str, smp->data.u.meth.str.len);
 			break;
 		default:
 			lua_pushnil(L);
@@ -415,9 +414,9 @@ static int hlua_smp2lua(lua_State *L, struct sample *smp)
 	case SMP_T_IPV4:
 	case SMP_T_IPV6:
 	case SMP_T_ADDR: /* This type is never used to qualify a sample. */
-		if (sample_casts[smp->type][SMP_T_STR] &&
-		    sample_casts[smp->type][SMP_T_STR](smp))
-			lua_pushlstring(L, smp->data.str.str, smp->data.str.len);
+		if (sample_casts[smp->data.type][SMP_T_STR] &&
+		    sample_casts[smp->data.type][SMP_T_STR](smp))
+			lua_pushlstring(L, smp->data.u.str.str, smp->data.u.str.len);
 		else
 			lua_pushnil(L);
 		break;
@@ -434,15 +433,15 @@ static int hlua_smp2lua(lua_State *L, struct sample *smp)
  */
 static int hlua_smp2lua_str(lua_State *L, struct sample *smp)
 {
-	switch (smp->type) {
+	switch (smp->data.type) {
 
 	case SMP_T_BIN:
 	case SMP_T_STR:
-		lua_pushlstring(L, smp->data.str.str, smp->data.str.len);
+		lua_pushlstring(L, smp->data.u.str.str, smp->data.u.str.len);
 		break;
 
 	case SMP_T_METH:
-		switch (smp->data.meth.meth) {
+		switch (smp->data.u.meth.meth) {
 		case HTTP_METH_OPTIONS: lua_pushstring(L, "OPTIONS"); break;
 		case HTTP_METH_GET:     lua_pushstring(L, "GET");     break;
 		case HTTP_METH_HEAD:    lua_pushstring(L, "HEAD");    break;
@@ -452,7 +451,7 @@ static int hlua_smp2lua_str(lua_State *L, struct sample *smp)
 		case HTTP_METH_TRACE:   lua_pushstring(L, "TRACE");   break;
 		case HTTP_METH_CONNECT: lua_pushstring(L, "CONNECT"); break;
 		case HTTP_METH_OTHER:
-			lua_pushlstring(L, smp->data.meth.str.str, smp->data.meth.str.len);
+			lua_pushlstring(L, smp->data.u.meth.str.str, smp->data.u.meth.str.len);
 			break;
 		default:
 			lua_pushstring(L, "");
@@ -465,9 +464,9 @@ static int hlua_smp2lua_str(lua_State *L, struct sample *smp)
 	case SMP_T_IPV4:
 	case SMP_T_IPV6:
 	case SMP_T_ADDR: /* This type is never used to qualify a sample. */
-		if (sample_casts[smp->type][SMP_T_STR] &&
-		    sample_casts[smp->type][SMP_T_STR](smp))
-			lua_pushlstring(L, smp->data.str.str, smp->data.str.len);
+		if (sample_casts[smp->data.type][SMP_T_STR] &&
+		    sample_casts[smp->data.type][SMP_T_STR](smp))
+			lua_pushlstring(L, smp->data.u.str.str, smp->data.u.str.len);
 		else
 			lua_pushstring(L, "");
 		break;
@@ -487,20 +486,20 @@ static int hlua_lua2smp(lua_State *L, int ud, struct sample *smp)
 	switch (lua_type(L, ud)) {
 
 	case LUA_TNUMBER:
-		smp->type = SMP_T_SINT;
-		smp->data.sint = lua_tointeger(L, ud);
+		smp->data.type = SMP_T_SINT;
+		smp->data.u.sint = lua_tointeger(L, ud);
 		break;
 
 
 	case LUA_TBOOLEAN:
-		smp->type = SMP_T_BOOL;
-		smp->data.sint = lua_toboolean(L, ud);
+		smp->data.type = SMP_T_BOOL;
+		smp->data.u.sint = lua_toboolean(L, ud);
 		break;
 
 	case LUA_TSTRING:
-		smp->type = SMP_T_STR;
+		smp->data.type = SMP_T_STR;
 		smp->flags |= SMP_F_CONST;
-		smp->data.str.str = (char *)lua_tolstring(L, ud, (size_t *)&smp->data.str.len);
+		smp->data.u.str.str = (char *)lua_tolstring(L, ud, (size_t *)&smp->data.u.str.len);
 		break;
 
 	case LUA_TUSERDATA:
@@ -509,8 +508,8 @@ static int hlua_lua2smp(lua_State *L, int ud, struct sample *smp)
 	case LUA_TFUNCTION:
 	case LUA_TTHREAD:
 	case LUA_TLIGHTUSERDATA:
-		smp->type = SMP_T_BOOL;
-		smp->data.sint = 0;
+		smp->data.type = SMP_T_BOOL;
+		smp->data.u.sint = 0;
 		break;
 	}
 	return 1;
@@ -1369,17 +1368,17 @@ __LJMP static inline int _hlua_map_lookup(struct lua_State *L, int str)
 	MAY_LJMP(check_args(L, 2, "lookup"));
 	desc = MAY_LJMP(hlua_checkmap(L, 1));
 	if (desc->pat.expect_type == SMP_T_SINT) {
-		smp.type = SMP_T_SINT;
-		smp.data.sint = MAY_LJMP(luaL_checkinteger(L, 2));
+		smp.data.type = SMP_T_SINT;
+		smp.data.u.sint = MAY_LJMP(luaL_checkinteger(L, 2));
 	}
 	else {
-		smp.type = SMP_T_STR;
+		smp.data.type = SMP_T_STR;
 		smp.flags = SMP_F_CONST;
-		smp.data.str.str = (char *)MAY_LJMP(luaL_checklstring(L, 2, (size_t *)&smp.data.str.len));
+		smp.data.u.str.str = (char *)MAY_LJMP(luaL_checklstring(L, 2, (size_t *)&smp.data.u.str.len));
 	}
 
 	pat = pattern_exec_match(&desc->pat, &smp, 1);
-	if (!pat || !pat->smp) {
+	if (!pat || !pat->data) {
 		if (str)
 			lua_pushstring(L, "");
 		else
@@ -1388,7 +1387,7 @@ __LJMP static inline int _hlua_map_lookup(struct lua_State *L, int str)
 	}
 
 	/* The Lua pattern must return a string, so we can't check the returned type */
-	lua_pushlstring(L, pat->smp->data.str.str, pat->smp->data.str.len);
+	lua_pushlstring(L, pat->data->u.str.str, pat->data->u.str.len);
 	return 1;
 }
 
@@ -2867,13 +2866,13 @@ __LJMP static int hlua_run_sample_conv(lua_State *L)
 	}
 
 	/* Apply expected cast. */
-	if (!sample_casts[smp.type][conv->in_type]) {
+	if (!sample_casts[smp.data.type][conv->in_type]) {
 		hlua_pusherror(L, "invalid input argument: cannot cast '%s' to '%s'",
-		               smp_to_type[smp.type], smp_to_type[conv->in_type]);
+		               smp_to_type[smp.data.type], smp_to_type[conv->in_type]);
 		WILL_LJMP(lua_error(L));
 	}
-	if (sample_casts[smp.type][conv->in_type] != c_none &&
-	    !sample_casts[smp.type][conv->in_type](&smp)) {
+	if (sample_casts[smp.data.type][conv->in_type] != c_none &&
+	    !sample_casts[smp.data.type][conv->in_type](&smp)) {
 		hlua_pusherror(L, "error during the input argument casting");
 		WILL_LJMP(lua_error(L));
 	}
@@ -3095,7 +3094,7 @@ __LJMP static int hlua_http_req_rep_hdr(lua_State *L)
 	MAY_LJMP(check_args(L, 4, "req_rep_hdr"));
 	htxn = MAY_LJMP(hlua_checkhttp(L, 1));
 
-	return MAY_LJMP(hlua_http_rep_hdr(L, htxn, &htxn->s->txn->req, HTTP_REQ_ACT_REPLACE_HDR));
+	return MAY_LJMP(hlua_http_rep_hdr(L, htxn, &htxn->s->txn->req, ACT_HTTP_REPLACE_HDR));
 }
 
 __LJMP static int hlua_http_res_rep_hdr(lua_State *L)
@@ -3105,7 +3104,7 @@ __LJMP static int hlua_http_res_rep_hdr(lua_State *L)
 	MAY_LJMP(check_args(L, 4, "res_rep_hdr"));
 	htxn = MAY_LJMP(hlua_checkhttp(L, 1));
 
-	return MAY_LJMP(hlua_http_rep_hdr(L, htxn, &htxn->s->txn->rsp, HTTP_RES_ACT_REPLACE_HDR));
+	return MAY_LJMP(hlua_http_rep_hdr(L, htxn, &htxn->s->txn->rsp, ACT_HTTP_REPLACE_HDR));
 }
 
 __LJMP static int hlua_http_req_rep_val(lua_State *L)
@@ -3115,7 +3114,7 @@ __LJMP static int hlua_http_req_rep_val(lua_State *L)
 	MAY_LJMP(check_args(L, 4, "req_rep_hdr"));
 	htxn = MAY_LJMP(hlua_checkhttp(L, 1));
 
-	return MAY_LJMP(hlua_http_rep_hdr(L, htxn, &htxn->s->txn->req, HTTP_REQ_ACT_REPLACE_VAL));
+	return MAY_LJMP(hlua_http_rep_hdr(L, htxn, &htxn->s->txn->req, ACT_HTTP_REPLACE_VAL));
 }
 
 __LJMP static int hlua_http_res_rep_val(lua_State *L)
@@ -3125,7 +3124,7 @@ __LJMP static int hlua_http_res_rep_val(lua_State *L)
 	MAY_LJMP(check_args(L, 4, "res_rep_val"));
 	htxn = MAY_LJMP(hlua_checkhttp(L, 1));
 
-	return MAY_LJMP(hlua_http_rep_hdr(L, htxn, &htxn->s->txn->rsp, HTTP_RES_ACT_REPLACE_VAL));
+	return MAY_LJMP(hlua_http_rep_hdr(L, htxn, &htxn->s->txn->rsp, ACT_HTTP_REPLACE_VAL));
 }
 
 /* This function deletes all the occurences of an header.
@@ -3780,7 +3779,7 @@ static struct task *hlua_process_task(struct task *task)
 	 * execution timeouts.
 	 */
 	if (!HLUA_IS_RUNNING(hlua))
-		hlua->expire = tick_add(now_ms, hlua_timeout_task);
+		hlua->expire = tick_add_ifset(now_ms, hlua_timeout_task);
 
 	/* Execute the Lua code. */
 	status = hlua_ctx_resume(hlua, 1);
@@ -3944,7 +3943,7 @@ static int hlua_sample_conv_wrapper(const struct arg *arg_p, struct sample *smp,
 		}
 
 		/* We must initialize the execution timeouts. */
-		stream->hlua.expire = tick_add(now_ms, hlua_timeout_session);
+		stream->hlua.expire = tick_add_ifset(now_ms, hlua_timeout_session);
 
 		/* Set the currently running flag. */
 		HLUA_SET_RUN(&stream->hlua);
@@ -4050,7 +4049,7 @@ static int hlua_sample_fetch_wrapper(const struct arg *arg_p, struct sample *smp
 		}
 
 		/* We must initialize the execution timeouts. */
-		stream->hlua.expire = tick_add(now_ms, hlua_timeout_session);
+		stream->hlua.expire = tick_add_ifset(now_ms, hlua_timeout_session);
 
 		/* Set the currently running flag. */
 		HLUA_SET_RUN(&stream->hlua);
@@ -4216,64 +4215,29 @@ __LJMP static int hlua_register_fetches(lua_State *L)
 	return 0;
 }
 
-/* global {tcp|http}-request parser. Return 1 in succes case, else return 0. */
-static int hlua_parse_rule(const char **args, int *cur_arg, struct proxy *px,
-                           struct hlua_rule **rule_p, char **err)
-{
-	struct hlua_rule *rule;
-
-	/* Memory for the rule. */
-	rule = malloc(sizeof(*rule));
-	if (!rule) {
-		memprintf(err, "out of memory error");
-		return 0;
-	}
-	*rule_p = rule;
-
-	/* The requiered arg is a function name. */
-	if (!args[*cur_arg]) {
-		memprintf(err, "expect Lua function name");
-		return 0;
-	}
-
-	/* Lookup for the symbol, and check if it is a function. */
-	lua_getglobal(gL.T, args[*cur_arg]);
-	if (lua_isnil(gL.T, -1)) {
-		lua_pop(gL.T, 1);
-		memprintf(err, "Lua function '%s' not found", args[*cur_arg]);
-		return 0;
-	}
-	if (!lua_isfunction(gL.T, -1)) {
-		lua_pop(gL.T, 1);
-		memprintf(err, "'%s' is not a function",  args[*cur_arg]);
-		return 0;
-	}
-
-	/* Reference the Lua function and store the reference. */
-	rule->fcn.function_ref = luaL_ref(gL.T, LUA_REGISTRYINDEX);
-	rule->fcn.name = strdup(args[*cur_arg]);
-	if (!rule->fcn.name) {
-		memprintf(err, "out of memory error.");
-		return 0;
-	}
-	(*cur_arg)++;
-
-	/* TODO: later accept arguments. */
-	rule->args = NULL;
-
-	return 1;
-}
-
 /* This function is a wrapper to execute each LUA function declared
  * as an action wrapper during the initialisation period. This function
- * return 1 if the processing is finished (with oe without error) and
- * return 0 if the function must be called again because the LUA
- * returns a yield.
+ * return ACT_RET_CONT if the processing is finished (with or without
+ * error) and return ACT_RET_YIELD if the function must be called again
+ * because the LUA returns a yield.
  */
-static int hlua_request_act_wrapper(struct hlua_rule *rule, struct proxy *px,
-                                    struct stream *s, unsigned int analyzer)
+static enum act_return hlua_action(struct act_rule *rule, struct proxy *px,
+                                   struct session *sess, struct stream *s)
 {
 	char **arg;
+	unsigned int analyzer;
+
+	switch (rule->from) {
+	case ACT_F_TCP_REQ_CNT: analyzer = AN_REQ_INSPECT_FE     ; break;
+	case ACT_F_TCP_RES_CNT: analyzer = AN_RES_INSPECT        ; break;
+	case ACT_F_HTTP_REQ:    analyzer = AN_REQ_HTTP_PROCESS_FE; break;
+	case ACT_F_HTTP_RES:    analyzer = AN_RES_HTTP_PROCESS_BE; break;
+	default:
+		send_log(px, LOG_ERR, "Lua: internal error while execute action.");
+		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
+			Alert("Lua: internal error while execute action.\n");
+		return ACT_RET_CONT;
+	}
 
 	/* In the execution wrappers linked with a stream, the
 	 * Lua context can be not initialized. This behavior
@@ -4281,48 +4245,56 @@ static int hlua_request_act_wrapper(struct hlua_rule *rule, struct proxy *px,
 	 * Lua initialization cause 5% performances loss.
 	 */
 	if (!s->hlua.T && !hlua_ctx_init(&s->hlua, s->task)) {
-		send_log(px, LOG_ERR, "Lua action '%s': can't initialize Lua context.", rule->fcn.name);
+		send_log(px, LOG_ERR, "Lua action '%s': can't initialize Lua context.",
+		         rule->arg.hlua_rule->fcn.name);
 		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-			Alert("Lua action '%s': can't initialize Lua context.\n", rule->fcn.name);
-		return 0;
+			Alert("Lua action '%s': can't initialize Lua context.\n",
+			      rule->arg.hlua_rule->fcn.name);
+		return ACT_RET_CONT;
 	}
 
 	/* If it is the first run, initialize the data for the call. */
 	if (!HLUA_IS_RUNNING(&s->hlua)) {
 		/* Check stack available size. */
 		if (!lua_checkstack(s->hlua.T, 1)) {
-			send_log(px, LOG_ERR, "Lua function '%s': full stack.", rule->fcn.name);
+			send_log(px, LOG_ERR, "Lua function '%s': full stack.",
+			         rule->arg.hlua_rule->fcn.name);
 			if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-				Alert("Lua function '%s': full stack.\n", rule->fcn.name);
-			return 0;
+				Alert("Lua function '%s': full stack.\n",
+				      rule->arg.hlua_rule->fcn.name);
+			return ACT_RET_CONT;
 		}
 
 		/* Restore the function in the stack. */
-		lua_rawgeti(s->hlua.T, LUA_REGISTRYINDEX, rule->fcn.function_ref);
+		lua_rawgeti(s->hlua.T, LUA_REGISTRYINDEX, rule->arg.hlua_rule->fcn.function_ref);
 
 		/* Create and and push object stream in the stack. */
 		if (!hlua_txn_new(s->hlua.T, s, px)) {
-			send_log(px, LOG_ERR, "Lua function '%s': full stack.", rule->fcn.name);
+			send_log(px, LOG_ERR, "Lua function '%s': full stack.",
+			         rule->arg.hlua_rule->fcn.name);
 			if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-				Alert("Lua function '%s': full stack.\n", rule->fcn.name);
-			return 0;
+				Alert("Lua function '%s': full stack.\n",
+				      rule->arg.hlua_rule->fcn.name);
+			return ACT_RET_CONT;
 		}
 		s->hlua.nargs = 1;
 
 		/* push keywords in the stack. */
-		for (arg = rule->args; arg && *arg; arg++) {
+		for (arg = rule->arg.hlua_rule->args; arg && *arg; arg++) {
 			if (!lua_checkstack(s->hlua.T, 1)) {
-				send_log(px, LOG_ERR, "Lua function '%s': full stack.", rule->fcn.name);
+				send_log(px, LOG_ERR, "Lua function '%s': full stack.",
+				         rule->arg.hlua_rule->fcn.name);
 				if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-					Alert("Lua function '%s': full stack.\n", rule->fcn.name);
-				return 0;
+					Alert("Lua function '%s': full stack.\n",
+					      rule->arg.hlua_rule->fcn.name);
+				return ACT_RET_CONT;
 			}
 			lua_pushstring(s->hlua.T, *arg);
 			s->hlua.nargs++;
 		}
 
 		/* We must initialize the execution timeouts. */
-		s->hlua.expire = tick_add(now_ms, hlua_timeout_session);
+		s->hlua.expire = tick_add_ifset(now_ms, hlua_timeout_session);
 
 		/* Set the currently running flag. */
 		HLUA_SET_RUN(&s->hlua);
@@ -4332,7 +4304,7 @@ static int hlua_request_act_wrapper(struct hlua_rule *rule, struct proxy *px,
 	switch (hlua_ctx_resume(&s->hlua, 1)) {
 	/* finished. */
 	case HLUA_E_OK:
-		return 1;
+		return ACT_RET_CONT;
 
 	/* yield. */
 	case HLUA_E_AGAIN:
@@ -4354,112 +4326,79 @@ static int hlua_request_act_wrapper(struct hlua_rule *rule, struct proxy *px,
 		}
 		if (HLUA_IS_WAKEREQWR(&s->hlua))
 			s->req.flags |= CF_WAKE_WRITE;
-		return 0;
+		return ACT_RET_YIELD;
 
 	/* finished with error. */
 	case HLUA_E_ERRMSG:
 		/* Display log. */
-		send_log(px, LOG_ERR, "Lua function '%s': %s.", rule->fcn.name, lua_tostring(s->hlua.T, -1));
+		send_log(px, LOG_ERR, "Lua function '%s': %s.",
+		         rule->arg.hlua_rule->fcn.name, lua_tostring(s->hlua.T, -1));
 		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-			Alert("Lua function '%s': %s.\n", rule->fcn.name, lua_tostring(s->hlua.T, -1));
+			Alert("Lua function '%s': %s.\n",
+			      rule->arg.hlua_rule->fcn.name, lua_tostring(s->hlua.T, -1));
 		lua_pop(s->hlua.T, 1);
-		return 1;
+		return ACT_RET_CONT;
 
 	case HLUA_E_ERR:
 		/* Display log. */
-		send_log(px, LOG_ERR, "Lua function '%s' return an unknown error.", rule->fcn.name);
+		send_log(px, LOG_ERR, "Lua function '%s' return an unknown error.",
+		         rule->arg.hlua_rule->fcn.name);
 		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-			Alert("Lua function '%s' return an unknown error.\n", rule->fcn.name);
+			Alert("Lua function '%s' return an unknown error.\n",
+			      rule->arg.hlua_rule->fcn.name);
 
 	default:
-		return 1;
+		return ACT_RET_CONT;
 	}
 }
 
-/* Lua execution wrapper for "tcp-request". This function uses
- * "hlua_request_act_wrapper" for executing the LUA code.
+/* global {tcp|http}-request parser. Return ACT_RET_PRS_OK in
+ * succes case, else return ACT_RET_PRS_ERR.
  */
-int hlua_tcp_req_act_wrapper(struct tcp_rule *tcp_rule, struct proxy *px,
-                             struct stream *s)
+static enum act_parse_ret action_register_lua(const char **args, int *cur_arg, struct proxy *px,
+                                              struct act_rule *rule, char **err)
 {
-	return hlua_request_act_wrapper((struct hlua_rule *)tcp_rule->act_prm.data[0],
-	                                px, s, AN_REQ_INSPECT_FE);
-}
+	/* Memory for the rule. */
+	rule->arg.hlua_rule = malloc(sizeof(*rule->arg.hlua_rule));
+	if (!rule->arg.hlua_rule) {
+		memprintf(err, "out of memory error");
+		return ACT_RET_PRS_ERR;
+	}
 
-/* Lua execution wrapper for "tcp-response". This function uses
- * "hlua_request_act_wrapper" for executing the LUA code.
- */
-int hlua_tcp_res_act_wrapper(struct tcp_rule *tcp_rule, struct proxy *px,
-                             struct stream *s)
-{
-	return hlua_request_act_wrapper((struct hlua_rule *)tcp_rule->act_prm.data[0],
-	                                px, s, AN_RES_INSPECT);
-}
+	/* The requiered arg is a function name. */
+	if (!args[*cur_arg]) {
+		memprintf(err, "expect Lua function name");
+		return ACT_RET_PRS_ERR;
+	}
 
-/* Lua execution wrapper for http-request.
- * This function uses "hlua_request_act_wrapper" for executing
- * the LUA code.
- */
-int hlua_http_req_act_wrapper(struct http_req_rule *rule, struct proxy *px,
-                              struct stream *s)
-{
-	return hlua_request_act_wrapper((struct hlua_rule *)rule->arg.data, px,
-	                                s, AN_REQ_HTTP_PROCESS_FE);
-}
+	/* Lookup for the symbol, and check if it is a function. */
+	lua_getglobal(gL.T, args[*cur_arg]);
+	if (lua_isnil(gL.T, -1)) {
+		lua_pop(gL.T, 1);
+		memprintf(err, "Lua function '%s' not found", args[*cur_arg]);
+		return ACT_RET_PRS_ERR;
+	}
+	if (!lua_isfunction(gL.T, -1)) {
+		lua_pop(gL.T, 1);
+		memprintf(err, "'%s' is not a function",  args[*cur_arg]);
+		return ACT_RET_PRS_ERR;
+	}
 
-/* Lua execution wrapper for http-response.
- * This function uses "hlua_request_act_wrapper" for executing
- * the LUA code.
- */
-int hlua_http_res_act_wrapper(struct http_res_rule *rule, struct proxy *px,
-                              struct stream *s)
-{
-	return hlua_request_act_wrapper((struct hlua_rule *)rule->arg.data, px,
-	                                s, AN_RES_HTTP_PROCESS_BE);
-}
+	/* Reference the Lua function and store the reference. */
+	rule->arg.hlua_rule->fcn.function_ref = luaL_ref(gL.T, LUA_REGISTRYINDEX);
+	rule->arg.hlua_rule->fcn.name = strdup(args[*cur_arg]);
+	if (!rule->arg.hlua_rule->fcn.name) {
+		memprintf(err, "out of memory error.");
+		return ACT_RET_PRS_ERR;
+	}
+	(*cur_arg)++;
 
-/* tcp-request <*> configuration wrapper. */
-static int tcp_req_action_register_lua(const char **args, int *cur_arg, struct proxy *px,
-                                       struct tcp_rule *rule, char **err)
-{
-	if (!hlua_parse_rule(args, cur_arg, px, (struct hlua_rule **)&rule->act_prm.data[0], err))
-		return 0;
-	rule->action = TCP_ACT_CUSTOM_CONT;
-	rule->action_ptr = hlua_tcp_req_act_wrapper;
-	return 1;
-}
+	/* TODO: later accept arguments. */
+	rule->arg.hlua_rule->args = NULL;
 
-/* tcp-response <*> configuration wrapper. */
-static int tcp_res_action_register_lua(const char **args, int *cur_arg, struct proxy *px,
-                                       struct tcp_rule *rule, char **err)
-{
-	if (!hlua_parse_rule(args, cur_arg, px, (struct hlua_rule **)&rule->act_prm.data[0], err))
-		return 0;
-	rule->action = TCP_ACT_CUSTOM_CONT;
-	rule->action_ptr = hlua_tcp_res_act_wrapper;
-	return 1;
-}
-
-/* http-request <*> configuration wrapper. */
-static int http_req_action_register_lua(const char **args, int *cur_arg, struct proxy *px,
-                                        struct http_req_rule *rule, char **err)
-{
-	if (!hlua_parse_rule(args, cur_arg, px, (struct hlua_rule **)&rule->arg.data, err))
-		return -1;
-	rule->action = HTTP_REQ_ACT_CUSTOM_CONT;
-	rule->action_ptr = hlua_http_req_act_wrapper;
-	return 1;
-}
-
-/* http-response <*> configuration wrapper. */
-static int http_res_action_register_lua(const char **args, int *cur_arg, struct proxy *px,
-                                        struct http_res_rule *rule, char **err)
-{
-	if (!hlua_parse_rule(args, cur_arg, px, (struct hlua_rule **)&rule->arg.data, err))
-		return -1;
-	rule->action = HTTP_RES_ACT_CUSTOM_CONT;
-	rule->action_ptr = hlua_http_res_act_wrapper;
-	return 1;
+	rule->action = ACT_ACTION_CONT;
+	rule->action_ptr = hlua_action;
+	return ACT_RET_PRS_OK;
 }
 
 static int hlua_read_timeout(char **args, int section_type, struct proxy *curpx,
@@ -4588,23 +4527,23 @@ static struct cfg_kw_list cfg_kws = {{ },{
 	{ 0, NULL, NULL },
 }};
 
-static struct http_req_action_kw_list http_req_kws = {"lua", { }, {
-	{ "lua", http_req_action_register_lua },
+static struct action_kw_list http_req_kws = { { }, {
+	{ "lua", action_register_lua },
 	{ NULL, NULL }
 }};
 
-static struct http_res_action_kw_list http_res_kws = {"lua", { }, {
-	{ "lua", http_res_action_register_lua },
+static struct action_kw_list http_res_kws = { { }, {
+	{ "lua", action_register_lua },
 	{ NULL, NULL }
 }};
 
-static struct tcp_action_kw_list tcp_req_cont_kws = {"lua", { }, {
-	{ "lua", tcp_req_action_register_lua },
+static struct action_kw_list tcp_req_cont_kws = { { }, {
+	{ "lua", action_register_lua },
 	{ NULL, NULL }
 }};
 
-static struct tcp_action_kw_list tcp_res_cont_kws = {"lua", { }, {
-	{ "lua", tcp_res_action_register_lua },
+static struct action_kw_list tcp_res_cont_kws = { { }, {
+	{ "lua", action_register_lua },
 	{ NULL, NULL }
 }};
 
