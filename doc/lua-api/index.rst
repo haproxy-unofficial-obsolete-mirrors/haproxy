@@ -88,7 +88,7 @@ HAProxy Lua file (`hello_world.lua`):
 
     function hello_world(txn)
        txn.res:send("hello world\n")
-       txn:close()
+       txn:done()
     end
 
 How to start HAProxy for testing this configuration:
@@ -264,6 +264,52 @@ Core class
 
   :param integer milliseconds: the required milliseconds.
 
+.. js:function:: core.register_action(name, actions, func)
+
+  **context**: body
+
+  Register an Lua function executed as action. All the registered action can be
+  used in HAProxy with the prefix "lua.". An action gets a TXN object class as
+  input.
+
+  :param string name: is the name of the converter.
+  :param table actions: is a table of string describing the HAProxy actions who
+                        want to register to. The expected actions are 'tcp-req',
+                        'tcp-res', 'http-req' or 'http-res'.
+  :param function func: is the Lua function called to work as converter.
+
+  The prototype of the Lua function used as argument is:
+
+.. code-block:: lua
+
+  function(txn)
+..
+
+  * **txn** (*class TXN*): this is a TXN object used for manipulating the
+            current request or TCP stream.
+
+  Here, an exemple of action registration. the action juste send à 'Hello world'
+  in the logs.
+
+.. code-block:: lua
+
+  core.register_action("hello-world", { "tcp-req", "http-req" }, function(txn)
+     txn:Info("Hello world")
+  end)
+..
+
+  This example code is used in HAproxy configuration like this:
+
+::
+
+  frontend tcp_frt
+    mode tcp
+    tcp-request content lua.hello-world
+
+  frontend http_frt
+    mode http
+    http-request lua.hello-world
+
 .. js:function:: core.register_converters(name, func)
 
   **context**: body
@@ -401,6 +447,19 @@ Core class
   This function returns a new object of a *socket* class.
 
   :returns: A socket class object.
+
+.. js:function:: core.done(data)
+
+  **context**: body, init, task, action, sample-fetch, converter
+
+  :param any data: Return some data for the caller. It is useful with
+    sample-fetches and sample-converters.
+
+  Immediately stops the current Lua execution and returns to the caller which
+  may be a sample fetch, a converter or an action and returns the specified
+  value (ignored for actions). It is used when the LUA process finishes its
+  work and wants to give back the control to HAProxy without executing the
+  remaining code. It can be seen as a multi-level "return".
 
 .. js:function:: core.yield()
 
@@ -737,12 +796,20 @@ HTTP class
   :param class_http http: The related http object.
   :param string query: The new query.
 
-.. js:function:: HTTP.req.set_uri(http, uri)
+.. js:function:: HTTP.req_set_uri(http, uri)
 
   Rewrites the request URI with the parameter "uri".
 
   :param class_http http: The related http object.
   :param string uri: The new uri.
+
+.. js:function:: HTTP.res_set_status(http, status)
+
+  Rewrites the response status code with the parameter "code". Note that the
+  reason is automatically adapted to the new code.
+
+  :param class_http http: The related http object.
+  :param integer status: The new response status code.
 
 TXN class
 =========
@@ -910,10 +977,11 @@ TXN class
   :param class_txn txn: The class txn object containing the data.
   :returns: an array of headers.
 
-.. js:function:: TXN.close(txn)
+.. js:function:: TXN.done(txn)
 
-  This function close the transaction and the associated session. It can be
-  used when a critical error is detected.
+  This function terminates processing of the transaction and the associated
+  session. It can be used when a critical error is detected or to terminate
+  processing after some data have been returned to the client (eg: a redirect).
 
   :param class_txn txn: The class txn object containing the data.
 

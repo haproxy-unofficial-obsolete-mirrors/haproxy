@@ -1,6 +1,7 @@
 #include <sys/socket.h>
 
 #include <ctype.h>
+#include <setjmp.h>
 
 #include <lauxlib.h>
 #include <lua.h>
@@ -49,6 +50,64 @@
 #define __LJMP
 #define WILL_LJMP(func) func
 #define MAY_LJMP(func) func
+
+/* This couple of function executes securely some Lua calls outside of
+ * the lua runtime environment. Each Lua call can return a longjmp
+ * if it encounter a memory error.
+ *
+ * Lua documentation extract:
+ *
+ *   If an error happens outside any protected environment, Lua calls
+ *   a panic function (see lua_atpanic) and then calls abort, thus
+ *   exiting the host application. Your panic function can avoid this
+ *   exit by never returning (e.g., doing a long jump to your own
+ *   recovery point outside Lua).
+ *
+ *   The panic function runs as if it were a message handler (see
+ *   §2.3); in particular, the error message is at the top of the
+ *   stack. However, there is no guarantee about stack space. To push
+ *   anything on the stack, the panic function must first check the
+ *   available space (see §4.2).
+ *
+ * We must check all the Lua entry point. This includes:
+ *  - The include/proto/hlua.h exported functions
+ *  - the task wrapper function
+ *  - The action wrapper function
+ *  - The converters wrapper function
+ *  - The sample-fetch wrapper functions
+ *
+ * It is tolerated that the initilisation function returns an abort.
+ * Before each Lua abort, an error message is writed on stderr.
+ *
+ * The macro SET_SAFE_LJMP initialise the longjmp. The Macro
+ * RESET_SAFE_LJMP reset the longjmp. These function must be macro
+ * because they must be exists in the program stack when the longjmp
+ * is called.
+ */
+jmp_buf safe_ljmp_env;
+static int hlua_panic_safe(lua_State *L) { return 0; }
+static int hlua_panic_ljmp(lua_State *L) { longjmp(safe_ljmp_env, 1); }
+
+#define SET_SAFE_LJMP(__L) \
+	({ \
+		int ret; \
+		if (setjmp(safe_ljmp_env) != 0) { \
+			lua_atpanic(__L, hlua_panic_safe); \
+			ret = 0; \
+		} else { \
+			lua_atpanic(__L, hlua_panic_ljmp); \
+			ret = 1; \
+		} \
+		ret; \
+	})
+
+/* If we are the last function catching Lua errors, we
+ * must reset the panic function.
+ */
+#define RESET_SAFE_LJMP(__L) \
+	do { \
+		lua_atpanic(__L, hlua_panic_safe); \
+	} while(0)
 
 /* The main Lua execution context. */
 struct hlua gL;
@@ -137,6 +196,13 @@ __LJMP static int hlua_lua2arg_check(lua_State *L, int first, struct arg *argp,
 static int hlua_smp2lua(lua_State *L, struct sample *smp);
 static int hlua_smp2lua_str(lua_State *L, struct sample *smp);
 static int hlua_lua2smp(lua_State *L, int ud, struct sample *smp);
+
+#define SEND_ERR(__be, __fmt, __args...) \
+	do { \
+		send_log(__be, LOG_ERR, __fmt, ## __args); \
+		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)) \
+			Alert(__fmt, ## __args); \
+	} while (0)
 
 /* Used to check an Lua function type in the stack. It creates and
  * returns a reference of the function. This function throws an
@@ -508,6 +574,8 @@ static int hlua_lua2smp(lua_State *L, int ud, struct sample *smp)
 	case LUA_TFUNCTION:
 	case LUA_TTHREAD:
 	case LUA_TLIGHTUSERDATA:
+	case LUA_TNONE:
+	default:
 		smp->data.type = SMP_T_BOOL;
 		smp->data.u.sint = 0;
 		break;
@@ -746,8 +814,14 @@ static inline void hlua_sendlog(struct proxy *px, int level, const char *msg)
 	/* Cleanup the log message. */
 	p = trash.str;
 	for (; *msg != '\0'; msg++, p++) {
-		if (p >= trash.str + trash.size - 1)
-			return;
+		if (p >= trash.str + trash.size - 1) {
+			/* Break the message if exceed the buffer size. */
+			*(p-4) = ' ';
+			*(p-3) = '.';
+			*(p-2) = '.';
+			*(p-1) = '.';
+			break;
+		}
 		if (isprint(*msg))
 			*p = *msg;
 		else
@@ -755,10 +829,10 @@ static inline void hlua_sendlog(struct proxy *px, int level, const char *msg)
 	}
 	*p = '\0';
 
-	send_log(px, level, "%s", trash.str);
+	send_log(px, level, "%s\n", trash.str);
 	if (!(global.mode & MODE_QUIET) || (global.mode & (MODE_VERBOSE | MODE_STARTING))) {
-      get_localtime(date.tv_sec, &tm);
-      fprintf(stderr, "[%s] %03d/%02d%02d%02d (%d) : %s\n",
+		get_localtime(date.tv_sec, &tm);
+		fprintf(stderr, "[%s] %03d/%02d%02d%02d (%d) : %s\n",
 		        log_levels[level], tm.tm_yday, tm.tm_hour, tm.tm_min, tm.tm_sec,
 		        (int)getpid(), trash.str);
 		fflush(stderr);
@@ -787,9 +861,22 @@ __LJMP void hlua_yieldk(lua_State *L, int nresults, int ctx,
 /* This function initialises the Lua environment stored in the stream.
  * It must be called at the start of the stream. This function creates
  * an LUA coroutine. It can not be use to crete the main LUA context.
+ *
+ * This function is particular. it initialises a new Lua thread. If the
+ * initialisation fails (example: out of memory error), the lua function
+ * throws an error (longjmp).
+ *
+ * This function manipulates two Lua stack: the main and the thread. Only
+ * the main stack can fail. The thread is not manipulated. This function
+ * MUST NOT manipulate the created thread stack state, because is not
+ * proctected agains error throwed by the thread stack.
  */
 int hlua_ctx_init(struct hlua *lua, struct task *task)
 {
+	if (!SET_SAFE_LJMP(gL.T)) {
+		lua->Tref = LUA_REFNIL;
+		return 0;
+	}
 	lua->Mref = LUA_REFNIL;
 	lua->flags = 0;
 	LIST_INIT(&lua->com);
@@ -801,6 +888,7 @@ int hlua_ctx_init(struct hlua *lua, struct task *task)
 	hlua_sethlua(lua);
 	lua->Tref = luaL_ref(gL.T, LUA_REGISTRYINDEX);
 	lua->task = task;
+	RESET_SAFE_LJMP(gL.T);
 	return 1;
 }
 
@@ -991,6 +1079,17 @@ timeout_reached:
 		break;
 
 	case LUA_ERRRUN:
+
+		/* Special exit case. The traditionnal exit is returned as an error
+		 * because the errors ares the only one mean to return immediately
+		 * from and lua execution.
+		 */
+		if (lua->flags & HLUA_EXIT) {
+			ret = HLUA_E_OK;
+			hlua_ctx_renew(lua, 0);
+			break;
+		}
+
 		lua->wake_time = TICK_ETERNITY;
 		if (!lua_checkstack(lua->T, 1)) {
 			ret = HLUA_E_ERR;
@@ -1068,6 +1167,17 @@ timeout_reached:
 	}
 
 	return ret;
+}
+
+/* This function exit the current code. */
+__LJMP static int hlua_done(lua_State *L)
+{
+	struct hlua *hlua = hlua_gethlua(L);
+
+	hlua->flags |= HLUA_EXIT;
+	WILL_LJMP(lua_error(L));
+
+	return 0;
 }
 
 /* This function is an LUA binding. It provides a function
@@ -1437,8 +1547,14 @@ static void hlua_socket_handler(struct appctx *appctx)
 		return;
 	}
 
-	if (!(c->flags & CO_FL_CONNECTED))
+	/* if the connection is not estabkished, inform the stream that we want
+	 * to be notified whenever the connection completes.
+	 */
+	if (!(c->flags & CO_FL_CONNECTED)) {
+		si_applet_cant_get(si);
+		si_applet_cant_put(si);
 		return;
+	}
 
 	/* This function is called after the connect. */
 	appctx->ctx.hlua.connected = 1;
@@ -2084,6 +2200,13 @@ __LJMP static int hlua_socket_connect(struct lua_State *L)
 
 	hlua = hlua_gethlua(L);
 	appctx = objt_appctx(socket->s->si[0].end);
+
+	/* inform the stream that we want to be notified whenever the
+	 * connection completes.
+	 */
+	si_applet_cant_get(&socket->s->si[0]);
+	si_applet_cant_put(&socket->s->si[0]);
+
 	if (!hlua_com_new(hlua, &appctx->ctx.hlua.wake_on_write))
 		WILL_LJMP(luaL_error(L, "out of memory"));
 	WILL_LJMP(hlua_yieldk(L, 0, 0, hlua_socket_connect_yield, TICK_ETERNITY, 0));
@@ -2886,7 +3009,7 @@ __LJMP static int hlua_run_sample_conv(lua_State *L)
 		if (hsmp->stringsafe)
 			lua_pushstring(L, "");
 		else
-                       lua_pushnil(L);
+			lua_pushnil(L);
 		return 1;
 	}
 
@@ -2895,7 +3018,7 @@ __LJMP static int hlua_run_sample_conv(lua_State *L)
 		hlua_smp2lua_str(L, &smp);
 	else
 		hlua_smp2lua(L, &smp);
-        return 1;
+	return 1;
 }
 
 /*
@@ -3292,6 +3415,16 @@ static int hlua_http_req_set_uri(lua_State *L)
 	return 1;
 }
 
+/* This function set the response code. */
+static int hlua_http_res_set_status(lua_State *L)
+{
+	struct hlua_txn *htxn = MAY_LJMP(hlua_checkhttp(L, 1));
+	unsigned int code = MAY_LJMP(luaL_checkinteger(L, 2));
+
+	http_set_status(code, htxn->s);
+	return 0;
+}
+
 /*
  *
  *
@@ -3603,7 +3736,7 @@ __LJMP static int hlua_txn_set_mark(lua_State *L)
 /* This function is an Lua binding that send pending data
  * to the client, and close the stream interface.
  */
-__LJMP static int hlua_txn_close(lua_State *L)
+__LJMP static int hlua_txn_done(lua_State *L)
 {
 	struct hlua_txn *htxn;
 	struct channel *ic, *oc;
@@ -3614,13 +3747,41 @@ __LJMP static int hlua_txn_close(lua_State *L)
 	ic = &htxn->s->req;
 	oc = &htxn->s->res;
 
+	if (htxn->s->txn) {
+		/* HTTP mode, let's stay in sync with the stream */
+		bi_fast_delete(ic->buf, htxn->s->txn->req.sov);
+		htxn->s->txn->req.next -= htxn->s->txn->req.sov;
+		htxn->s->txn->req.sov = 0;
+		ic->analysers &= AN_REQ_HTTP_XFER_BODY;
+		oc->analysers = AN_RES_HTTP_XFER_BODY;
+		htxn->s->txn->req.msg_state = HTTP_MSG_CLOSED;
+		htxn->s->txn->rsp.msg_state = HTTP_MSG_DONE;
+
+		/* Trim any possible response */
+		oc->buf->i = 0;
+		htxn->s->txn->rsp.next = htxn->s->txn->rsp.sov = 0;
+
+		/* Note that if we want to support keep-alive, we need
+		 * to bypass the close/shutr_now calls below, but that
+		 * may only be done if the HTTP request was already
+		 * processed and the connection header is known (ie
+		 * not during TCP rules).
+		 */
+	}
+
+	channel_auto_read(ic);
 	channel_abort(ic);
 	channel_auto_close(ic);
 	channel_erase(ic);
+
+	oc->wex = tick_add_ifset(now_ms, oc->wto);
 	channel_auto_read(oc);
 	channel_auto_close(oc);
 	channel_shutr_now(oc);
 
+	ic->analysers = 0;
+
+	WILL_LJMP(hlua_done(L));
 	return 0;
 }
 
@@ -3763,6 +3924,9 @@ __LJMP static int hlua_set_nice(lua_State *L)
  * HAProxy task subsystem when the task is awaked. The LUA runtime can
  * return an E_AGAIN signal, the emmiter of this signal must set a
  * signal to wake the task.
+ *
+ * Task wrapper are longjmp safe because the only one Lua code
+ * executed is the safe hlua_ctx_resume();
  */
 static struct task *hlua_process_task(struct task *task)
 {
@@ -3799,9 +3963,7 @@ static struct task *hlua_process_task(struct task *task)
 
 	/* finished with error. */
 	case HLUA_E_ERRMSG:
-		send_log(NULL, LOG_ERR, "Lua task: %s.", lua_tostring(hlua->T, -1));
-		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-			Alert("Lua task: %s.\n", lua_tostring(hlua->T, -1));
+		SEND_ERR(NULL, "Lua task: %s.\n", lua_tostring(hlua->T, -1));
 		hlua_ctx_destroy(hlua);
 		task_delete(task);
 		task_free(task);
@@ -3809,9 +3971,7 @@ static struct task *hlua_process_task(struct task *task)
 
 	case HLUA_E_ERR:
 	default:
-		send_log(NULL, LOG_ERR, "Lua task: unknown error.");
-		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-			Alert("Lua task: unknown error.\n");
+		SEND_ERR(NULL, "Lua task: unknown error.\n");
 		hlua_ctx_destroy(hlua);
 		task_delete(task);
 		task_free(task);
@@ -3899,19 +4059,22 @@ static int hlua_sample_conv_wrapper(const struct arg *arg_p, struct sample *smp,
 	 * Lua initialization cause 5% performances loss.
 	 */
 	if (!stream->hlua.T && !hlua_ctx_init(&stream->hlua, stream->task)) {
-		send_log(stream->be, LOG_ERR, "Lua converter '%s': can't initialize Lua context.", fcn->name);
-		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-			Alert("Lua converter '%s': can't initialize Lua context.\n", fcn->name);
+		SEND_ERR(stream->be, "Lua converter '%s': can't initialize Lua context.\n", fcn->name);
 		return 0;
 	}
 
 	/* If it is the first run, initialize the data for the call. */
 	if (!HLUA_IS_RUNNING(&stream->hlua)) {
+
+		/* The following Lua calls can fail. */
+		if (!SET_SAFE_LJMP(stream->hlua.T)) {
+			SEND_ERR(stream->be, "Lua converter '%s': critical error.\n", fcn->name);
+			return 0;
+		}
+
 		/* Check stack available size. */
 		if (!lua_checkstack(stream->hlua.T, 1)) {
-			send_log(stream->be, LOG_ERR, "Lua converter '%s': full stack.", fcn->name);
-			if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-				Alert("Lua converter '%s': full stack.\n", fcn->name);
+			SEND_ERR(stream->be, "Lua converter '%s': full stack.\n", fcn->name);
 			return 0;
 		}
 
@@ -3920,9 +4083,7 @@ static int hlua_sample_conv_wrapper(const struct arg *arg_p, struct sample *smp,
 
 		/* convert input sample and pust-it in the stack. */
 		if (!lua_checkstack(stream->hlua.T, 1)) {
-			send_log(stream->be, LOG_ERR, "Lua converter '%s': full stack.", fcn->name);
-			if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-				Alert("Lua converter '%s': full stack.\n", fcn->name);
+			SEND_ERR(stream->be, "Lua converter '%s': full stack.\n", fcn->name);
 			return 0;
 		}
 		hlua_smp2lua(stream->hlua.T, smp);
@@ -3932,9 +4093,7 @@ static int hlua_sample_conv_wrapper(const struct arg *arg_p, struct sample *smp,
 		if (arg_p) {
 			for (; arg_p->type != ARGT_STOP; arg_p++) {
 				if (!lua_checkstack(stream->hlua.T, 1)) {
-					send_log(stream->be, LOG_ERR, "Lua converter '%s': full stack.", fcn->name);
-					if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-						Alert("Lua converter '%s': full stack.\n", fcn->name);
+					SEND_ERR(stream->be, "Lua converter '%s': full stack.\n", fcn->name);
 					return 0;
 				}
 				hlua_arg2lua(stream->hlua.T, arg_p);
@@ -3944,6 +4103,9 @@ static int hlua_sample_conv_wrapper(const struct arg *arg_p, struct sample *smp,
 
 		/* We must initialize the execution timeouts. */
 		stream->hlua.expire = tick_add_ifset(now_ms, hlua_timeout_session);
+
+		/* At this point the execution is safe. */
+		RESET_SAFE_LJMP(stream->hlua.T);
 
 		/* Set the currently running flag. */
 		HLUA_SET_RUN(&stream->hlua);
@@ -3960,25 +4122,20 @@ static int hlua_sample_conv_wrapper(const struct arg *arg_p, struct sample *smp,
 
 	/* yield. */
 	case HLUA_E_AGAIN:
-		send_log(stream->be, LOG_ERR, "Lua converter '%s': cannot use yielded functions.", fcn->name);
-		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-			Alert("Lua converter '%s': cannot use yielded functions.\n", fcn->name);
+		SEND_ERR(stream->be, "Lua converter '%s': cannot use yielded functions.\n", fcn->name);
 		return 0;
 
 	/* finished with error. */
 	case HLUA_E_ERRMSG:
 		/* Display log. */
-		send_log(stream->be, LOG_ERR, "Lua converter '%s': %s.", fcn->name, lua_tostring(stream->hlua.T, -1));
-		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-			Alert("Lua converter '%s': %s.\n", fcn->name, lua_tostring(stream->hlua.T, -1));
+		SEND_ERR(stream->be, "Lua converter '%s': %s.\n",
+		         fcn->name, lua_tostring(stream->hlua.T, -1));
 		lua_pop(stream->hlua.T, 1);
 		return 0;
 
 	case HLUA_E_ERR:
 		/* Display log. */
-		send_log(stream->be, LOG_ERR, "Lua converter '%s' returns an unknown error.", fcn->name);
-		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-			Alert("Lua converter '%s' returns an unknown error.\n", fcn->name);
+		SEND_ERR(stream->be, "Lua converter '%s' returns an unknown error.\n", fcn->name);
 
 	default:
 		return 0;
@@ -4001,19 +4158,22 @@ static int hlua_sample_fetch_wrapper(const struct arg *arg_p, struct sample *smp
 	 * Lua initialization cause 5% performances loss.
 	 */
 	if (!stream->hlua.T && !hlua_ctx_init(&stream->hlua, stream->task)) {
-		send_log(stream->be, LOG_ERR, "Lua sample-fetch '%s': can't initialize Lua context.", fcn->name);
-		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-			Alert("Lua sample-fetch '%s': can't initialize Lua context.\n", fcn->name);
+		SEND_ERR(stream->be, "Lua sample-fetch '%s': can't initialize Lua context.\n", fcn->name);
 		return 0;
 	}
 
 	/* If it is the first run, initialize the data for the call. */
 	if (!HLUA_IS_RUNNING(&stream->hlua)) {
+
+		/* The following Lua calls can fail. */
+		if (!SET_SAFE_LJMP(stream->hlua.T)) {
+			SEND_ERR(smp->px, "Lua sample-fetch '%s': critical error.\n", fcn->name);
+			return 0;
+		}
+
 		/* Check stack available size. */
 		if (!lua_checkstack(stream->hlua.T, 2)) {
-			send_log(smp->px, LOG_ERR, "Lua sample-fetch '%s': full stack.", fcn->name);
-			if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-				Alert("Lua sample-fetch '%s': full stack.\n", fcn->name);
+			SEND_ERR(smp->px, "Lua sample-fetch '%s': full stack.\n", fcn->name);
 			return 0;
 		}
 
@@ -4022,9 +4182,7 @@ static int hlua_sample_fetch_wrapper(const struct arg *arg_p, struct sample *smp
 
 		/* push arguments in the stack. */
 		if (!hlua_txn_new(stream->hlua.T, stream, smp->px)) {
-			send_log(smp->px, LOG_ERR, "Lua sample-fetch '%s': full stack.", fcn->name);
-			if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-				Alert("Lua sample-fetch '%s': full stack.\n", fcn->name);
+			SEND_ERR(smp->px, "Lua sample-fetch '%s': full stack.\n", fcn->name);
 			return 0;
 		}
 		stream->hlua.nargs = 1;
@@ -4033,15 +4191,11 @@ static int hlua_sample_fetch_wrapper(const struct arg *arg_p, struct sample *smp
 		for (; arg_p && arg_p->type != ARGT_STOP; arg_p++) {
 			/* Check stack available size. */
 			if (!lua_checkstack(stream->hlua.T, 1)) {
-				send_log(smp->px, LOG_ERR, "Lua sample-fetch '%s': full stack.", fcn->name);
-				if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-					Alert("Lua sample-fetch '%s': full stack.\n", fcn->name);
+				SEND_ERR(smp->px, "Lua sample-fetch '%s': full stack.\n", fcn->name);
 				return 0;
 			}
 			if (!lua_checkstack(stream->hlua.T, 1)) {
-				send_log(smp->px, LOG_ERR, "Lua sample-fetch '%s': full stack.", fcn->name);
-				if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-					Alert("Lua sample-fetch '%s': full stack.\n", fcn->name);
+				SEND_ERR(smp->px, "Lua sample-fetch '%s': full stack.\n", fcn->name);
 				return 0;
 			}
 			hlua_arg2lua(stream->hlua.T, arg_p);
@@ -4050,6 +4204,9 @@ static int hlua_sample_fetch_wrapper(const struct arg *arg_p, struct sample *smp
 
 		/* We must initialize the execution timeouts. */
 		stream->hlua.expire = tick_add_ifset(now_ms, hlua_timeout_session);
+
+		/* At this point the execution is safe. */
+		RESET_SAFE_LJMP(stream->hlua.T);
 
 		/* Set the currently running flag. */
 		HLUA_SET_RUN(&stream->hlua);
@@ -4069,25 +4226,20 @@ static int hlua_sample_fetch_wrapper(const struct arg *arg_p, struct sample *smp
 
 	/* yield. */
 	case HLUA_E_AGAIN:
-		send_log(smp->px, LOG_ERR, "Lua sample-fetch '%s': cannot use yielded functions.", fcn->name);
-		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-			Alert("Lua sample-fetch '%s': cannot use yielded functions.\n", fcn->name);
+		SEND_ERR(smp->px, "Lua sample-fetch '%s': cannot use yielded functions.\n", fcn->name);
 		return 0;
 
 	/* finished with error. */
 	case HLUA_E_ERRMSG:
 		/* Display log. */
-		send_log(smp->px, LOG_ERR, "Lua sample-fetch '%s': %s.", fcn->name, lua_tostring(stream->hlua.T, -1));
-		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-			Alert("Lua sample-fetch '%s': %s.\n", fcn->name, lua_tostring(stream->hlua.T, -1));
+		SEND_ERR(smp->px, "Lua sample-fetch '%s': %s.\n",
+		         fcn->name, lua_tostring(stream->hlua.T, -1));
 		lua_pop(stream->hlua.T, 1);
 		return 0;
 
 	case HLUA_E_ERR:
 		/* Display log. */
-		send_log(smp->px, LOG_ERR, "Lua sample-fetch '%s' returns an unknown error.", fcn->name);
-		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-			Alert("Lua sample-fetch '%s': returns an unknown error.\n", fcn->name);
+		SEND_ERR(smp->px, "Lua sample-fetch '%s' returns an unknown error.\n", fcn->name);
 
 	default:
 		return 0;
@@ -4233,9 +4385,7 @@ static enum act_return hlua_action(struct act_rule *rule, struct proxy *px,
 	case ACT_F_HTTP_REQ:    analyzer = AN_REQ_HTTP_PROCESS_FE; break;
 	case ACT_F_HTTP_RES:    analyzer = AN_RES_HTTP_PROCESS_BE; break;
 	default:
-		send_log(px, LOG_ERR, "Lua: internal error while execute action.");
-		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-			Alert("Lua: internal error while execute action.\n");
+		SEND_ERR(px, "Lua: internal error while execute action.\n");
 		return ACT_RET_CONT;
 	}
 
@@ -4245,23 +4395,25 @@ static enum act_return hlua_action(struct act_rule *rule, struct proxy *px,
 	 * Lua initialization cause 5% performances loss.
 	 */
 	if (!s->hlua.T && !hlua_ctx_init(&s->hlua, s->task)) {
-		send_log(px, LOG_ERR, "Lua action '%s': can't initialize Lua context.",
+		SEND_ERR(px, "Lua action '%s': can't initialize Lua context.\n",
 		         rule->arg.hlua_rule->fcn.name);
-		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-			Alert("Lua action '%s': can't initialize Lua context.\n",
-			      rule->arg.hlua_rule->fcn.name);
 		return ACT_RET_CONT;
 	}
 
 	/* If it is the first run, initialize the data for the call. */
 	if (!HLUA_IS_RUNNING(&s->hlua)) {
+
+		/* The following Lua calls can fail. */
+		if (!SET_SAFE_LJMP(s->hlua.T)) {
+			SEND_ERR(px, "Lua function '%s': critical error.\n",
+			         rule->arg.hlua_rule->fcn.name);
+			return ACT_RET_CONT;
+		}
+
 		/* Check stack available size. */
 		if (!lua_checkstack(s->hlua.T, 1)) {
-			send_log(px, LOG_ERR, "Lua function '%s': full stack.",
+			SEND_ERR(px, "Lua function '%s': full stack.\n",
 			         rule->arg.hlua_rule->fcn.name);
-			if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-				Alert("Lua function '%s': full stack.\n",
-				      rule->arg.hlua_rule->fcn.name);
 			return ACT_RET_CONT;
 		}
 
@@ -4270,11 +4422,8 @@ static enum act_return hlua_action(struct act_rule *rule, struct proxy *px,
 
 		/* Create and and push object stream in the stack. */
 		if (!hlua_txn_new(s->hlua.T, s, px)) {
-			send_log(px, LOG_ERR, "Lua function '%s': full stack.",
+			SEND_ERR(px, "Lua function '%s': full stack.\n",
 			         rule->arg.hlua_rule->fcn.name);
-			if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-				Alert("Lua function '%s': full stack.\n",
-				      rule->arg.hlua_rule->fcn.name);
 			return ACT_RET_CONT;
 		}
 		s->hlua.nargs = 1;
@@ -4282,16 +4431,16 @@ static enum act_return hlua_action(struct act_rule *rule, struct proxy *px,
 		/* push keywords in the stack. */
 		for (arg = rule->arg.hlua_rule->args; arg && *arg; arg++) {
 			if (!lua_checkstack(s->hlua.T, 1)) {
-				send_log(px, LOG_ERR, "Lua function '%s': full stack.",
+				SEND_ERR(px, "Lua function '%s': full stack.\n",
 				         rule->arg.hlua_rule->fcn.name);
-				if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-					Alert("Lua function '%s': full stack.\n",
-					      rule->arg.hlua_rule->fcn.name);
 				return ACT_RET_CONT;
 			}
 			lua_pushstring(s->hlua.T, *arg);
 			s->hlua.nargs++;
 		}
+
+		/* Now the execution is safe. */
+		RESET_SAFE_LJMP(s->hlua.T);
 
 		/* We must initialize the execution timeouts. */
 		s->hlua.expire = tick_add_ifset(now_ms, hlua_timeout_session);
@@ -4331,21 +4480,15 @@ static enum act_return hlua_action(struct act_rule *rule, struct proxy *px,
 	/* finished with error. */
 	case HLUA_E_ERRMSG:
 		/* Display log. */
-		send_log(px, LOG_ERR, "Lua function '%s': %s.",
+		SEND_ERR(px, "Lua function '%s': %s.\n",
 		         rule->arg.hlua_rule->fcn.name, lua_tostring(s->hlua.T, -1));
-		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-			Alert("Lua function '%s': %s.\n",
-			      rule->arg.hlua_rule->fcn.name, lua_tostring(s->hlua.T, -1));
 		lua_pop(s->hlua.T, 1);
 		return ACT_RET_CONT;
 
 	case HLUA_E_ERR:
 		/* Display log. */
-		send_log(px, LOG_ERR, "Lua function '%s' return an unknown error.",
+		SEND_ERR(px, "Lua function '%s' return an unknown error.\n",
 		         rule->arg.hlua_rule->fcn.name);
-		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
-			Alert("Lua function '%s' return an unknown error.\n",
-			      rule->arg.hlua_rule->fcn.name);
 
 	default:
 		return ACT_RET_CONT;
@@ -4354,10 +4497,16 @@ static enum act_return hlua_action(struct act_rule *rule, struct proxy *px,
 
 /* global {tcp|http}-request parser. Return ACT_RET_PRS_OK in
  * succes case, else return ACT_RET_PRS_ERR.
+ *
+ * This function can fail with an abort() due to an Lua critical error.
+ * We are in the configuration parsing process of HAProxy, this abort() is
+ * tolerated.
  */
 static enum act_parse_ret action_register_lua(const char **args, int *cur_arg, struct proxy *px,
                                               struct act_rule *rule, char **err)
 {
+	struct hlua_function *fcn = (struct hlua_function *)rule->kw->private;
+
 	/* Memory for the rule. */
 	rule->arg.hlua_rule = malloc(sizeof(*rule->arg.hlua_rule));
 	if (!rule->arg.hlua_rule) {
@@ -4365,40 +4514,99 @@ static enum act_parse_ret action_register_lua(const char **args, int *cur_arg, s
 		return ACT_RET_PRS_ERR;
 	}
 
-	/* The requiered arg is a function name. */
-	if (!args[*cur_arg]) {
-		memprintf(err, "expect Lua function name");
-		return ACT_RET_PRS_ERR;
-	}
-
-	/* Lookup for the symbol, and check if it is a function. */
-	lua_getglobal(gL.T, args[*cur_arg]);
-	if (lua_isnil(gL.T, -1)) {
-		lua_pop(gL.T, 1);
-		memprintf(err, "Lua function '%s' not found", args[*cur_arg]);
-		return ACT_RET_PRS_ERR;
-	}
-	if (!lua_isfunction(gL.T, -1)) {
-		lua_pop(gL.T, 1);
-		memprintf(err, "'%s' is not a function",  args[*cur_arg]);
-		return ACT_RET_PRS_ERR;
-	}
-
 	/* Reference the Lua function and store the reference. */
-	rule->arg.hlua_rule->fcn.function_ref = luaL_ref(gL.T, LUA_REGISTRYINDEX);
-	rule->arg.hlua_rule->fcn.name = strdup(args[*cur_arg]);
-	if (!rule->arg.hlua_rule->fcn.name) {
-		memprintf(err, "out of memory error.");
-		return ACT_RET_PRS_ERR;
-	}
-	(*cur_arg)++;
+	rule->arg.hlua_rule->fcn = *fcn;
 
 	/* TODO: later accept arguments. */
 	rule->arg.hlua_rule->args = NULL;
 
-	rule->action = ACT_ACTION_CONT;
+	rule->action = ACT_CUSTOM;
 	rule->action_ptr = hlua_action;
 	return ACT_RET_PRS_OK;
+}
+
+/* This function is an LUA binding used for registering
+ * "sample-conv" functions. It expects a converter name used
+ * in the haproxy configuration file, and an LUA function.
+ */
+__LJMP static int hlua_register_action(lua_State *L)
+{
+	struct action_kw_list *akl;
+	const char *name;
+	int ref;
+	int len;
+	struct hlua_function *fcn;
+
+	MAY_LJMP(check_args(L, 3, "register_service"));
+
+	/* First argument : converter name. */
+	name = MAY_LJMP(luaL_checkstring(L, 1));
+
+	/* Second argument : environment. */
+	if (lua_type(L, 2) != LUA_TTABLE)
+		WILL_LJMP(luaL_error(L, "register_action: second argument must be a table of strings"));
+
+	/* Third argument : lua function. */
+	ref = MAY_LJMP(hlua_checkfunction(L, 3));
+
+	/* browse the second argulent as an array. */
+	lua_pushnil(L);
+	while (lua_next(L, 2) != 0) {
+		if (lua_type(L, -1) != LUA_TSTRING)
+			WILL_LJMP(luaL_error(L, "register_action: second argument must be a table of strings"));
+
+		/* Check required environment. Only accepted "http" or "tcp". */
+		/* Allocate and fill the sample fetch keyword struct. */
+		akl = malloc(sizeof(*akl) + sizeof(struct action_kw) * 2);
+		if (!akl)
+			WILL_LJMP(luaL_error(L, "lua out of memory error."));
+		fcn = malloc(sizeof(*fcn));
+		if (!fcn)
+			WILL_LJMP(luaL_error(L, "lua out of memory error."));
+
+		/* Fill fcn. */
+		fcn->name = strdup(name);
+		if (!fcn->name)
+			WILL_LJMP(luaL_error(L, "lua out of memory error."));
+		fcn->function_ref = ref;
+
+		/* List head */
+		akl->list.n = akl->list.p = NULL;
+
+		/* End of array. */
+		memset(&akl->kw[1], 0, sizeof(*akl->kw));
+
+		/* action keyword. */
+		len = strlen("lua.") + strlen(name) + 1;
+		akl->kw[0].kw = malloc(len);
+		if (!akl->kw[0].kw)
+			WILL_LJMP(luaL_error(L, "lua out of memory error."));
+
+		snprintf((char *)akl->kw[0].kw, len, "lua.%s", name);
+
+		akl->kw[0].match_pfx = 0;
+		akl->kw[0].private = fcn;
+		akl->kw[0].parse = action_register_lua;
+
+		/* select the action registering point. */
+		if (strcmp(lua_tostring(L, -1), "tcp-req") == 0)
+			tcp_req_cont_keywords_register(akl);
+		else if (strcmp(lua_tostring(L, -1), "tcp-res") == 0)
+			tcp_res_cont_keywords_register(akl);
+		else if (strcmp(lua_tostring(L, -1), "http-req") == 0)
+			http_req_keywords_register(akl);
+		else if (strcmp(lua_tostring(L, -1), "http-res") == 0)
+			http_res_keywords_register(akl);
+		else
+			WILL_LJMP(luaL_error(L, "lua action environment '%s' is unknown. "
+			                        "'tcp-req', 'tcp-res', 'http-req' or 'http-res' "
+			                        "are expected.", lua_tostring(L, -1)));
+
+		/* pop the environment string. */
+		lua_pop(L, 1);
+	}
+
+	return 0;
 }
 
 static int hlua_read_timeout(char **args, int section_type, struct proxy *curpx,
@@ -4473,6 +4681,10 @@ static int hlua_parse_maxmem(char **args, int section_type, struct proxy *curpx,
  *
  * In some error case, LUA set an error message in top of the stack. This function
  * returns this error message in the HAProxy logs and pop it from the stack.
+ *
+ * This function can fail with an abort() due to an Lua critical error.
+ * We are in the configuration parsing process of HAProxy, this abort() is
+ * tolerated.
  */
 static int hlua_load(char **args, int section_type, struct proxy *curpx,
                      struct proxy *defpx, const char *file, int line,
@@ -4527,26 +4739,10 @@ static struct cfg_kw_list cfg_kws = {{ },{
 	{ 0, NULL, NULL },
 }};
 
-static struct action_kw_list http_req_kws = { { }, {
-	{ "lua", action_register_lua },
-	{ NULL, NULL }
-}};
-
-static struct action_kw_list http_res_kws = { { }, {
-	{ "lua", action_register_lua },
-	{ NULL, NULL }
-}};
-
-static struct action_kw_list tcp_req_cont_kws = { { }, {
-	{ "lua", action_register_lua },
-	{ NULL, NULL }
-}};
-
-static struct action_kw_list tcp_res_cont_kws = { { }, {
-	{ "lua", action_register_lua },
-	{ NULL, NULL }
-}};
-
+/* This function can fail with an abort() due to an Lua critical error.
+ * We are in the initialisation process of HAProxy, this abort() is
+ * tolerated.
+ */
 int hlua_post_init()
 {
 	struct hlua_init_function *init;
@@ -4614,6 +4810,10 @@ static void *hlua_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 	return ptr;
 }
 
+/* Ithis function can fail with an abort() due to an Lua critical error.
+ * We are in the initialisation process of HAProxy, this abort() is
+ * tolerated.
+ */
 void hlua_init(void)
 {
 	int i;
@@ -4640,12 +4840,6 @@ void hlua_init(void)
 	/* Register configuration keywords. */
 	cfg_register_keywords(&cfg_kws);
 
-	/* Register custom HTTP rules. */
-	http_req_keywords_register(&http_req_kws);
-	http_res_keywords_register(&http_res_kws);
-	tcp_req_cont_keywords_register(&tcp_req_cont_kws);
-	tcp_res_cont_keywords_register(&tcp_res_cont_kws);
-
 	/* Init main lua stack. */
 	gL.Mref = LUA_REFNIL;
 	gL.flags = 0;
@@ -4654,6 +4848,11 @@ void hlua_init(void)
 	hlua_sethlua(&gL);
 	gL.Tref = LUA_REFNIL;
 	gL.task = NULL;
+
+	/* From this point, until the end of the initialisation fucntion,
+	 * the Lua function can fail with an abort. We are in the initialisation
+	 * process of HAProxy, this abort() is tolerated.
+	 */
 
 	/* change the memory allocators to track memory usage */
 	lua_setallocf(gL.T, hlua_alloc, &hlua_global_allocator);
@@ -4679,6 +4878,7 @@ void hlua_init(void)
 	hlua_class_function(gL.T, "register_task", hlua_register_task);
 	hlua_class_function(gL.T, "register_fetches", hlua_register_fetches);
 	hlua_class_function(gL.T, "register_converters", hlua_register_converters);
+	hlua_class_function(gL.T, "register_action", hlua_register_action);
 	hlua_class_function(gL.T, "yield", hlua_yield);
 	hlua_class_function(gL.T, "set_nice", hlua_set_nice);
 	hlua_class_function(gL.T, "sleep", hlua_sleep);
@@ -4693,6 +4893,7 @@ void hlua_init(void)
 	hlua_class_function(gL.T, "Info", hlua_log_info);
 	hlua_class_function(gL.T, "Warning", hlua_log_warning);
 	hlua_class_function(gL.T, "Alert", hlua_log_alert);
+	hlua_class_function(gL.T, "done", hlua_done);
 
 	lua_setglobal(gL.T, "core");
 
@@ -4896,6 +5097,7 @@ void hlua_init(void)
 	hlua_class_function(gL.T, "res_rep_value",  hlua_http_res_rep_val);
 	hlua_class_function(gL.T, "res_add_header", hlua_http_res_add_hdr);
 	hlua_class_function(gL.T, "res_set_header", hlua_http_res_set_hdr);
+	hlua_class_function(gL.T, "res_set_status", hlua_http_res_set_status);
 
 	lua_settable(gL.T, -3);
 
@@ -4922,7 +5124,7 @@ void hlua_init(void)
 	hlua_class_function(gL.T, "get_priv",    hlua_get_priv);
 	hlua_class_function(gL.T, "set_var",     hlua_set_var);
 	hlua_class_function(gL.T, "get_var",     hlua_get_var);
-	hlua_class_function(gL.T, "close",       hlua_txn_close);
+	hlua_class_function(gL.T, "done",        hlua_txn_done);
 	hlua_class_function(gL.T, "set_loglevel",hlua_txn_set_loglevel);
 	hlua_class_function(gL.T, "set_tos",     hlua_txn_set_tos);
 	hlua_class_function(gL.T, "set_mark",    hlua_txn_set_mark);

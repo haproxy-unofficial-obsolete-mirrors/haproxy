@@ -250,8 +250,8 @@ static int peer_prepare_updatemsg(struct stksess *ts, struct shared_table *st, c
 	/* construct message */
 
 	/* check if we need to send the update identifer */
-	if (st->last_pushed && ts->upd.key > st->last_pushed && (ts->upd.key - st->last_pushed) == 1) {
-		use_identifier = 0;
+	if (!st->last_pushed || ts->upd.key < st->last_pushed || ((ts->upd.key - st->last_pushed) != 1)) {
+		use_identifier = 1;
 	}
 
 	/* encode update identifier if needed */
@@ -417,7 +417,7 @@ static int peer_prepare_ackmsg(struct shared_table *st, char *msg, size_t size)
 	char *cursor, *datamsg;
 	uint32_t netinteger;
 
-	cursor = datamsg = trash.str + 2 + 5;
+	cursor = datamsg = msg + 2 + 5;
 
 	intencode(st->remote_id, &cursor);
 	netinteger = htonl(st->last_get);
@@ -1765,9 +1765,9 @@ static struct task *process_peer_sync(struct task * task)
 	if (!peers->peers_fe) {
 		/* this one was never started, kill it */
 		signal_unregister_handler(peers->sighandler);
-		peers->sync_task = NULL;
 		task_delete(peers->sync_task);
 		task_free(peers->sync_task);
+		peers->sync_task = NULL;
 		return NULL;
 	}
 

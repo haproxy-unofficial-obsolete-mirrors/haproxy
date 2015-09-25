@@ -22,6 +22,8 @@
 #ifndef _TYPES_ACTION_H
 #define _TYPES_ACTION_H
 
+#include <common/regex.h>
+
 #include <types/stick_table.h>
 
 enum act_from {
@@ -34,6 +36,7 @@ enum act_from {
 
 enum act_return {
 	ACT_RET_CONT,  /* continue processing. */
+	ACT_RET_STOP,  /* stop processing. */
 	ACT_RET_YIELD, /* call me again. */
 	ACT_RET_ERR,   /* processing error. */
 };
@@ -44,8 +47,7 @@ enum act_parse_ret {
 };
 
 enum act_name {
-	ACT_ACTION_CONT = 0,
-	ACT_ACTION_STOP,
+	ACT_CUSTOM = 0,
 
 	/* common action */
 	ACT_ACTION_ALLOW,
@@ -91,6 +93,7 @@ struct act_rule {
 	short deny_status;                     /* HTTP status to return to user when denying */
 	enum act_return (*action_ptr)(struct act_rule *rule, struct proxy *px,
 	                              struct session *sess, struct stream *s); /* ptr to custom action */
+	struct action_kw *kw;
 	union {
 		struct {
 			char *realm;
@@ -121,6 +124,9 @@ struct act_rule {
 			struct cap_hdr *hdr;      /* the capture storage */
 		} cap;
 		struct {
+			unsigned int code;     /* HTTP status code */
+		} status;
+		struct {
 			struct sample_expr *expr;
 			int idx;
 		} capid;
@@ -149,6 +155,7 @@ struct action_kw {
 	enum act_parse_ret (*parse)(const char **args, int *cur_arg, struct proxy *px,
 	                            struct act_rule *rule, char **err);
 	int match_pfx;
+	void *private;
 };
 
 struct action_kw_list {

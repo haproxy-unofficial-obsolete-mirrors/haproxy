@@ -2155,7 +2155,7 @@ static struct task *process_chk(struct task *t)
 			 * if there has not been any name resolution for a longer period than
 			 * hold.valid, let's trigger a new one.
 			 */
-			if (tick_is_expired(tick_add(resolution->last_resolution, resolution->resolvers->hold.valid), now_ms)) {
+			if (!resolution->last_resolution || tick_is_expired(tick_add(resolution->last_resolution, resolution->resolvers->hold.valid), now_ms)) {
 				trigger_resolution(s);
 			}
 		}
@@ -2215,13 +2215,14 @@ int trigger_resolution(struct server *s)
 	resolution->qid.key = query_id;
 	resolution->step = RSLV_STEP_RUNNING;
 	resolution->query_type = DNS_RTYPE_ANY;
-	resolution->try = 0;
+	resolution->try = resolvers->resolve_retries;
 	resolution->try_cname = 0;
 	resolution->nb_responses = 0;
 	resolution->resolver_family_priority = s->resolver_family_priority;
 	eb32_insert(&resolvers->query_ids, &resolution->qid);
 
 	dns_send_query(resolution);
+	resolution->try -= 1;
 
 	/* update wakeup date if this resolution is the only one in the FIFO list */
 	if (dns_check_resolution_queue(resolvers) == 1) {
@@ -2294,6 +2295,9 @@ int start_checks() {
 				t->process = server_warmup;
 				t->context = s;
 				t->expire = TICK_ETERNITY;
+				/* server can be in this state only because of */
+				if (s->state == SRV_ST_STARTING)
+					task_schedule(s->warmup, tick_add(now_ms, MS_TO_TICKS(MAX(1000, (now.tv_sec - s->last_change)) / 20)));
 			}
 
 			if (s->check.state & CHK_ST_CONFIGURED) {

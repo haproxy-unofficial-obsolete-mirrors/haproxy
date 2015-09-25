@@ -165,7 +165,8 @@ void dns_resolve_recv(struct dgram_conn *dgram)
 		query_id = dns_response_get_query_id(buf);
 
 		/* search the query_id in the pending resolution tree */
-		if ((eb = eb32_lookup(&resolvers->query_ids, query_id)) == NULL) {
+		eb = eb32_lookup(&resolvers->query_ids, query_id);
+		if (eb == NULL) {
 			/* unknown query id means an outdated response and can be safely ignored */
 			nameserver->counters.outdated += 1;
 			continue;
@@ -217,6 +218,15 @@ void dns_resolve_recv(struct dgram_conn *dgram)
 			resolution->requester_error_cb(resolution, DNS_RESP_CNAME_ERROR);
 			continue;
 
+		case DNS_RESP_TRUNCATED:
+			nameserver->counters.truncated += 1;
+			resolution->requester_error_cb(resolution, DNS_RESP_TRUNCATED);
+			continue;
+
+		case DNS_RESP_NO_EXPECTED_RECORD:
+			nameserver->counters.other += 1;
+			resolution->requester_error_cb(resolution, DNS_RESP_NO_EXPECTED_RECORD);
+			continue;
 		}
 
 		nameserver->counters.valid += 1;
@@ -295,7 +305,6 @@ int dns_send_query(struct dns_resolution *resolution)
 	}
 
 	/* update resolution */
-	resolution->try += 1;
 	resolution->nb_responses = 0;
 	resolution->last_sent_packet = now_ms;
 
@@ -329,12 +338,18 @@ void dns_update_resolvers_timeout(struct dns_resolvers *resolvers)
 int dns_validate_dns_response(unsigned char *resp, unsigned char *bufend, char *dn_name, int dn_name_len)
 {
 	unsigned char *reader, *cname, *ptr;
-	int i, len, type, ancount, cnamelen;
+	int i, len, flags, type, ancount, cnamelen, expected_record;
 
 	reader = resp;
 	cname = NULL;
 	cnamelen = 0;
 	len = 0;
+	expected_record = 0; /* flag to report if at least one expected record type is found in the response.
+			      * For now, only records containing an IP address (A and AAAA) are
+			      * considered as expected.
+			      * Later, this function may be updated to let the caller decide what type
+			      * of record is expected to consider the response as valid. (SRV or TXT types)
+			      */
 
 	/* move forward 2 bytes for the query id */
 	reader += 2;
@@ -342,29 +357,33 @@ int dns_validate_dns_response(unsigned char *resp, unsigned char *bufend, char *
 		return DNS_RESP_INVALID;
 
 	/*
-	 * analyzing flags
-	 * 1st byte can be ignored for now
-	 * rcode is at the beginning of the second byte
+	 * flags are stored over 2 bytes
+	 * First byte contains:
+	 *  - response flag (1 bit)
+	 *  - opcode (4 bits)
+	 *  - authoritative (1 bit)
+	 *  - truncated (1 bit)
+	 *  - recursion desired (1 bit)
 	 */
-	reader += 1;
-	if (reader >= bufend)
+	if (reader + 2 >= bufend)
 		return DNS_RESP_INVALID;
 
-	/*
-	 * rcode is 4 latest bits
-	 * ignore response if it contains an error
-	 */
-	if ((*reader & 0x0f) != DNS_RCODE_NO_ERROR) {
-		if ((*reader & 0x0f) == DNS_RCODE_NX_DOMAIN)
+	flags = reader[0] * 256 + reader[1];
+
+	if (flags & DNS_FLAG_TRUNCATED)
+		return DNS_RESP_TRUNCATED;
+
+	if ((flags & DNS_FLAG_REPLYCODE) != DNS_RCODE_NO_ERROR) {
+		if ((flags & DNS_FLAG_REPLYCODE) == DNS_RCODE_NX_DOMAIN)
 			return DNS_RESP_NX_DOMAIN;
-		else if ((*reader & 0x0f) == DNS_RCODE_REFUSED)
+		else if ((flags & DNS_FLAG_REPLYCODE) == DNS_RCODE_REFUSED)
 			return DNS_RESP_REFUSED;
 
 		return DNS_RESP_ERROR;
 	}
 
-	/* move forward 1 byte for rcode */
-	reader += 1;
+	/* move forward 2 bytes for flags */
+	reader += 2;
 	if (reader >= bufend)
 		return DNS_RESP_INVALID;
 
@@ -531,6 +550,7 @@ int dns_validate_dns_response(unsigned char *resp, unsigned char *bufend, char *
 				/* ipv4 is stored on 4 bytes */
 				if (len != 4)
 					return DNS_RESP_INVALID;
+				expected_record = 1;
 				break;
 
 			case DNS_RTYPE_CNAME:
@@ -542,12 +562,16 @@ int dns_validate_dns_response(unsigned char *resp, unsigned char *bufend, char *
 				/* ipv6 is stored on 16 bytes */
 				if (len != 16)
 					return DNS_RESP_INVALID;
+				expected_record = 1;
 				break;
 		} /* switch (record type) */
 
 		/* move forward len for analyzing next record in the response */
 		reader += len;
 	} /* for i 0 to ancount */
+
+	if (expected_record == 0)
+		return DNS_RESP_NO_EXPECTED_RECORD;
 
 	return DNS_RESP_VALID;
 }
@@ -699,6 +723,11 @@ int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
 		return DNS_UPD_CNAME;
 	}
 
+	/* no IP found in the response */
+	if (!newip4 && !newip6) {
+		return DNS_UPD_NO_IP_FOUND;
+	}
+
 	/* case when the caller looks first for an IPv4 address */
 	if (family_priority == AF_INET) {
 		if (newip4) {
@@ -819,7 +848,7 @@ int dns_init_resolvers(void)
 			}
 
 			/* "connect" the UDP socket to the name server IP */
-			if (connect(fd, (struct sockaddr*)&curnameserver->addr, sizeof(curnameserver->addr)) == -1) {
+			if (connect(fd, (struct sockaddr*)&curnameserver->addr, get_addr_len(&curnameserver->addr)) == -1) {
 				Alert("Starting [%s/%s] nameserver: can't connect socket.\n", curr_resolvers->id,
 						curnameserver->id);
 				close(fd);
@@ -1073,13 +1102,15 @@ struct task *dns_process_resolve(struct task *t)
 		 * if current resolution has been tried too many times and finishes in timeout
 		 * we update its status and remove it from the list
 		 */
-		if (resolution->try >= resolvers->resolve_retries) {
+		if (resolution->try <= 0) {
 			/* clean up resolution information and remove from the list */
 			dns_reset_resolution(resolution);
 
 			/* notify the result to the requester */
 			resolution->requester_error_cb(resolution, DNS_RESP_TIMEOUT);
 		}
+
+		resolution->try -= 1;
 
 		/* check current resolution status */
 		if (resolution->step == RSLV_STEP_RUNNING) {

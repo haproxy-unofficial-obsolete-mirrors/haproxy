@@ -239,7 +239,8 @@ int str2listener(char *str, struct proxy *curproxy, struct bind_conf *bind_conf,
 		}
 
 		ss2 = str2sa_range(str, &port, &end, err,
-		                   curproxy == global.stats_fe ? NULL : global.unix_bind.prefix);
+		                   curproxy == global.stats_fe ? NULL : global.unix_bind.prefix,
+		                   NULL);
 		if (!ss2)
 			goto fail;
 
@@ -1597,7 +1598,7 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			}
 		}
 
-		sk = str2sa_range(args[1], &port1, &port2, &errmsg, NULL);
+		sk = str2sa_range(args[1], &port1, &port2, &errmsg, NULL, NULL);
 		if (!sk) {
 			Alert("parsing [%s:%d] : '%s': %s\n", file, linenum, args[0], errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -1643,6 +1644,36 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		free(global.log_send_hostname);
 		global.log_send_hostname = malloc(len + 2);
 		snprintf(global.log_send_hostname, len + 2, "%s ", name);
+	}
+	else if (!strcmp(args[0], "server-state-base")) { /* path base where HAProxy can find server state files */
+		if (global.server_state_base != NULL) {
+			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT;
+			goto out;
+		}
+
+		if (!*(args[1])) {
+			Alert("parsing [%s:%d] : '%s' expects one argument: a directory path.\n", file, linenum, args[0]);
+			err_code |= ERR_FATAL;
+			goto out;
+		}
+
+		global.server_state_base = strdup(args[1]);
+	}
+	else if (!strcmp(args[0], "server-state-file")) { /* path to the file where HAProxy can load the server states */
+		if (global.server_state_file != NULL) {
+			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT;
+			goto out;
+		}
+
+		if (!*(args[1])) {
+			Alert("parsing [%s:%d] : '%s' expect one argument: a file path.\n", file, linenum, args[0]);
+			err_code |= ERR_FATAL;
+			goto out;
+		}
+
+		global.server_state_file = strdup(args[1]);
 	}
 	else if (!strcmp(args[0], "log-tag")) {  /* tag to report to syslog */
 		if (alertif_too_many_args(1, file, linenum, args, &err_code))
@@ -1830,6 +1861,7 @@ void init_default_instance()
 	defproxy.defsrv.uweight = defproxy.defsrv.iweight = 1;
 
 	defproxy.email_alert.level = LOG_ALERT;
+	defproxy.load_server_state_from_file = PR_SRV_STATE_FILE_UNSPEC;
 }
 
 
@@ -2027,7 +2059,7 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 		newpeer->last_change = now.tv_sec;
 		newpeer->id = strdup(args[1]);
 
-		sk = str2sa_range(args[2], &port1, &port2, &errmsg, NULL);
+		sk = str2sa_range(args[2], &port1, &port2, &errmsg, NULL, NULL);
 		if (!sk) {
 			Alert("parsing [%s:%d] : '%s %s' : %s\n", file, linenum, args[0], args[1], errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -2227,7 +2259,7 @@ int cfg_parse_resolvers(const char *file, int linenum, char **args, int kwm)
 		newnameserver->conf.line = linenum;
 		newnameserver->id = strdup(args[1]);
 
-		sk = str2sa_range(args[2], &port1, &port2, &errmsg, NULL);
+		sk = str2sa_range(args[2], &port1, &port2, &errmsg, NULL, NULL);
 		if (!sk) {
 			Alert("parsing [%s:%d] : '%s %s' : %s\n", file, linenum, args[0], args[1], errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -2411,7 +2443,7 @@ int cfg_parse_mailers(const char *file, int linenum, char **args, int kwm)
 
 		newmailer->id = strdup(args[1]);
 
-		sk = str2sa_range(args[2], &port1, &port2, &errmsg, NULL);
+		sk = str2sa_range(args[2], &port1, &port2, &errmsg, NULL, NULL);
 		if (!sk) {
 			Alert("parsing [%s:%d] : '%s %s' : %s\n", file, linenum, args[0], args[1], errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -2633,6 +2665,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 #if defined(CONFIG_HAP_TRANSPARENT)
 			curproxy->conn_src.tproxy_addr = defproxy.conn_src.tproxy_addr;
 #endif
+			curproxy->load_server_state_from_file = defproxy.load_server_state_from_file;
 		}
 
 		if (curproxy->cap & PR_CAP_FE) {
@@ -3433,6 +3466,39 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		Alert("parsing [%s:%d] : '%s' is not supported anymore, please check the documentation.\n", file, linenum, args[0]);
 		err_code |= ERR_ALERT | ERR_FATAL;
 		goto out;
+	}
+	else if (!strcmp(args[0], "load-server-state-from-file")) {
+		if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], NULL))
+			err_code |= ERR_WARN;
+		if (!strcmp(args[1], "global")) {  /* use the file pointed to by global server-state-file directive */
+			curproxy->load_server_state_from_file = PR_SRV_STATE_FILE_GLOBAL;
+		}
+		else if (!strcmp(args[1], "local")) { /* use the server-state-file-name variable to locate the server-state file */
+			curproxy->load_server_state_from_file = PR_SRV_STATE_FILE_LOCAL;
+		}
+		else if (!strcmp(args[1], "none")) {  /* don't use server-state-file directive for this backend */
+			curproxy->load_server_state_from_file = PR_SRV_STATE_FILE_NONE;
+		}
+		else {
+			Alert("parsing [%s:%d] : '%s' expects 'global', 'local' or 'none'. Got '%s'\n",
+			      file, linenum, args[0], args[1]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+	}
+	else if (!strcmp(args[0], "server-state-file-name")) {
+		if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], NULL))
+			err_code |= ERR_WARN;
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d] : '%s' expects 'use-backend-name' or a string. Got no argument\n",
+			      file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		else if (!strcmp(args[1], "use-backend-name"))
+			curproxy->server_state_file_name = strdup(curproxy->id);
+		else
+			curproxy->server_state_file_name = strdup(args[1]);
 	}
 	else if (!strcmp(args[0], "capture")) {
 		if (warnifnotcap(curproxy, PR_CAP_FE, file, linenum, args[0], NULL))
@@ -5545,7 +5611,7 @@ stats_error_parsing:
 		else if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], NULL))
 			err_code |= ERR_WARN;
 
-		sk = str2sa_range(args[1], &port1, &port2, &errmsg, NULL);
+		sk = str2sa_range(args[1], &port1, &port2, &errmsg, NULL, NULL);
 		if (!sk) {
 			Alert("parsing [%s:%d] : '%s' : %s\n", file, linenum, args[0], errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -5817,7 +5883,7 @@ stats_error_parsing:
 				}
 			}
 
-			sk = str2sa_range(args[1], &port1, &port2, &errmsg, NULL);
+			sk = str2sa_range(args[1], &port1, &port2, &errmsg, NULL, NULL);
 			if (!sk) {
 				Alert("parsing [%s:%d] : '%s': %s\n", file, linenum, args[0], errmsg);
 				err_code |= ERR_ALERT | ERR_FATAL;
@@ -5869,7 +5935,7 @@ stats_error_parsing:
 		curproxy->conn_src.iface_name = NULL;
 		curproxy->conn_src.iface_len = 0;
 
-		sk = str2sa_range(args[1], &port1, &port2, &errmsg, NULL);
+		sk = str2sa_range(args[1], &port1, &port2, &errmsg, NULL, NULL);
 		if (!sk) {
 			Alert("parsing [%s:%d] : '%s %s' : %s\n",
 			      file, linenum, args[0], args[1], errmsg);
@@ -5954,7 +6020,7 @@ stats_error_parsing:
 				} else {
 					struct sockaddr_storage *sk;
 
-					sk = str2sa_range(args[cur_arg + 1], &port1, &port2, &errmsg, NULL);
+					sk = str2sa_range(args[cur_arg + 1], &port1, &port2, &errmsg, NULL, NULL);
 					if (!sk) {
 						Alert("parsing [%s:%d] : '%s %s' : %s\n",
 						      file, linenum, args[cur_arg], args[cur_arg+1], errmsg);
@@ -7308,9 +7374,9 @@ int check_config_validity()
 		if (curproxy->email_alert.set) {
 		    if (!(curproxy->email_alert.mailers.name && curproxy->email_alert.from && curproxy->email_alert.to)) {
 			    Warning("config : 'email-alert' will be ignored for %s '%s' (the presence any of "
-				    "'email-alert from', 'email-alert level' 'email-alert mailer', "
-				    "'email-alert hostname', or 'email-alert to' "
-				    "requrires each of 'email-alert from', 'email-alert mailer' and 'email-alert' "
+				    "'email-alert from', 'email-alert level' 'email-alert mailers', "
+				    "'email-alert myhostname', or 'email-alert to' "
+				    "requires each of 'email-alert from', 'email-alert mailers' and 'email-alert to' "
 				    "to be present).\n",
 				    proxy_type_str(curproxy), curproxy->id);
 			    err_code |= ERR_WARN;
@@ -7861,6 +7927,19 @@ out_uri_auth_compat:
 			curproxy->rsp_cap_pool = create_pool("ptrcap",
 			                                     curproxy->nb_rsp_cap * sizeof(char *),
 			                                     MEM_F_SHARED);
+		}
+
+		switch (curproxy->load_server_state_from_file) {
+			case PR_SRV_STATE_FILE_UNSPEC:
+				curproxy->load_server_state_from_file = PR_SRV_STATE_FILE_NONE;
+				break;
+			case PR_SRV_STATE_FILE_GLOBAL:
+				if (!global.server_state_file) {
+					Warning("config : backend '%s' configured to load server state file from global section 'server-state-file' directive. Unfortunately, 'server-state-file' is not set!\n",
+						curproxy->id);
+					err_code |= ERR_WARN;
+				}
+				break;
 		}
 
 		/* first, we will invert the servers list order */
@@ -8699,6 +8778,14 @@ out_uri_auth_compat:
 			free(*last);
 			*last = curmailers;
 		}
+	}
+
+	/* Update server_state_file_name to backend name if backend is supposed to use
+	 * a server-state file locally defined and none has been provided */
+	for (curproxy = proxy; curproxy; curproxy = curproxy->next) {
+		if (curproxy->load_server_state_from_file == PR_SRV_STATE_FILE_LOCAL &&
+		    curproxy->server_state_file_name == NULL)
+			curproxy->server_state_file_name = strdup(curproxy->id);
 	}
 
 	pool2_hdr_idx = create_pool("hdr_idx",

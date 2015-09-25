@@ -515,10 +515,7 @@ static int si_idle_conn_wake_cb(struct connection *conn)
 
 	if (conn->flags & (CO_FL_ERROR | CO_FL_SOCK_RD_SH)) {
 		/* warning, we can't do anything on <conn> after this call ! */
-		LIST_DEL(&conn->list);
-		conn_force_close(conn);
-		conn_free(conn);
-		si->end = NULL;
+		si_release_endpoint(si);
 		return -1;
 	}
 	return 0;
@@ -1629,7 +1626,7 @@ static void stream_int_chk_rcv_applet(struct stream_interface *si)
 	if (channel_may_recv(ic) && !ic->pipe) {
 		/* (re)start reading */
 		appctx_wakeup(si_appctx(si));
-        }
+	}
 }
 
 /* chk_snd function for applets */

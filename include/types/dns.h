@@ -51,6 +51,10 @@
 #define DNS_RCODE_NX_DOMAIN	3	/* non existent domain */
 #define DNS_RCODE_REFUSED	5	/* query refused */
 
+/* dns flags masks */
+#define DNS_FLAG_TRUNCATED	0x0200	/* mask for truncated flag */
+#define DNS_FLAG_REPLYCODE	0x000F	/* mask for reply code */
+
 /* DNS request or response header structure */
 struct dns_header {
 	unsigned short	id:16;		/* identifier */
@@ -132,6 +136,7 @@ struct dns_nameserver {
 		long int invalid;	/* - malformed DNS response */
 		long int too_big;	/* - too big response */
 		long int outdated;	/* - outdated response (server slower than the other ones) */
+		long int truncated;	/* - truncated response */
 	} counters;
 };
 
@@ -151,9 +156,9 @@ struct dns_resolution {
 	char *hostname_dn;		/* server hostname in domain name label format */
 	int hostname_dn_len;		/* server domain name label len */
 	int resolver_family_priority;	/* which IP family should the resolver use when both are returned */
-	time_t last_resolution;		/* time of the lastest valid resolution */
-	time_t last_sent_packet;	/* time of the latest DNS packet sent */
-	time_t last_status_change;	/* time of the latest DNS resolution status change */
+	unsigned int last_resolution;	/* time of the lastest valid resolution */
+	unsigned int last_sent_packet;	/* time of the latest DNS packet sent */
+	unsigned int last_status_change;	/* time of the latest DNS resolution status change */
 	int query_id;			/* DNS query ID dedicated for this resolution */
 	struct eb32_node qid;		/* ebtree query id */
 	int query_type;			/* query type to send. By default DNS_RTYPE_ANY */
@@ -193,6 +198,8 @@ enum {
 	DNS_RESP_WRONG_NAME,		/* response does not match query name */
 	DNS_RESP_CNAME_ERROR,		/* error when resolving a CNAME in an atomic response */
 	DNS_RESP_TIMEOUT,		/* DNS server has not answered in time */
+	DNS_RESP_TRUNCATED,		/* DNS response is truncated */
+	DNS_RESP_NO_EXPECTED_RECORD,	/* No expected records were found in the response */
 };
 
 /* return codes after searching an IP in a DNS response buffer, using a family preference */
@@ -205,6 +212,7 @@ enum {
 					 *    matching preference was found */
 	DNS_UPD_CNAME,			/* CNAME without any IP provided in the response */
 	DNS_UPD_NAME_ERROR,		/* name in the response did not match the query */
+	DNS_UPD_NO_IP_FOUND,		/* no IP could be found in the response */
 };
 
 #endif /* _TYPES_DNS_H */

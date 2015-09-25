@@ -273,6 +273,91 @@ fd_set http_encode_map[(sizeof(fd_set) > (256/8)) ? 1 : ((256/8) / sizeof(fd_set
 
 static int http_apply_redirect_rule(struct redirect_rule *rule, struct stream *s, struct http_txn *txn);
 
+/* This function returns a reason associated with the HTTP status.
+ * This function never fails, a message is always returned.
+ */
+const char *get_reason(unsigned int status)
+{
+	switch (status) {
+	case 100: return "Continue";
+	case 101: return "Switching Protocols";
+	case 102: return "Processing";
+	case 200: return "OK";
+	case 201: return "Created";
+	case 202: return "Accepted";
+	case 203: return "Non-Authoritative Information";
+	case 204: return "No Content";
+	case 205: return "Reset Content";
+	case 206: return "Partial Content";
+	case 207: return "Multi-Status";
+	case 210: return "Content Different";
+	case 226: return "IM Used";
+	case 300: return "Multiple Choices";
+	case 301: return "Moved Permanently";
+	case 302: return "Moved Temporarily";
+	case 303: return "See Other";
+	case 304: return "Not Modified";
+	case 305: return "Use Proxy";
+	case 307: return "Temporary Redirect";
+	case 308: return "Permanent Redirect";
+	case 310: return "Too many Redirects";
+	case 400: return "Bad Request";
+	case 401: return "Unauthorized";
+	case 402: return "Payment Required";
+	case 403: return "Forbidden";
+	case 404: return "Not Found";
+	case 405: return "Method Not Allowed";
+	case 406: return "Not Acceptable";
+	case 407: return "Proxy Authentication Required";
+	case 408: return "Request Time-out";
+	case 409: return "Conflict";
+	case 410: return "Gone";
+	case 411: return "Length Required";
+	case 412: return "Precondition Failed";
+	case 413: return "Request Entity Too Large";
+	case 414: return "Request-URI Too Long";
+	case 415: return "Unsupported Media Type";
+	case 416: return "Requested range unsatisfiable";
+	case 417: return "Expectation failed";
+	case 418: return "I'm a teapot";
+	case 422: return "Unprocessable entity";
+	case 423: return "Locked";
+	case 424: return "Method failure";
+	case 425: return "Unordered Collection";
+	case 426: return "Upgrade Required";
+	case 428: return "Precondition Required";
+	case 429: return "Too Many Requests";
+	case 431: return "Request Header Fields Too Large";
+	case 449: return "Retry With";
+	case 450: return "Blocked by Windows Parental Controls";
+	case 451: return "Unavailable For Legal Reasons";
+	case 456: return "Unrecoverable Error";
+	case 499: return "client has closed connection";
+	case 500: return "Internal Server Error";
+	case 501: return "Not Implemented";
+	case 502: return "Bad Gateway ou Proxy Error";
+	case 503: return "Service Unavailable";
+	case 504: return "Gateway Time-out";
+	case 505: return "HTTP Version not supported";
+	case 506: return "Variant also negociate";
+	case 507: return "Insufficient storage";
+	case 508: return "Loop detected";
+	case 509: return "Bandwidth Limit Exceeded";
+	case 510: return "Not extended";
+	case 511: return "Network authentication required";
+	case 520: return "Web server is returning an unknown error";
+	default:
+		switch (status) {
+		case 100 ... 199: return "Informational";
+		case 200 ... 299: return "Success";
+		case 300 ... 399: return "Redirection";
+		case 400 ... 499: return "Client Error";
+		case 500 ... 599: return "Server Error";
+		default:          return "Other";
+		}
+	}
+}
+
 void init_proto_http()
 {
 	int i;
@@ -381,12 +466,11 @@ const struct http_method_desc http_methods[26][3] = {
 		[0] = {	.meth = HTTP_METH_TRACE   , .len=5, .text="TRACE"   },
 	},
 	/* rest is empty like this :
-	 *      [1] = {	.meth = HTTP_METH_NONE    , .len=0, .text=""        },
+	 *      [0] = {	.meth = HTTP_METH_OTHER   , .len=0, .text=""        },
 	 */
 };
 
 const struct http_method_name http_known_methods[HTTP_METH_OTHER] = {
-	[HTTP_METH_NONE]    = { "",         0 },
 	[HTTP_METH_OPTIONS] = { "OPTIONS",  7 },
 	[HTTP_METH_GET]     = { "GET",      3 },
 	[HTTP_METH_HEAD]    = { "HEAD",     4 },
@@ -877,8 +961,8 @@ struct chunk *http_error_message(struct stream *s, int msgnum)
 }
 
 /*
- * returns HTTP_METH_NONE if there is nothing valid to read (empty or non-text
- * string), HTTP_METH_OTHER for unknown methods, or the identified method.
+ * returns a known method among HTTP_METH_* or HTTP_METH_OTHER for all unknown
+ * ones.
  */
 enum http_meth_t find_http_meth(const char *str, const int len)
 {
@@ -894,10 +978,8 @@ enum http_meth_t find_http_meth(const char *str, const int len)
 			if (likely(memcmp(str, h->text, h->len) == 0))
 				return h->meth;
 		};
-		return HTTP_METH_OTHER;
 	}
-	return HTTP_METH_NONE;
-
+	return HTTP_METH_OTHER;
 }
 
 /* Parse the URI from the given transaction (which is assumed to be in request
@@ -3627,23 +3709,16 @@ resume_execution:
 			break;
 			}
 
-		case ACT_ACTION_CONT:
+		case ACT_CUSTOM:
 			switch (rule->action_ptr(rule, px, s->sess, s)) {
 			case ACT_RET_ERR:
 			case ACT_RET_CONT:
 				break;
+			case ACT_RET_STOP:
+				return HTTP_RULE_RES_DONE;
 			case ACT_RET_YIELD:
 				s->current_rule = rule;
 				return HTTP_RULE_RES_YIELD;
-			}
-			break;
-
-		case ACT_ACTION_STOP:
-			switch (rule->action_ptr(rule, px, s->sess, s)) {
-			case ACT_RET_YIELD:
-			case ACT_RET_ERR:
-			case ACT_RET_CONT:
-				return HTTP_RULE_RES_DONE;
 			}
 			break;
 
@@ -3916,20 +3991,18 @@ resume_execution:
 				return HTTP_RULE_RES_BADREQ;
 			return HTTP_RULE_RES_DONE;
 
-		case ACT_ACTION_CONT:
+		case ACT_CUSTOM:
 			switch (rule->action_ptr(rule, px, s->sess, s)) {
 			case ACT_RET_ERR:
 			case ACT_RET_CONT:
 				break;
+			case ACT_RET_STOP:
+				return HTTP_RULE_RES_STOP;
 			case ACT_RET_YIELD:
 				s->current_rule = rule;
 				return HTTP_RULE_RES_YIELD;
 			}
 			break;
-
-		case ACT_ACTION_STOP:
-			rule->action_ptr(rule, px, s->sess, s);
-			return HTTP_RULE_RES_STOP;
 
 		/* other flags exists, but normaly, they never be matched. */
 		default:
@@ -5161,7 +5234,8 @@ void http_end_txn_clean_session(struct stream *s)
 		 * it's better to do it (at least it helps with debugging).
 		 */
 		s->txn->flags |= TX_PREFER_LAST;
-		srv_conn->flags |= CO_FL_PRIVATE;
+		if (srv_conn)
+			srv_conn->flags |= CO_FL_PRIVATE;
 	}
 
 	if (fe->options2 & PR_O2_INDEPSTR)
@@ -5210,7 +5284,7 @@ void http_end_txn_clean_session(struct stream *s)
 			si_idle_conn(&s->si[1], &srv->idle_conns);
 	}
 
-	s->req.analysers = strm_li(s)->analysers;
+	s->req.analysers = strm_li(s) ? strm_li(s)->analysers : 0;
 	s->res.analysers = 0;
 }
 
@@ -9368,6 +9442,7 @@ struct act_rule *parse_http_req_cond(const char **args, const char *file, int li
 		cur_arg = 1;
 		/* try in the module list */
 		rule->from = ACT_F_HTTP_REQ;
+		rule->kw = custom;
 		if (custom->parse(args, &cur_arg, proxy, rule, &errmsg) == ACT_RET_PRS_ERR) {
 			Alert("parsing [%s:%d] : error detected in %s '%s' while parsing 'http-request %s' rule : %s.\n",
 			      file, linenum, proxy_type_str(proxy), proxy->id, args[0], errmsg);
@@ -9724,6 +9799,7 @@ struct act_rule *parse_http_res_cond(const char **args, const char *file, int li
 		cur_arg = 1;
 		/* try in the module list */
 		rule->from = ACT_F_HTTP_RES;
+		rule->kw = custom;
 		if (custom->parse(args, &cur_arg, proxy, rule, &errmsg) == ACT_RET_PRS_ERR) {
 			Alert("parsing [%s:%d] : error detected in %s '%s' while parsing 'http-response %s' rule : %s.\n",
 			      file, linenum, proxy_type_str(proxy), proxy->id, args[0], errmsg);
@@ -9941,8 +10017,7 @@ struct redirect_rule *http_parse_redirect_rule(const char *file, int linenum, st
  *     we'll never have any HTTP message there ;
  *   1 if an HTTP message is ready
  */
-static int
-smp_prefetch_http(struct proxy *px, struct stream *s, unsigned int opt,
+int smp_prefetch_http(struct proxy *px, struct stream *s, unsigned int opt,
                   const struct arg *args, struct sample *smp, int req_vol)
 {
 	struct http_txn *txn;
@@ -10035,16 +10110,6 @@ smp_prefetch_http(struct proxy *px, struct stream *s, unsigned int opt,
 	smp->data.u.sint = 1;
 	return 1;
 }
-
-/* Note: these functinos *do* modify the sample. Even in case of success, at
- * least the type and uint value are modified.
- */
-#define CHECK_HTTP_MESSAGE_FIRST() \
-	do { int r = smp_prefetch_http(smp->px, smp->strm, smp->opt, args, smp, 1); if (r <= 0) return r; } while (0)
-
-#define CHECK_HTTP_MESSAGE_FIRST_PERM() \
-	do { int r = smp_prefetch_http(smp->px, smp->strm, smp->opt, args, smp, 0); if (r <= 0) return r; } while (0)
-
 
 /* 1. Check on METHOD
  * We use the pre-parsed method if it is known, and store its number as an
@@ -12253,12 +12318,56 @@ int http_replace_req_line(int action, const char *replace, int len,
 	return 0;
 }
 
+/* This function replace the HTTP status code and the associated message. The
+ * variable <status> contains the new status code. This function never fails.
+ */
+void http_set_status(unsigned int status, struct stream *s)
+{
+	struct http_txn *txn = s->txn;
+	char *cur_ptr, *cur_end;
+	int delta;
+	char *res;
+	int c_l;
+	const char *msg;
+	int msg_len;
+
+	chunk_reset(&trash);
+
+	res = ultoa_o(status, trash.str, trash.size);
+	c_l = res - trash.str;
+
+	trash.str[c_l] = ' ';
+	trash.len = c_l + 1;
+
+	msg = get_reason(status);
+	msg_len = strlen(msg);
+
+	strncpy(&trash.str[trash.len], msg, trash.size - trash.len);
+	trash.len += msg_len;
+
+	cur_ptr = s->res.buf->p + txn->rsp.sl.st.c;
+	cur_end = s->res.buf->p + txn->rsp.sl.st.r + txn->rsp.sl.st.r_l;
+
+	/* commit changes and adjust message */
+	delta = buffer_replace2(s->res.buf, cur_ptr, cur_end, trash.str, trash.len);
+
+	/* adjust res line offsets and lengths */
+	txn->rsp.sl.st.r += c_l - txn->rsp.sl.st.c_l;
+	txn->rsp.sl.st.c_l = c_l;
+	txn->rsp.sl.st.r_l = msg_len;
+
+	delta = trash.len - (cur_end - cur_ptr);
+	txn->rsp.sl.st.l += delta;
+	txn->hdr_idx.v[0].len += delta;
+	http_msg_move_end(&txn->rsp, delta);
+}
+
 /* This function executes one of the set-{method,path,query,uri} actions. It
  * builds a string in the trash from the specified format string. It finds
- * the action to be performed in p[2], previously filled by function
+ * the action to be performed in <http.action>, previously filled by function
  * parse_set_req_line(). The replacement action is excuted by the function
- * http_action_set_req_line_exec(). It always returns 1. If an error occurs
- * the action is canceled, but the rule processing continue.
+ * http_action_set_req_line(). It always returns ACT_RET_CONT. If an error
+ * occurs the action is canceled, but the rule processing continue.
  */
 enum act_return http_action_set_req_line(struct act_rule *rule, struct proxy *px,
                                          struct session *sess, struct stream *s)
@@ -12271,6 +12380,14 @@ enum act_return http_action_set_req_line(struct act_rule *rule, struct proxy *px
 	trash.len += build_logline(s, trash.str + trash.len, trash.size - trash.len, &rule->arg.http.logfmt);
 
 	http_replace_req_line(rule->arg.http.action, trash.str, trash.len, px, s);
+	return ACT_RET_CONT;
+}
+
+/* This function is just a compliant action wrapper for "set-status". */
+enum act_return action_http_set_status(struct act_rule *rule, struct proxy *px,
+                                       struct session *sess, struct stream *s)
+{
+	http_set_status(rule->arg.status.code, s);
 	return ACT_RET_CONT;
 }
 
@@ -12290,7 +12407,7 @@ enum act_parse_ret parse_set_req_line(const char **args, int *orig_arg, struct p
 {
 	int cur_arg = *orig_arg;
 
-	rule->action = ACT_ACTION_CONT;
+	rule->action = ACT_CUSTOM;
 
 	switch (args[0][4]) {
 	case 'm' :
@@ -12325,6 +12442,36 @@ enum act_parse_ret parse_set_req_line(const char **args, int *orig_arg, struct p
 	parse_logformat_string(args[cur_arg], proxy, &rule->arg.http.logfmt, LOG_OPT_HTTP,
 			       (proxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR,
 			       proxy->conf.args.file, proxy->conf.args.line);
+
+	(*orig_arg)++;
+	return ACT_RET_PRS_OK;
+}
+
+/* parse set-status action:
+ * This action accepts a single argument of type int representing
+ * an http status code. It returns ACT_RET_PRS_OK on success,
+ * ACT_RET_PRS_ERR on error.
+ */
+enum act_parse_ret parse_http_set_status(const char **args, int *orig_arg, struct proxy *px,
+                                         struct act_rule *rule, char **err)
+{
+	char *error;
+
+	rule->action = ACT_CUSTOM;
+	rule->action_ptr = action_http_set_status;
+
+	/* Check if an argument is available */
+	if (!*args[*orig_arg]) {
+		memprintf(err, "expects exactly 1 argument <status>");
+		return ACT_RET_PRS_ERR;
+	}
+
+	/* convert status code as integer */
+	rule->arg.status.code = strtol(args[*orig_arg], &error, 10);
+	if (*error != '\0' || rule->arg.status.code < 100 || rule->arg.status.code > 999) {
+		memprintf(err, "expects an integer status code between 100 and 999");
+		return ACT_RET_PRS_ERR;
+	}
 
 	(*orig_arg)++;
 	return ACT_RET_PRS_OK;
@@ -12486,7 +12633,7 @@ enum act_parse_ret parse_http_req_capture(const char **args, int *orig_arg, stru
 		px->req_cap = hdr;
 		px->to_log |= LW_REQHDR;
 
-		rule->action       = ACT_ACTION_CONT;
+		rule->action       = ACT_CUSTOM;
 		rule->action_ptr   = http_action_req_capture;
 		rule->arg.cap.expr = expr;
 		rule->arg.cap.hdr  = hdr;
@@ -12514,7 +12661,7 @@ enum act_parse_ret parse_http_req_capture(const char **args, int *orig_arg, stru
 
 		proxy->conf.args.ctx = ARGC_CAP;
 
-		rule->action       = ACT_ACTION_CONT;
+		rule->action       = ACT_CUSTOM;
 		rule->action_ptr   = http_action_req_capture_by_id;
 		rule->arg.capid.expr = expr;
 		rule->arg.capid.idx  = id;
@@ -12637,7 +12784,7 @@ enum act_parse_ret parse_http_res_capture(const char **args, int *orig_arg, stru
 
 	proxy->conf.args.ctx = ARGC_CAP;
 
-	rule->action       = ACT_ACTION_CONT;
+	rule->action       = ACT_CUSTOM;
 	rule->action_ptr   = http_action_res_capture_by_id;
 	rule->arg.capid.expr = expr;
 	rule->arg.capid.idx  = id;
@@ -12901,6 +13048,7 @@ struct action_kw_list http_req_actions = {
 struct action_kw_list http_res_actions = {
 	.kw = {
 		{ "capture",    parse_http_res_capture },
+		{ "set-status", parse_http_set_status },
 		{ NULL, NULL }
 	}
 };

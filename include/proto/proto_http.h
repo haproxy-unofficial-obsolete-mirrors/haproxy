@@ -23,6 +23,7 @@
 #define _PROTO_PROTO_HTTP_H
 
 #include <common/config.h>
+#include <types/action.h>
 #include <types/proto_http.h>
 #include <types/stream.h>
 #include <types/task.h>
@@ -98,6 +99,7 @@ int http_header_match2(const char *hdr, const char *end, const char *name, int l
 int http_remove_header2(struct http_msg *msg, struct hdr_idx *idx, struct hdr_ctx *ctx);
 int http_header_add_tail2(struct http_msg *msg, struct hdr_idx *hdr_idx, const char *text, int len);
 int http_replace_req_line(int action, const char *replace, int len, struct proxy *px, struct stream *s);
+void http_set_status(unsigned int status, struct stream *s);
 int http_transform_header_str(struct stream* s, struct http_msg *msg, const char* name,
                               unsigned int name_len, const char *str, struct my_regex *re,
                               int action);
@@ -132,6 +134,18 @@ enum http_meth_t find_http_meth(const char *str, const int len);
 struct action_kw *action_http_req_custom(const char *kw);
 struct action_kw *action_http_res_custom(const char *kw);
 int val_hdr(struct arg *arg, char **err_msg);
+
+int smp_prefetch_http(struct proxy *px, struct stream *s, unsigned int opt,
+                  const struct arg *args, struct sample *smp, int req_vol);
+
+/* Note: these functions *do* modify the sample. Even in case of success, at
+ * least the type and uint value are modified.
+ */
+#define CHECK_HTTP_MESSAGE_FIRST() \
+	do { int r = smp_prefetch_http(smp->px, smp->strm, smp->opt, args, smp, 1); if (r <= 0) return r; } while (0)
+
+#define CHECK_HTTP_MESSAGE_FIRST_PERM() \
+	do { int r = smp_prefetch_http(smp->px, smp->strm, smp->opt, args, smp, 0); if (r <= 0) return r; } while (0)
 
 static inline void http_req_keywords_register(struct action_kw_list *kw_list)
 {

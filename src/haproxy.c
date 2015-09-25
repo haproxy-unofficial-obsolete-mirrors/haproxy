@@ -50,6 +50,10 @@
 #define __USE_GNU
 #include <sched.h>
 #undef __USE_GNU
+#ifdef __FreeBSD__
+#include <sys/param.h>
+#include <sys/cpuset.h>
+#endif
 #endif
 
 #ifdef DEBUG_FULL
@@ -795,6 +799,9 @@ void init(int argc, char **argv)
 		qfprintf(stdout, "Configuration file has no error but will not start (no listener) => exit(2).\n");
 		exit(2);
 	}
+
+	/* Apply server states */
+	apply_server_state();
 
 	global_listener_queue_task = task_new();
 	if (!global_listener_queue_task) {
@@ -1780,7 +1787,11 @@ int main(int argc, char **argv)
 		if (proc < global.nbproc &&  /* child */
 		    proc < LONGBITS &&       /* only the first 32/64 processes may be pinned */
 		    global.cpu_map[proc])    /* only do this if the process has a CPU map */
+#ifdef __FreeBSD__
+			cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_PID, -1, sizeof(unsigned long), (void *)&global.cpu_map[proc]);
+#else
 			sched_setaffinity(0, sizeof(unsigned long), (void *)&global.cpu_map[proc]);
+#endif
 #endif
 		/* close the pidfile both in children and father */
 		if (pidfd >= 0) {

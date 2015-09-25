@@ -55,6 +55,8 @@ tests/test_hashes
 !/LICENSE
 !/Makefile
 !/README
+!/CONTRIBUTING
+!/MAINTAINERS
 !/ROADMAP
 !/SUBVERS
 !/VERDATE

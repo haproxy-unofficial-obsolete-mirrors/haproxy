@@ -4,7 +4,7 @@
                          ----------------------
                               version 1.6
                              willy tarreau
-                              2015/07/22
+                              2015/09/14
 
 
 This document covers the configuration language as implemented in the version
@@ -561,6 +561,8 @@ The following keywords are supported in the "global" section :
    - nosplice
    - nogetaddrinfo
    - spread-checks
+   - server-state-base
+   - server-state-file
    - tune.bufsize
    - tune.chksize
    - tune.comp.maxlevel
@@ -758,6 +760,23 @@ stats bind-process [ all | odd | even | <number 1-64>[-<number 1-64>] ] ...
   the number of processes used. The maximum process ID depends on the machine's
   word size (32 or 64). A better option consists in using the "process" setting
   of the "stats socket" line to force the process on each line.
+
+server-state-base <directory>
+  Specifies the directory prefix to be prepended in front of all servers state
+  file names which do not start with a '/'. See also "server-state-file",
+  "load-server-state-from-file" and "server-state-file-name".
+
+server-state-file <file>
+  Specifies the path to the file containing state of servers. If the path starts
+  with a slash ('/'), it is considered absolute, otherwise it is considered
+  relative to the directory specified using "server-state-base" (if set) or to
+  the current directory. Before reloading HAProxy, it is possible to save the
+  servers' current state using the stats command "show servers state". The
+  output of this command must be written in the file pointed by <file>. When
+  starting up, before handling traffic, HAProxy will read, load and apply state
+  for each server found in the file and available in its current running
+  configuration. See also "server-state-base" and "show servers state",
+  "load-server-state-from-file" and "server-state-file-name"
 
 ssl-default-bind-ciphers <ciphers>
   This setting is only available when support for OpenSSL was built in. It sets
@@ -1625,6 +1644,7 @@ http-reuse                                X          -         X         X
 http-send-name-header                     -          -         X         X
 id                                        -          X         X         X
 ignore-persist                            -          X         X         X
+load-server-state-from-file               X          -         X         X
 log                                  (*)  X          X         X         X
 log-format                                X          X         X         -
 log-tag                                   X          X         X         X
@@ -1715,6 +1735,7 @@ rspideny                                  -          X         X         X
 rspirep                                   -          X         X         X
 rsprep                                    -          X         X         X
 server                                    -          -         X         X
+server-state-file-name                    X          -         X         X
 source                                    X          -         X         X
 srvtimeout                  (deprecated)  X          -         X         X
 stats admin                               -          -         X         X
@@ -3709,7 +3730,7 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
   Example:
         http-request set-header X-Haproxy-Current-Date %T
         http-request set-header X-SSL                  %[ssl_fc]
-        http-request set-header X-SSL-Session_ID       %[ssl_fc_session_id]
+        http-request set-header X-SSL-Session_ID       %[ssl_fc_session_id,hex]
         http-request set-header X-SSL-Client-Verify    %[ssl_c_verify]
         http-request set-header X-SSL-Client-DN        %{+Q}[ssl_c_s_dn]
         http-request set-header X-SSL-Client-CN        %{+Q}[ssl_c_s_dn(cn)]
@@ -3745,6 +3766,7 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
                 set-header <name> <fmt> | del-header <name> |
                 replace-header <name> <regex-match> <replace-fmt> |
                 replace-value <name> <regex-match> <replace-fmt> |
+                set-status <status> |
                 set-log-level <level> | set-mark <mark> | set-tos <tos> |
                 add-acl(<file name>) <key fmt> |
                 del-acl(<file name>) <key fmt> |
@@ -3833,6 +3855,15 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
       outputs:
 
         Cache-Control: max-age=3600, private
+
+    - "set-status" replaces the response status code with <status> which must
+      be an integer between 100 and 999. Note that the reason is automatically
+      adapted to the new code.
+
+      Example:
+
+        # return "431 Request Header Fields Too Large"
+        http-response set-status 431
 
     - "set-nice" sets the "nice" factor of the current request being processed.
       It only has effect against the other requests being processed at the same
@@ -4117,6 +4148,97 @@ ignore-persist { if | unless } <condition>
   "unless" condition is met.
 
   See also : "force-persist", "cookie", and section 7 about ACL usage.
+
+load-server-state-from-file { global | local | none }
+  Allow seamless reload of HAProxy
+  May be used in sections:    defaults | frontend | listen | backend
+                                  yes   |    no   |   yes  |   yes
+
+  This directive points HAProxy to a file where server state from previous
+  running process has been saved. That way, when starting up, before handling
+  traffic, the new process can apply old states to servers exactly has if no
+  reload occured. The purpose of the "load-server-state-from-file" directive is
+  to tell haproxy which file to use. For now, only 2 arguments to either prevent
+  loading state or load states from a file containing all backends and servers.
+  The state file can be generated by running the command "show servers state"
+  over the stats socket and redirect output.
+
+  The format of the file is versionned and is very specific. To understand it,
+  please read the documentation of the "show servers state" command (chapter
+  9.2).
+
+  Arguments:
+    global     load the content of the file pointed by the global directive
+               named "server-state-file".
+
+    local      load the content of the file pointed by the directive
+               "server-state-file-name" if set. If not set, then the backend
+               name is used as a file name.
+
+    none       don't load any stat for this backend
+
+  Notes:
+    - server's IP address is not updated unless DNS resolution is enabled on
+      the server. It means that if a server IP address has been changed using
+      the stat socket, this information won't be re-applied after reloading.
+
+    - server's weight is applied from previous running process unless it has
+      has changed between previous and new configuration files.
+
+  Example 1:
+
+  Minimal configuration:
+
+    global
+     stats socket /tmp/socket
+     server-state-file /tmp/server_state
+
+    defaults
+     load-server-state-from-file global
+
+    backend bk
+     server s1 127.0.0.1:22 check weight 11
+     server s2 127.0.0.1:22 check weight 12
+
+  Then one can run :
+
+    socat /tmp/socket - <<< "show servers state" > /tmp/server_state
+
+  Content of the file /tmp/server_state would be like this:
+
+    1
+    # <field names skipped for the doc example>
+    1 bk 1 s1 127.0.0.1 2 0 11 11 4 6 3 4 6 0 0
+    1 bk 2 s2 127.0.0.1 2 0 12 12 4 6 3 4 6 0 0
+
+  Example 2:
+
+  Minimal configuration:
+
+    global
+     stats socket /tmp/socket
+     server-state-base /etc/haproxy/states
+
+    defaults
+     load-server-state-from-file local
+
+    backend bk
+     server s1 127.0.0.1:22 check weight 11
+     server s2 127.0.0.1:22 check weight 12
+
+  Then one can run :
+
+    socat /tmp/socket - <<< "show servers state bk" > /etc/haproxy/states/bk
+
+  Content of the file /etc/haproxy/states/bk would be like this:
+
+    1
+    # <field names skipped for the doc example>
+    1 bk 1 s1 127.0.0.1 2 0 11 11 4 6 3 4 6 0 0
+    1 bk 2 s2 127.0.0.1 2 0 12 12 4 6 3 4 6 0 0
+
+  See also: "server-state-file", "server-state-file-name", and
+  "show servers state"
 
 
 log global
@@ -6869,6 +6991,25 @@ server <name> <address>[:[port]] [param*]
   See also: "default-server", "http-send-name-header" and section 5 about
              server options
 
+server-state-file-name [<file>]
+  Set the server state file to read, load and apply to servers available in
+  this backend. It only applies when the directive "load-server-state-from-file"
+  is set to "local". When <file> is not provided or if this directive is not
+  set, then backend name is used. If <file> starts with a slash '/', then it is
+  considered as an absolute path. Otherwise, <file> is concatenated to the
+  global directive "server-state-file-base".
+
+  Example: the minimal configuration below would make HAProxy look for the
+           state server file '/etc/haproxy/states/bk':
+
+    global
+      server-state-file-base /etc/haproxy/states
+
+   backend bk
+      load-server-state-from-file
+
+  See also: "server-state-file-base", "load-server-state-from-file", and
+  "show servers state"
 
 source <addr>[:<port>] [usesrc { <addr2>[:<port2>] | client | clientip } ]
 source <addr>[:<port>] [usesrc { <addr2>[:<port2>] | hdr_ip(<hdr>[,<occ>]) } ]
@@ -9984,16 +10125,17 @@ downinter <delay>
   It is also possible to use "fastinter" and "downinter" to optimize delays
   between checks depending on the server state :
 
-             Server state            |             Interval used
-    ---------------------------------+-----------------------------------------
-     UP 100% (non-transitional)      | "inter"
-    ---------------------------------+-----------------------------------------
-     Transitionally UP (going down), |
-     Transitionally DOWN (going up), | "fastinter" if set, "inter" otherwise.
-     or yet unchecked.               |
-    ---------------------------------+-----------------------------------------
-     DOWN 100% (non-transitional)    | "downinter" if set, "inter" otherwise.
-    ---------------------------------+-----------------------------------------
+             Server state                   |         Interval used
+    ----------------------------------------+----------------------------------
+     UP 100% (non-transitional)             | "inter"
+    ----------------------------------------+----------------------------------
+     Transitionally UP (going down "fall"), | "fastinter" if set,
+     Transitionally DOWN (going up "rise"), | "inter" otherwise.
+     or yet unchecked.                      |
+    ----------------------------------------+----------------------------------
+     DOWN 100% (non-transitional)           | "downinter" if set,
+                                            | "inter" otherwise.
+    ----------------------------------------+----------------------------------
 
   Just as with every other time-based parameter, they can be entered in any
   other explicit unit among { us, ms, s, m, h, d }. The "inter" parameter also
@@ -10213,8 +10355,14 @@ resolve-prefer <family>
 resolvers <id>
   Points to an existing "resolvers" section to resolve current server's
   hostname.
+  In order to be operational, DNS resolution requires that health check is
+  enabled on the server. Actually, health checks triggers the DNS resolution.
+  You must precise one 'resolvers' parameter on each server line where DNS
+  resolution is required.
 
-  Example: server s1 app1.domain.com:80 resolvers mydns
+  Supported in default-server: No
+
+  Example: server s1 app1.domain.com:80 check resolvers mydns
 
   See also chapter 5.3
 
@@ -10380,9 +10528,9 @@ weight <weight>
 5.3. Server IP address resolution using DNS
 -------------------------------------------
 
-HAProxy allows using a host name to be resolved to find out what is the server
-IP address. By default, HAProxy resolves the name when parsing the
-configuration, at startup.
+HAProxy allows using a host name on the server line to retrieve its IP address
+using name servers. By default, HAProxy resolves the name when parsing the
+configuration file, at startup and cache the result for the process' life.
 This is not sufficient in some cases, such as in Amazon where a server's IP
 can change after a reboot or an ELB Virtual IP can change based on current
 workload.
@@ -10390,6 +10538,9 @@ This chapter describes how HAProxy can be configured to process server's name
 resolution at run time.
 Whether run time server name resolution has been enable or not, HAProxy will
 carry on doing the first resolution when parsing the configuration.
+
+Bear in mind that DNS resolution is triggered by health checks. This makes
+health checks mandatory to allow DNS resolution.
 
 
 5.3.1. Global overview
@@ -10427,6 +10578,47 @@ HAProxy.
 There can be as many as resolvers section as needed. Each section can contain
 many name servers.
 
+When multiple name servers are configured in a resolvers section, then HAProxy
+uses the first valid response. In case of invalid responses, only the last one
+is treated. Purpose is to give the chance to a slow server to deliver a valid
+answer after a fast faulty or outdated server.
+
+When each server returns a different error type, then only the last error is
+used by HAProxy to decide what type of behavior to apply.
+
+Two types of behavior can be applied:
+ 1. stop DNS resolution
+ 2. replay the DNS query with a new query type
+      In such case, the following types are applied in this exact order:
+        1. ANY query type
+        2. query type corresponding to family pointed by resolve-prefer
+           server's parameter
+        3. remaining family type
+
+HAProxy stops DNS resolution when the following errors occur:
+ - invalid DNS response packet
+ - wrong name in the query section of the response
+ - NX domain
+ - Query refused by server
+ - CNAME not pointing to an IP address
+
+HAProxy tries a new query type when the following errors occur:
+ - no Answer records in the response
+ - DNS response truncated
+ - Error in DNS response
+ - No expected DNS records found in the response
+ - name server timeout
+
+For example, with 2 name servers configured in a resolvers section:
+ - first response is valid and is applied directly, second response is ignored
+ - first response is invalid and second one is valid, then second response is
+   applied;
+ - first response is a NX domain and second one a truncated response, then
+   HAProxy replays the query with a new type;
+ - first response is truncated and second one is a NX Domain, then HAProxy
+   stops resolution.
+
+
 resolvers <resolvers id>
   Creates a new name server list labelled <resolvers id>
 
@@ -10456,6 +10648,10 @@ resolve_retries <nb>
   Defines the number <nb> of queries to send to resolve a server name before
   giving up.
   Default value: 3
+
+  A retry occurs on name server timeout or when the full sequence of DNS query
+  type failover is over and we need to start up from the default ANY query
+  type.
 
 timeout <event> <time>
   Defines timeouts related to name resolution
@@ -15598,6 +15794,9 @@ show errors [<iid>]
     is the slash ('/') in header name "header/bizarre", which is not a valid
     HTTP character for a header name.
 
+show backend
+  Dump the list of backends available in the running process
+
 show info
   Dump info about haproxy status on current process.
 
@@ -15623,6 +15822,44 @@ show pools
   usage when suspecting a memory leak for example. It does exactly the same
   as the SIGQUIT when running in foreground except that it does not flush
   the pools.
+
+show servers state [<backend>]
+  Dump the state of the servers found in the running configuration. A backend
+  name or identifier may be provided to limit the output to this backend only.
+
+  The dump has the following format:
+   - first line contains the format version (1 in this specification);
+   - second line contains the column headers, prefixed by a sharp ('#');
+   - third line and next ones contain data;
+   - each line starting by a sharp ('#') is considered as a comment.
+
+  Since multiple versions of the ouptput may co-exist, below is the list of
+  fields and their order per file format version :
+   1:
+     be_id:                       Backend unique id.
+     be_name:                     Backend label.
+     srv_id:                      Server unique id (in the backend).
+     srv_name:                    Server label.
+     srv_addr:                    Server IP address.
+     srv_op_state:                Server operational state (UP/DOWN/...).
+                                  In source code: SRV_ST_*.
+     srv_admin_state:             Server administrative state (MAINT/DRAIN/...).
+                                  In source code: SRV_ADMF_*.
+     srv_uweight:                 User visible server's weight.
+     srv_iweight:                 Server's initial weight.
+     srv_time_since_last_change:  Time since last operational change.
+     srv_check_status:            Last health check status.
+     srv_check_result:            Last check result (FAILED/PASSED/...).
+                                  In source code: CHK_RES_*.
+     srv_check_health:            Checks rise / fall current counter.
+     srv_check_state:             State of the check (ENABLED/PAUSED/...).
+                                  In source code: CHK_ST_*.
+     srv_agent_state:             State of the agent check (ENABLED/PAUSED/...).
+                                  In source code: CHK_ST_*.
+     bk_f_forced_id:              Flag to know if the backend ID is forced by
+                                  configuration.
+     srv_f_forced_id:             Flag to know if the server's ID is forced by
+                                  configuration.
 
 show sess
   Dump all known sessions. Avoid doing this on slow connections as this can

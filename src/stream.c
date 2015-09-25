@@ -71,7 +71,6 @@ struct stream *stream_new(struct session *sess, struct task *t, enum obj_type *o
 	struct stream *s;
 	struct connection *conn = objt_conn(origin);
 	struct appctx *appctx   = objt_appctx(origin);
-	int i;
 
 	if (unlikely((s = pool_alloc2(pool2_stream)) == NULL))
 		return s;
@@ -108,13 +107,13 @@ struct stream *stream_new(struct session *sess, struct task *t, enum obj_type *o
 	s->current_rule_list = NULL;
 	s->current_rule = NULL;
 
-	/* Copy SC counters for the stream. Each SC counter will be used by
-	 * the stream, so we need to increment the refcount.
+	/* Copy SC counters for the stream. We don't touch refcounts because
+	 * any reference we have is inherited from the session. Since the stream
+	 * doesn't exist without the session, the session's existence guarantees
+	 * we don't lose the entry. During the store operation, the stream won't
+	 * touch these ones.
 	 */
 	memcpy(s->stkctr, sess->stkctr, sizeof(s->stkctr));
-	for (i = 0; i < MAX_SESS_STKCTR; i++)
-		if (stkctr_entry(&s->stkctr[i]))
-			stkctr_entry(&s->stkctr[i])->ref_cnt++;
 
 	s->sess = sess;
 	s->si[0].flags = SI_FL_NONE;
@@ -935,7 +934,7 @@ static void sess_set_term_flags(struct stream *s)
 		if (s->si[1].state < SI_ST_REQ) {
 
 			strm_fe(s)->fe_counters.failed_req++;
-			if (strm_li(s)->counters)
+			if (strm_li(s) && strm_li(s)->counters)
 				strm_li(s)->counters->failed_req++;
 
 			s->flags |= SF_FINST_R;
@@ -2119,7 +2118,7 @@ struct task *process_stream(struct task *t)
 
 			/* Now we can add the server name to a header (if requested) */
 			/* check for HTTP mode and proxy server_name_hdr_name != NULL */
-			if ((si_b->state >= SI_ST_CON) &&
+			if ((si_b->state >= SI_ST_CON) && (si_b->state < SI_ST_CLO) &&
 			    (s->be->server_id_hdr_name != NULL) &&
 			    (s->be->mode == PR_MODE_HTTP) &&
 			    objt_server(s->target)) {
