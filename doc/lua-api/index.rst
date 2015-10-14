@@ -27,7 +27,7 @@ functions. Lua have 6 execution context.
    executed in initialisation mode. This section is use for configuring Lua
    bindings in HAProxy.
 
-2. The Lua **init context**. It is an Lua function executed just after the
+2. The Lua **init context**. It is a Lua function executed just after the
    HAProxy configuration parsing. The execution is in initialisation mode. In
    this context the HAProxy environment are already initialized. It is useful to
    check configuration, or initializing socket connections or tasks. These
@@ -35,19 +35,17 @@ functions. Lua have 6 execution context.
    `core.register_init()`. The prototype of the function is a simple function
    without return value and without parameters, like this: `function fcn()`.
 
-3. The Lua **task context**. It is an Lua function executed after the start
+3. The Lua **task context**. It is a Lua function executed after the start
    of the HAProxy scheduler, and just after the declaration of the task with the
    Lua function `core.register_task()`. This context can be concurrent with the
    traffic processing. It is executed in runtime mode. The prototype of the
    function is a simple function without return value and without parameters,
    like this: `function fcn()`.
 
-4. The **action context**. It is an Lua function conditionally executed. These
-   actions are declared by the HAProxy directives "`tcp-request content lua
-   <function>`", "`tcp-response content lua <function>`", "`http-request lua
-   <function>`" and "`http-response lua <function>`". The prototype of the
-   Lua called function is a function with doesn't returns anything and that take
-   an object of class TXN as entry. `function fcn(txn)`
+4. The **action context**. It is a Lua function conditionally executed. These
+   actions are registered by the Lua directives "`core.register_action()`". The
+   prototype of the Lua called function is a function with doesn't returns
+   anything and that take an object of class TXN as entry. `function fcn(txn)`.
 
 5. The **sample-fetch context**. This function takes a TXN object as entry
    argument and returns a string. These types of function cannot execute any
@@ -61,7 +59,7 @@ functions. Lua have 6 execution context.
    in the original HAProxy sample-fetches, in this case, it cannot return the
    result. This case is not yet supported
 
-6. The **converter context**. It is an Lua function that takes a string as input
+6. The **converter context**. It is a Lua function that takes a string as input
    and returns another string as output. These types of function are stateless,
    it cannot access to any context. They don't execute any blocking function.
    The call prototype is `function string fcn(string)`. This function can be
@@ -80,16 +78,16 @@ HAProxy configuration file (`hello_world.conf`):
 
     listen proxy
        bind 127.0.0.1:10001
-       tcp-request content lua hello_world
+       tcp-request inspect-delay 1s
+       tcp-request content use-service lua.hello_world
 
 HAProxy Lua file (`hello_world.lua`):
 
 .. code-block:: lua
 
-    function hello_world(txn)
-       txn.res:send("hello world\n")
-       txn:done()
-    end
+    core.register_service("hello_world", "tcp", function(applet)
+       applet:send("hello world\n")
+    end)
 
 How to start HAProxy for testing this configuration:
 
@@ -116,7 +114,7 @@ Core class
    "core" class is basically provided with HAProxy. No `require` line is
    required to uses these function.
 
-   The "core" class is static, t is not possible to create a new object of this
+   The "core" class is static, it is not possible to create a new object of this
    type.
 
 .. js:attribute:: core.emerg
@@ -155,7 +153,7 @@ Core class
 
   **context**: body, init, task, action, sample-fetch, converter
 
-  This fucntion sends a log. The log is sent, according with the HAProxy
+  This function sends a log. The log is sent, according with the HAProxy
   configuration file, on the default syslog server if it is configured and on
   the stderr if it is allowed.
 
@@ -268,12 +266,12 @@ Core class
 
   **context**: body
 
-  Register an Lua function executed as action. All the registered action can be
+  Register a Lua function executed as action. All the registered action can be
   used in HAProxy with the prefix "lua.". An action gets a TXN object class as
   input.
 
   :param string name: is the name of the converter.
-  :param table actions: is a table of string describing the HAProxy actions who
+  :param table actions: is a table of string describing the HAProxy actions who
                         want to register to. The expected actions are 'tcp-req',
                         'tcp-res', 'http-req' or 'http-res'.
   :param function func: is the Lua function called to work as converter.
@@ -288,7 +286,7 @@ Core class
   * **txn** (*class TXN*): this is a TXN object used for manipulating the
             current request or TCP stream.
 
-  Here, an exemple of action registration. the action juste send à 'Hello world'
+  Here, an exemple of action registration. the action juste send an 'Hello world'
   in the logs.
 
 .. code-block:: lua
@@ -314,7 +312,7 @@ Core class
 
   **context**: body
 
-  Register an Lua function executed as converter. All the registered converters
+  Register a Lua function executed as converter. All the registered converters
   can be used in HAProxy with the prefix "lua.". An converter get a string as
   input and return a string as output. The registered function can take up to 9
   values as parameter. All the value are strings.
@@ -340,7 +338,7 @@ Core class
 
   **context**: body
 
-  Register an Lua function executed as sample fetch. All the registered sample
+  Register a Lua function executed as sample fetch. All the registered sample
   fetchs can be used in HAProxy with the prefix "lua.". A Lua sample fetch
   return a string as output. The registered function can take up to 9 values as
   parameter. All the value are strings.
@@ -379,6 +377,51 @@ Core class
 
     frontend example
        http-request redirect location /%[lua.hello]
+
+.. js:function:: core.register_service(name, mode, func)
+
+  **context**: body
+
+  Register a Lua function executed as a service. All the registered service can
+  be used in HAProxy with the prefix "lua.". A service gets an object class as
+  input according with the required mode.
+
+  :param string name: is the name of the converter.
+  :param string mode: is string describing the required mode. Only 'tcp' or
+                      'http' are allowed.
+  :param function func: is the Lua function called to work as converter.
+
+  The prototype of the Lua function used as argument is:
+
+.. code-block:: lua
+
+  function(applet)
+..
+
+  * **txn** (*class AppletTCP*) or (*class AppletHTTP*): this is an object used
+            for manipulating the current HTTP request or TCP stream.
+
+  Here, an exemple of service registration. the service just send an 'Hello world'
+  as an http response.
+
+.. code-block:: lua
+
+  core.register_service("hello-world", "http" }, function(applet)
+     local response = "Hello World !"
+     applet:set_status(200)
+     applet:add_header("content-length", string.len(response))
+     applet:add_header("content-type", "text/plain")
+     applet:start_response()
+     applet:send(response)
+  end)
+..
+
+  This example code is used in HAproxy configuration like this:
+
+::
+
+    frontend example
+       http-request use-service lua.hello-world
 
 .. js:function:: core.register_init(func)
 
@@ -564,7 +607,7 @@ Channel class
   :param class_channel channel: The manipulated Channel.
   :returns: a string containig all the avalaible data or nil.
 
-.. js:function:: Channel.get_line(channel)
+.. js:function:: Channel.getline(channel)
 
   This function returns a string that contain the first line of the buffer. The
   data is consumed. If the data returned doesn't contains a final '\n' its
@@ -957,7 +1000,7 @@ TXN class
 
 .. js:function:: TXN.set_var(TXN, var, value)
 
-  Converts an Lua type in a HAProxy type and store it in a variable <var>.
+  Converts a Lua type in a HAProxy type and store it in a variable <var>.
 
   :param class_txn txn: The class txn object containing the data.
   :param string var: The variable name according with the HAProxy variable syntax.
@@ -1041,26 +1084,30 @@ Socket class
   system resources. Garbage-collected objects are automatically closed before
   destruction, though.
 
-.. js:function:: Socket.connect(socket, address, port)
+.. js:function:: Socket.connect(socket, address[, port])
 
   Attempts to connect a socket object to a remote host.
 
-  Address can be an IP address or a host name. Port must be an integer number
-  in the range [1..64K).
 
   In case of error, the method returns nil followed by a string describing the
   error. In case of success, the method returns 1.
 
   :param class_socket socket: Is the manipulated Socket.
+  :param string address: can be an IP address or a host name. See below for more
+                         information.
+  :param integer port: must be an integer number in the range [1..64K].
   :returns: 1 or nil.
 
-  Note: The function Socket.connect is available and is a shortcut for the
-  creation of client sockets.
+  an address field extension permits to use the connect() function to connect to
+  other stream than TCP. The syntax containing a simpleipv4 or ipv6 address is
+  the basically expected format. This format requires the port.
 
-  Note: Starting with LuaSocket 2.0, the settimeout method affects the behavior
-  of connect, causing it to return with an error in case of a timeout. If that
-  happens, you can still call Socket.select with the socket in the sendt table.
-  The socket will be writable when the connection is established.
+  Other format accepted are a socket path like "/socket/path", it permits to
+  connect to a socket. abstract namespaces are supported with the prefix
+  "abns@", and finaly a filedescriotr can be passed with the prefix "fd@".
+  The prefix "ipv4@", "ipv6@" and "unix@" are also supported. The port can be
+  passed int the string. The syntax "127.0.0.1:1234" is valid. in this case, the
+  parameter *port* is ignored.
 
 .. js:function:: Socket.connect_ssl(socket, address, port)
 
@@ -1115,6 +1162,8 @@ Socket class
   * **number**: causes the method to read a specified number of bytes from the
                 Socket. Prefix is an optional string to be concatenated to the
                 beginning of any received data before return.
+
+  * **empty**: If the pattern is left empty, the default option is `*l`.
 
   If successful, the method returns the received pattern. In case of error, the
   method returns nil followed by an error message which can be the string
@@ -1297,6 +1346,110 @@ Map class
   :param class_map map: Is the class Map object.
   :param string str: Is the string used as key.
   :returns: a string containing the result or empty string if no match.
+
+AppletHTTP class
+===============
+
+.. js:class:: AppletHTTP
+
+  This class is used with applets that requires the 'http' mode. The http applet
+  can be registered with the *core.register_service()* function. They are used
+  for processing an http request like a server in back of HAProxy.
+
+  This is an hello world sample code:
+
+.. code-block:: lua
+  core.register_service("hello-world", "http" }, function(applet)
+     local response = "Hello World !"
+     applet:set_status(200)
+     applet:add_header("content-length", string.len(response))
+     applet:add_header("content-type", "text/plain")
+     applet:start_response()
+     applet:send(response)
+  end)
+
+
+.. js:function:: AppletHTTP.set_status(code)
+
+  This function sets the HTTP status code for the response. The allowed code are
+  from 100 to 599.
+
+  :param integer code: the status code returned to the client.
+
+.. js:function:: AppletHTTP.add_header(name, value)
+
+  This function add an header in the response. Duplicated headers are not
+  collapsed. The special header *content-length* is used to determinate the
+  response length. If it not exists, a *transfer-encoding: chunked* is set, and
+  all the write from the funcion *AppletHTTP:send()* become a chunk.
+
+  :param string name: the header name
+  :param string value: the header value
+
+.. js:function:: AppletHTTP.start_response()
+
+  This function indicates to the HTTP engine that it can process and send the
+  response headers. After this called we cannot add headers to the response; We
+  cannot use the *AppletHTTP:send()* function if the
+  *AppletHTTP:start_response()* is not called.
+
+.. js:function:: AppletHTTP.getline()
+
+  This function returns a string containing one line from the http body. If the
+  data returned doesn't contains a final '\\n' its assumed than its the last
+  available data before the end of stream.
+
+  :returns: a string. The string can be empty if we reach the end of the stream.
+
+.. js:function:: AppletHTTP.receive([size])
+
+  Reads data from the HTTP body, according to the specified read *size*. If the
+  *size* is missing, the function tries to read all the content of the stream
+  until the end. If the *size* is bigger than the http body, it returns the
+  amount of data avalaible.
+
+  :param integer size: the required read size.
+  :returns: always return a string,the string can be empty is the connexion is
+            closed.
+
+.. js:function:: AppletHTTP.send(msg)
+
+  Send the message *msg* on the http request body.
+
+  :param string msg: the message to send.
+
+AppletTCP class
+===============
+
+.. js:class:: AppletTCP
+
+  This class is used with applets that requires the 'tcp' mode. The tcp applet
+  can be registered with the *core.register_service()* function. They are used
+  for processing a tcp stream like a server in back of HAProxy.
+
+.. js:function:: AppletTCP.getline()
+
+  This function returns a string containing one line from the stream. If the
+  data returned doesn't contains a final '\\n' its assumed than its the last
+  available data before the end of stream.
+
+  :returns: a string. The string can be empty if we reach the end of the stream.
+
+.. js:function:: AppletTCP.receive([size])
+
+  Reads data from the TCP stream, according to the specified read *size*. If the
+  *size* is missing, the function tries to read all the content of the stream
+  until the end.
+
+  :param integer size: the required read size.
+  :returns: always return a string,the string can be empty is the connexion is
+            closed.
+
+.. js:function:: AppletTCP.send(msg)
+
+  Send the message on the stream.
+
+  :param string msg: the message to send.
 
 External Lua libraries
 ======================

@@ -30,11 +30,19 @@
 
 #define NB_LOG_FACILITIES       24
 #define NB_LOG_LEVELS           8
+#define NB_MSG_IOVEC_ELEMENTS   8
 #define SYSLOG_PORT             514
 #define UNIQUEID_LEN            128
 
 /* The array containing the names of the log levels. */
 extern const char *log_levels[];
+
+/* enum for log format */
+enum {
+	LOG_FORMAT_RFC3164 = 0,
+	LOG_FORMAT_RFC5424,
+	LOG_FORMATS,          /* number of supported log formats, must always be last */
+};
 
 /* lists of fields that can be logged */
 enum {
@@ -157,6 +165,7 @@ struct logformat_node {
 struct logsrv {
 	struct list list;
 	struct sockaddr_storage addr;
+	int format;
 	int facility;
 	int level;
 	int minlvl;

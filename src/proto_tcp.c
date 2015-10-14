@@ -25,6 +25,8 @@
 #include <sys/un.h>
 
 #include <netinet/tcp.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
 
 #include <common/cfgparse.h>
 #include <common/compat.h>
@@ -37,7 +39,7 @@
 
 #include <types/global.h>
 #include <types/capture.h>
-#include <types/server.h>
+#include <types/connection.h>
 
 #include <proto/acl.h>
 #include <proto/action.h>
@@ -49,9 +51,11 @@
 #include <proto/log.h>
 #include <proto/port_range.h>
 #include <proto/protocol.h>
+#include <proto/proto_http.h>
 #include <proto/proto_tcp.h>
 #include <proto/proxy.h>
 #include <proto/sample.h>
+#include <proto/server.h>
 #include <proto/stream.h>
 #include <proto/stick_table.h>
 #include <proto/stream_interface.h>
@@ -496,6 +500,11 @@ int tcp_connect_server(struct connection *conn, int data, int delack)
                 setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &zero, sizeof(zero));
 #endif
 
+#ifdef TCP_USER_TIMEOUT
+	/* there is not much more we can do here when it fails, it's still minor */
+	if (srv && srv->tcp_ut)
+		setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &srv->tcp_ut, sizeof(srv->tcp_ut));
+#endif
 	if (global.tune.server_sndbuf)
                 setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &global.tune.server_sndbuf, sizeof(global.tune.server_sndbuf));
 
@@ -1038,6 +1047,7 @@ int tcp_inspect_request(struct stream *s, struct channel *req, int an_bit)
 	struct stksess *ts;
 	struct stktable *t;
 	int partial;
+	int act_flags = 0;
 
 	DPRINTF(stderr,"[%u] %s: stream=%p b=%p, exp(r,w)=%u,%u bf=%08x bh=%d analysers=%02x\n",
 		now_ms, __FUNCTION__,
@@ -1091,6 +1101,7 @@ int tcp_inspect_request(struct stream *s, struct channel *req, int an_bit)
 		}
 
 		if (ret) {
+			act_flags |= ACT_FLAG_FIRST;
 resume_execution:
 			/* we have a matching rule. */
 			if (rule->action == ACT_ACTION_ALLOW) {
@@ -1165,7 +1176,11 @@ resume_execution:
 				/* Custom keywords. */
 				if (!rule->action_ptr)
 					continue;
-				switch (rule->action_ptr(rule, s->be, s->sess, s)) {
+
+				if (partial & SMP_OPT_FINAL)
+					act_flags |= ACT_FLAG_FINAL;
+
+				switch (rule->action_ptr(rule, s->be, s->sess, s, act_flags)) {
 				case ACT_RET_ERR:
 				case ACT_RET_CONT:
 					continue;
@@ -1207,6 +1222,7 @@ int tcp_inspect_response(struct stream *s, struct channel *rep, int an_bit)
 	struct session *sess = s->sess;
 	struct act_rule *rule;
 	int partial;
+	int act_flags = 0;
 
 	DPRINTF(stderr,"[%u] %s: stream=%p b=%p, exp(r,w)=%u,%u bf=%08x bh=%d analysers=%02x\n",
 		now_ms, __FUNCTION__,
@@ -1263,6 +1279,7 @@ int tcp_inspect_response(struct stream *s, struct channel *rep, int an_bit)
 		}
 
 		if (ret) {
+			act_flags |= ACT_FLAG_FIRST;
 resume_execution:
 			/* we have a matching rule. */
 			if (rule->action == ACT_ACTION_ALLOW) {
@@ -1294,7 +1311,11 @@ resume_execution:
 				/* Custom keywords. */
 				if (!rule->action_ptr)
 					continue;
-				switch (rule->action_ptr(rule, s->be, s->sess, s)) {
+
+				if (partial & SMP_OPT_FINAL)
+					act_flags |= ACT_FLAG_FINAL;
+
+				switch (rule->action_ptr(rule, s->be, s->sess, s, act_flags)) {
 				case ACT_RET_ERR:
 				case ACT_RET_CONT:
 					continue;
@@ -1380,9 +1401,9 @@ int tcp_exec_req_rules(struct session *sess)
 			}
 			else {
 				/* Custom keywords. */
-				if (rule->action_ptr)
+				if (!rule->action_ptr)
 					break;
-				switch (rule->action_ptr(rule, sess->fe, sess, NULL)) {
+				switch (rule->action_ptr(rule, sess->fe, sess, NULL, ACT_FLAG_FINAL | ACT_FLAG_FIRST)) {
 				case ACT_RET_YIELD:
 					/* yield is not allowed at this point. If this return code is
 					 * used it is a bug, so I prefer to abort the process.
@@ -1402,6 +1423,72 @@ int tcp_exec_req_rules(struct session *sess)
 		}
 	}
 	return result;
+}
+
+/* Executes the "silent-drop" action. May be called from {tcp,http}{request,response} */
+static enum act_return tcp_exec_action_silent_drop(struct act_rule *rule, struct proxy *px, struct session *sess, struct stream *strm, int flags)
+{
+	struct connection *conn = objt_conn(sess->origin);
+
+	if (!conn)
+		goto out;
+
+	if (!conn_ctrl_ready(conn))
+		goto out;
+
+#ifdef TCP_QUICKACK
+	/* drain is needed only to send the quick ACK */
+	conn_sock_drain(conn);
+
+	/* re-enable quickack if it was disabled to ack all data and avoid
+	 * retransmits from the client that might trigger a real reset.
+	 */
+	setsockopt(conn->t.sock.fd, SOL_TCP, TCP_QUICKACK, &one, sizeof(one));
+#endif
+	/* lingering must absolutely be disabled so that we don't send a
+	 * shutdown(), this is critical to the TCP_REPAIR trick. When no stream
+	 * is present, returning with ERR will cause lingering to be disabled.
+	 */
+	if (strm)
+		strm->si[0].flags |= SI_FL_NOLINGER;
+
+	/* We're on the client-facing side, we must force to disable lingering to
+	 * ensure we will use an RST exclusively and kill any pending data.
+	 */
+	fdtab[conn->t.sock.fd].linger_risk = 1;
+
+#ifdef TCP_REPAIR
+	if (setsockopt(conn->t.sock.fd, SOL_TCP, TCP_REPAIR, &one, sizeof(one)) == 0) {
+		/* socket will be quiet now */
+		goto out;
+	}
+#endif
+	/* either TCP_REPAIR is not defined or it failed (eg: permissions).
+	 * Let's fall back on the TTL trick, though it only works for routed
+	 * network and has no effect on local net.
+	 */
+#ifdef IP_TTL
+	setsockopt(conn->t.sock.fd, SOL_IP, IP_TTL, &one, sizeof(one));
+#endif
+ out:
+	/* kill the stream if any */
+	if (strm) {
+		channel_abort(&strm->req);
+		channel_abort(&strm->res);
+		strm->req.analysers = 0;
+		strm->res.analysers = 0;
+		strm->be->be_counters.denied_req++;
+		if (!(strm->flags & SF_ERR_MASK))
+			strm->flags |= SF_ERR_PRXCOND;
+		if (!(strm->flags & SF_FINST_MASK))
+			strm->flags |= SF_FINST_R;
+	}
+
+	sess->fe->fe_counters.denied_req++;
+	if (sess->listener->counters)
+		sess->listener->counters->denied_req++;
+
+	return ACT_RET_STOP;
 }
 
 /* Parse a tcp-response rule. Return a negative value in case of failure */
@@ -1439,9 +1526,10 @@ static int tcp_parse_response_rule(char **args, int arg, int section_type,
 			if (kw->parse((const char **)args, &arg, curpx, rule, err) == ACT_RET_PRS_ERR)
 				return -1;
 		} else {
+			action_build_list(&tcp_res_cont_keywords, &trash);
 			memprintf(err,
-			          "'%s %s' expects 'accept', 'close', 'reject' or 'set-var' in %s '%s' (got '%s')",
-			          args[0], args[1], proxy_type_str(curpx), curpx->id, args[arg]);
+			          "'%s %s' expects 'accept', 'close', 'reject', %s in %s '%s' (got '%s')",
+			          args[0], args[1], trash.str, proxy_type_str(curpx), curpx->id, args[arg]);
 			return -1;
 		}
 	}
@@ -1649,10 +1737,14 @@ static int tcp_parse_request_rule(char **args, int arg, int section_type,
 			if (kw->parse((const char **)args, &arg, curpx, rule, err) == ACT_RET_PRS_ERR)
 				return -1;
 		} else {
+			if (where & SMP_VAL_FE_CON_ACC)
+				action_build_list(&tcp_req_conn_keywords, &trash);
+			else
+				action_build_list(&tcp_req_cont_keywords, &trash);
 			memprintf(err,
-			          "'%s %s' expects 'accept', 'reject', 'track-sc0' ... 'track-sc%d', "
-			          " or 'set-var' in %s '%s' (got '%s')",
-			          args[0], args[1], MAX_SESS_STKCTR-1, proxy_type_str(curpx),
+			          "'%s %s' expects 'accept', 'reject', 'track-sc0' ... 'track-sc%d', %s "
+			          "in %s '%s' (got '%s').\n",
+			          args[0], args[1], MAX_SESS_STKCTR-1, trash.str, proxy_type_str(curpx),
 			          curpx->id, args[arg]);
 			return -1;
 		}
@@ -1941,6 +2033,17 @@ static int tcp_parse_tcp_req(char **args, int section_type, struct proxy *curpx,
 	return -1;
 }
 
+/* Parse a "silent-drop" action. It takes no argument. It returns ACT_RET_PRS_OK on
+ * success, ACT_RET_PRS_ERR on error.
+ */
+static enum act_parse_ret tcp_parse_silent_drop(const char **args, int *orig_arg, struct proxy *px,
+                                                struct act_rule *rule, char **err)
+{
+	rule->action     = ACT_CUSTOM;
+	rule->action_ptr = tcp_exec_action_silent_drop;
+	return ACT_RET_PRS_OK;
+}
+
 
 /************************************************************************/
 /*       All supported sample fetch functions must be declared here     */
@@ -2212,6 +2315,31 @@ static int bind_parse_namespace(char **args, int cur_arg, struct proxy *px, stru
 }
 #endif
 
+#ifdef TCP_USER_TIMEOUT
+/* parse the "tcp-ut" server keyword */
+static int srv_parse_tcp_ut(char **args, int *cur_arg, struct proxy *px, struct server *newsrv, char **err)
+{
+	const char *ptr = NULL;
+	unsigned int timeout;
+
+	if (!*args[*cur_arg + 1]) {
+		memprintf(err, "'%s' : missing TCP User Timeout value", args[*cur_arg]);
+		return ERR_ALERT | ERR_FATAL;
+	}
+
+	ptr = parse_time_err(args[*cur_arg + 1], &timeout, TIME_UNIT_MS);
+	if (ptr) {
+		memprintf(err, "'%s' : expects a positive delay in milliseconds", args[*cur_arg]);
+		return ERR_ALERT | ERR_FATAL;
+	}
+
+	if (newsrv->addr.ss_family == AF_INET || newsrv->addr.ss_family == AF_INET6)
+		newsrv->tcp_ut = timeout;
+
+	return 0;
+}
+#endif
+
 static struct cfg_kw_list cfg_kws = {ILH, {
 	{ CFG_LISTEN, "tcp-request",  tcp_parse_tcp_req },
 	{ CFG_LISTEN, "tcp-response", tcp_parse_tcp_rep },
@@ -2287,6 +2415,39 @@ static struct bind_kw_list bind_kws = { "TCP", { }, {
 	{ NULL, NULL, 0 },
 }};
 
+static struct srv_kw_list srv_kws = { "TCP", { }, {
+#ifdef TCP_USER_TIMEOUT
+	{ "tcp-ut",        srv_parse_tcp_ut,        1,  0 }, /* set TCP user timeout on server */
+#endif
+	{ NULL, NULL, 0 },
+}};
+
+static struct action_kw_list tcp_req_conn_actions = {ILH, {
+	{ "silent-drop", tcp_parse_silent_drop },
+	{ /* END */ }
+}};
+
+static struct action_kw_list tcp_req_cont_actions = {ILH, {
+	{ "silent-drop", tcp_parse_silent_drop },
+	{ /* END */ }
+}};
+
+static struct action_kw_list tcp_res_cont_actions = {ILH, {
+	{ "silent-drop", tcp_parse_silent_drop },
+	{ /* END */ }
+}};
+
+static struct action_kw_list http_req_actions = {ILH, {
+	{ "silent-drop", tcp_parse_silent_drop },
+	{ /* END */ }
+}};
+
+static struct action_kw_list http_res_actions = {ILH, {
+	{ "silent-drop", tcp_parse_silent_drop },
+	{ /* END */ }
+}};
+
+
 __attribute__((constructor))
 static void __tcp_protocol_init(void)
 {
@@ -2296,6 +2457,12 @@ static void __tcp_protocol_init(void)
 	cfg_register_keywords(&cfg_kws);
 	acl_register_keywords(&acl_kws);
 	bind_register_keywords(&bind_kws);
+	srv_register_keywords(&srv_kws);
+	tcp_req_conn_keywords_register(&tcp_req_conn_actions);
+	tcp_req_cont_keywords_register(&tcp_req_cont_actions);
+	tcp_res_cont_keywords_register(&tcp_res_cont_actions);
+	http_req_keywords_register(&http_req_actions);
+	http_res_keywords_register(&http_res_actions);
 }
 
 

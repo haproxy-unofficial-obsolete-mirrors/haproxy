@@ -41,6 +41,31 @@
 #include <proto/ssl_sock.h>
 #endif
 
+struct log_fmt {
+	char *name;
+	struct {
+		struct chunk sep1; /* first pid separator */
+		struct chunk sep2; /* second pid separator */
+	} pid;
+};
+
+static const struct log_fmt log_formats[LOG_FORMATS] = {
+	[LOG_FORMAT_RFC3164] = {
+		.name = "rfc3164",
+		.pid = {
+			.sep1 = { .str = "[",   .len = 1 },
+			.sep2 = { .str = "]: ", .len = 3 }
+		}
+	},
+	[LOG_FORMAT_RFC5424] = {
+		.name = "rfc5424",
+		.pid = {
+			.sep1 = { .str = " ",   .len = 1 },
+			.sep2 = { .str = " - ", .len = 3 }
+		}
+	}
+};
+
 const char *log_facilities[NB_LOG_FACILITIES] = {
 	"kern", "user", "mail", "daemon",
 	"auth", "syslog", "lpr", "news",
@@ -49,7 +74,6 @@ const char *log_facilities[NB_LOG_FACILITIES] = {
 	"local0", "local1", "local2", "local3",
 	"local4", "local5", "local6", "local7"
 };
-
 
 const char *log_levels[NB_LOG_LEVELS] = {
 	"emerg", "alert", "crit", "err",
@@ -151,10 +175,31 @@ char clf_http_log_format[] = "%{+Q}o %{-Q}ci - - [%T] %r %ST %B \"\" \"\" %cp %m
 char default_tcp_log_format[] = "%ci:%cp [%t] %ft %b/%s %Tw/%Tc/%Tt %B %ts %ac/%fc/%bc/%sc/%rc %sq/%bq";
 char *log_format = NULL;
 
-/* This is a global syslog line, common to all outgoing messages. It begins
- * with the syslog tag and the date that are updated by update_log_hdr().
+/* Default string used for structured-data part in RFC5424 formatted
+ * syslog messages.
+ */
+char default_rfc5424_sd_log_format[] = "- ";
+
+/* This is a global syslog header, common to all outgoing messages in
+ * RFC3164 format. It begins with time-based part and is updated by
+ * update_log_hdr().
+ */
+char *logheader = NULL;
+
+/* This is a global syslog header for messages in RFC5424 format. It is
+ * updated by update_log_hdr_rfc5424().
+ */
+char *logheader_rfc5424 = NULL;
+
+/* This is a global syslog message buffer, common to all outgoing
+ * messages. It contains only the data part.
  */
 char *logline = NULL;
+
+/* A global syslog message buffer, common to all RFC5424 syslog messages.
+ * Currently, it is used for generating the structured-data part.
+ */
+char *logline_rfc5424 = NULL;
 
 struct logformat_var_args {
 	char *name;
@@ -183,6 +228,8 @@ static inline const char *fmt_directive(const struct proxy *curproxy)
 		return "track-sc";
 	case ARGC_LOG:
 		return "log-format";
+	case ARGC_LOGSD:
+		return "log-format-sd";
 	case ARGC_HRQ:
 		return "http-request";
 	case ARGC_HRS:
@@ -613,6 +660,20 @@ void qfprintf(FILE *out, const char *fmt, ...)
 }
 
 /*
+ * returns log format for <fmt> or -1 if not found.
+ */
+int get_log_format(const char *fmt)
+{
+	int format;
+
+	format = LOG_FORMATS - 1;
+	while (format >= 0 && strcmp(log_formats[format].name, fmt))
+		format--;
+
+	return format;
+}
+
+/*
  * returns log level for <lev> or -1 if not found.
  */
 int get_log_level(const char *lev)
@@ -625,7 +686,6 @@ int get_log_level(const char *lev)
 
 	return level;
 }
-
 
 /*
  * returns log facility for <fac> or -1 if not found.
@@ -734,28 +794,36 @@ char *lf_port(char *dst, struct sockaddr *sockaddr, size_t size, struct logforma
 	return ret;
 }
 
-/* Re-generate the syslog header at the beginning of logline once a second and
- * return the pointer to the first character after the header.
+/* Re-generate time-based part of the syslog header in RFC3164 format at
+ * the beginning of logheader once a second and return the pointer to the
+ * first character after it.
  */
-static char *update_log_hdr(const char *log_tag)
+static char *update_log_hdr(const time_t time)
 {
 	static long tvsec;
 	static char *dataptr = NULL; /* backup of last end of header, NULL first time */
-	int tag_len;
+	static struct chunk host = { NULL, 0, 0 };
+	static int sep = 0;
 
-	if (unlikely(date.tv_sec != tvsec || dataptr == NULL)) {
+	if (unlikely(time != tvsec || dataptr == NULL)) {
 		/* this string is rebuild only once a second */
 		struct tm tm;
 		int hdr_len;
 
-		tvsec = date.tv_sec;
+		tvsec = time;
 		get_localtime(tvsec, &tm);
 
-		hdr_len = snprintf(logline, global.max_syslog_len,
-				   "<<<<>%s %2d %02d:%02d:%02d %s",
+		if (unlikely(global.log_send_hostname != host.str)) {
+			host.str = global.log_send_hostname;
+			host.len = host.str ? strlen(host.str) : 0;
+			sep = host.len ? 1 : 0;
+		}
+
+		hdr_len = snprintf(logheader, global.max_syslog_len,
+				   "<<<<>%s %2d %02d:%02d:%02d %.*s%*s",
 				   monthname[tm.tm_mon],
 				   tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
-				   global.log_send_hostname ? global.log_send_hostname : "");
+				   host.len, host.str, sep, "");
 		/* WARNING: depending upon implementations, snprintf may return
 		 * either -1 or the number of bytes that would be needed to store
 		 * the total message. In both cases, we must adjust it.
@@ -763,50 +831,87 @@ static char *update_log_hdr(const char *log_tag)
 		if (hdr_len < 0 || hdr_len > global.max_syslog_len)
 			hdr_len = global.max_syslog_len;
 
-		dataptr = logline + hdr_len;
+		dataptr = logheader + hdr_len;
 	}
 
 	dataptr[0] = 0; // ensure we get rid of any previous attempt
 
-	tag_len = snprintf(dataptr, logline + global.max_syslog_len - dataptr, "%s[%d]: ", log_tag, pid);
-	if (tag_len < 0 || tag_len > logline + global.max_syslog_len - dataptr)
-		tag_len = logline + global.max_syslog_len - dataptr;
+	return dataptr;
+}
 
-	return dataptr + tag_len;
+/* Re-generate time-based part of the syslog header in RFC5424 format at
+ * the beginning of logheader_rfc5424 once a second and return the pointer
+ * to the first character after it.
+ */
+static char *update_log_hdr_rfc5424(const time_t time)
+{
+	static long tvsec;
+	static char *dataptr = NULL; /* backup of last end of header, NULL first time */
+
+	if (unlikely(time != tvsec || dataptr == NULL)) {
+		/* this string is rebuild only once a second */
+		struct tm tm;
+		int hdr_len;
+
+		tvsec = time;
+		get_localtime(tvsec, &tm);
+
+		hdr_len = snprintf(logheader_rfc5424, global.max_syslog_len,
+				   "<<<<>1 %4d-%02d-%02dT%02d:%02d:%02d%.3s:%.2s %s ",
+				   tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
+				   tm.tm_hour, tm.tm_min, tm.tm_sec,
+				   localtimezone, localtimezone+3,
+				   global.log_send_hostname ? global.log_send_hostname : hostname);
+		/* WARNING: depending upon implementations, snprintf may return
+		 * either -1 or the number of bytes that would be needed to store
+		 * the total message. In both cases, we must adjust it.
+		 */
+		if (hdr_len < 0 || hdr_len > global.max_syslog_len)
+			hdr_len = global.max_syslog_len;
+
+		dataptr = logheader_rfc5424 + hdr_len;
+	}
+
+	dataptr[0] = 0; // ensure we get rid of any previous attempt
+
+	return dataptr;
 }
 
 /*
- * This function adds a header to the message and sends the syslog message
- * using a printf format string. It expects an LF-terminated message.
+ * This function sends the syslog message using a printf format string. It
+ * expects an LF-terminated message.
  */
 void send_log(struct proxy *p, int level, const char *format, ...)
 {
 	va_list argp;
-	char *dataptr;
 	int  data_len;
 
 	if (level < 0 || format == NULL || logline == NULL)
 		return;
 
-	dataptr = update_log_hdr(p && p->log_tag ? p->log_tag : global.log_tag); /* update log header and skip it */
-	data_len = dataptr - logline;
-
 	va_start(argp, format);
-	data_len += vsnprintf(dataptr, logline + global.max_syslog_len - dataptr, format, argp);
+	data_len = vsnprintf(logline, global.max_syslog_len, format, argp);
 	if (data_len < 0 || data_len > global.max_syslog_len)
 		data_len = global.max_syslog_len;
 	va_end(argp);
 
-	__send_log(p, level, logline, data_len);
+	__send_log(p, level, logline, data_len, default_rfc5424_sd_log_format, 2);
 }
 
 /*
  * This function sends a syslog message.
  * It doesn't care about errors nor does it report them.
- * It overrides the last byte (message[size-1]) with an LF character.
+ * It overrides the last byte of the message vector with an LF character.
+ * The arguments <sd> and <sd_size> are used for the structured-data part
+ * in RFC5424 formatted syslog messages.
  */
-void __send_log(struct proxy *p, int level, char *message, size_t size)
+void __send_log(struct proxy *p, int level, char *message, size_t size, char *sd, size_t sd_size)
 {
+	static struct iovec iovec[NB_MSG_IOVEC_ELEMENTS] = { };
+	static struct msghdr msghdr = {
+		.msg_iov = iovec,
+		.msg_iovlen = NB_MSG_IOVEC_ELEMENTS
+	};
 	static int logfdunix = -1;	/* syslog to AF_UNIX socket */
 	static int logfdinet = -1;	/* syslog to AF_INET socket */
 	static char *dataptr = NULL;
@@ -814,7 +919,13 @@ void __send_log(struct proxy *p, int level, char *message, size_t size)
 	struct list *logsrvs = NULL;
 	struct logsrv *tmp = NULL;
 	int nblogger;
-	char *log_ptr;
+	char *hdr, *hdr_ptr;
+	size_t hdr_size;
+	time_t time = date.tv_sec;
+	struct chunk *tag = &global.log_tag;
+	static int curr_pid;
+	static char pidstr[100];
+	static struct chunk pid;
 
 	dataptr = message;
 
@@ -826,10 +937,19 @@ void __send_log(struct proxy *p, int level, char *message, size_t size)
 		if (!LIST_ISEMPTY(&p->logsrvs)) {
 			logsrvs = &p->logsrvs;
 		}
+		if (p->log_tag.str) {
+			tag = &p->log_tag;
+		}
 	}
 
 	if (!logsrvs)
 		return;
+
+	if (unlikely(curr_pid != getpid())) {
+		curr_pid = getpid();
+		ltoa_o(curr_pid, pidstr, sizeof(pidstr));
+		chunk_initstr(&pid, pidstr);
+	}
 
 	/* Send log messages to syslog server. */
 	nblogger = 0;
@@ -837,9 +957,16 @@ void __send_log(struct proxy *p, int level, char *message, size_t size)
 		const struct logsrv *logsrv = tmp;
 		int *plogfd = logsrv->addr.ss_family == AF_UNIX ?
 			&logfdunix : &logfdinet;
+		char *pid_sep1 = NULL, *pid_sep2 = NULL;
 		int sent;
-		int max;
-		char backup;
+		int maxlen;
+		int hdr_max = 0;
+		int tag_max = 0;
+		int pid_sep1_max = 0;
+		int pid_max = 0;
+		int pid_sep2_max = 0;
+		int sd_max = 0;
+		int max = 0;
 
 		nblogger++;
 
@@ -862,6 +989,24 @@ void __send_log(struct proxy *p, int level, char *message, size_t size)
 			shutdown(*plogfd, SHUT_RD);
 		}
 
+		switch (logsrv->format) {
+		case LOG_FORMAT_RFC3164:
+			hdr = logheader;
+			hdr_ptr = update_log_hdr(time);
+			break;
+
+		case LOG_FORMAT_RFC5424:
+			hdr = logheader_rfc5424;
+			hdr_ptr = update_log_hdr_rfc5424(time);
+			sd_max = sd_size; /* the SD part allowed only in RFC5424 */
+			break;
+
+		default:
+			continue; /* must never happen */
+		}
+
+		hdr_size = hdr_ptr - hdr;
+
 		/* For each target, we may have a different facility.
 		 * We can also have a different log level for each message.
 		 * This induces variations in the message header length.
@@ -870,33 +1015,99 @@ void __send_log(struct proxy *p, int level, char *message, size_t size)
 		 * and we change the pointer to the header accordingly.
 		 */
 		fac_level = (logsrv->facility << 3) + MAX(level, logsrv->minlvl);
-		log_ptr = dataptr + 3; /* last digit of the log level */
+		hdr_ptr = hdr + 3; /* last digit of the log level */
 		do {
-			*log_ptr = '0' + fac_level % 10;
+			*hdr_ptr = '0' + fac_level % 10;
 			fac_level /= 10;
-			log_ptr--;
-		} while (fac_level && log_ptr > dataptr);
-		*log_ptr = '<';
+			hdr_ptr--;
+		} while (fac_level && hdr_ptr > hdr);
+		*hdr_ptr = '<';
 
-		max = size - (log_ptr - dataptr);
-		if (max > logsrv->maxlen)
-			max = logsrv->maxlen;
+		hdr_max = hdr_size - (hdr_ptr - hdr);
 
-		/* insert a \n at the end of the message, but save what was
-		 * there first because we could have different max lengths
-		 * for different log targets.
-		 */
-		backup = log_ptr[max - 1];
-		log_ptr[max - 1] = '\n';
+		/* time-based header */
+		if (unlikely(hdr_size >= logsrv->maxlen)) {
+			hdr_max = MIN(hdr_max, logsrv->maxlen) - 1;
+			sd_max = 0;
+			goto send;
+		}
 
-		sent = sendto(*plogfd, log_ptr, max,
-			      MSG_DONTWAIT | MSG_NOSIGNAL,
-			      (struct sockaddr *)&logsrv->addr, get_addr_len(&logsrv->addr));
+		maxlen = logsrv->maxlen - hdr_max;
 
-		log_ptr[max - 1] = backup;
+		/* tag */
+		tag_max = tag->len;
+		if (unlikely(tag_max >= maxlen)) {
+			tag_max = maxlen - 1;
+			sd_max = 0;
+			goto send;
+		}
+
+		maxlen -= tag_max;
+
+		/* first pid separator */
+		pid_sep1_max = log_formats[logsrv->format].pid.sep1.len;
+		if (unlikely(pid_sep1_max >= maxlen)) {
+			pid_sep1_max = maxlen - 1;
+			sd_max = 0;
+			goto send;
+		}
+
+		pid_sep1 = log_formats[logsrv->format].pid.sep1.str;
+		maxlen -= pid_sep1_max;
+
+		/* pid */
+		pid_max = pid.len;
+		if (unlikely(pid_max >= maxlen)) {
+			pid_max = maxlen - 1;
+			sd_max = 0;
+			goto send;
+		}
+
+		maxlen -= pid_max;
+
+		/* second pid separator */
+		pid_sep2_max = log_formats[logsrv->format].pid.sep2.len;
+		if (unlikely(pid_sep2_max >= maxlen)) {
+			pid_sep2_max = maxlen - 1;
+			sd_max = 0;
+			goto send;
+		}
+
+		pid_sep2 = log_formats[logsrv->format].pid.sep2.str;
+		maxlen -= pid_sep2_max;
+
+		/* structured-data */
+		if (sd_max >= maxlen) {
+			sd_max = maxlen - 1;
+			goto send;
+		}
+
+		max = MIN(size, maxlen - sd_max) - 1;
+send:
+		iovec[0].iov_base = hdr_ptr;
+		iovec[0].iov_len  = hdr_max;
+		iovec[1].iov_base = tag->str;
+		iovec[1].iov_len  = tag_max;
+		iovec[2].iov_base = pid_sep1;
+		iovec[2].iov_len  = pid_sep1_max;
+		iovec[3].iov_base = pid.str;
+		iovec[3].iov_len  = pid_max;
+		iovec[4].iov_base = pid_sep2;
+		iovec[4].iov_len  = pid_sep2_max;
+		iovec[5].iov_base = sd;
+		iovec[5].iov_len  = sd_max;
+		iovec[6].iov_base = dataptr;
+		iovec[6].iov_len  = max;
+		iovec[7].iov_base = "\n"; /* insert a \n at the end of the message */
+		iovec[7].iov_len  = 1;
+
+		msghdr.msg_name = (struct sockaddr *)&logsrv->addr;
+		msghdr.msg_namelen = get_addr_len(&logsrv->addr);
+
+		sent = sendmsg(*plogfd, &msghdr, MSG_DONTWAIT | MSG_NOSIGNAL);
 
 		if (sent < 0) {
-			Alert("sendto logger #%d failed: %s (errno=%d)\n",
+			Alert("sendmsg logger #%d failed: %s (errno=%d)\n",
 				nblogger, strerror(errno), errno);
 		}
 	}
@@ -1813,8 +2024,8 @@ out:
 void strm_log(struct stream *s)
 {
 	struct session *sess = s->sess;
-	char *tmplog;
 	int size, err, level;
+	int sd_size = 0;
 
 	/* if we don't want to log normal traffic, return now */
 	err = (s->flags & SF_REDISP) ||
@@ -1848,12 +2059,15 @@ void strm_log(struct stream *s)
 			build_logline(s, s->unique_id, UNIQUEID_LEN, &sess->fe->format_unique_id);
 	}
 
-	tmplog = update_log_hdr(sess->fe->log_tag ? sess->fe->log_tag : global.log_tag);
-	size = tmplog - logline;
-	size += build_logline(s, tmplog, global.max_syslog_len - size, &sess->fe->logformat);
+	if (!LIST_ISEMPTY(&sess->fe->logformat_sd)) {
+		sd_size = build_logline(s, logline_rfc5424, global.max_syslog_len,
+		                        &sess->fe->logformat_sd);
+	}
+
+	size = build_logline(s, logline, global.max_syslog_len, &sess->fe->logformat);
 	if (size > 0) {
 		sess->fe->log_count++;
-		__send_log(sess->fe, level, logline, size + 1);
+		__send_log(sess->fe, level, logline, size + 1, logline_rfc5424, sd_size);
 		s->logs.logwait = 0;
 	}
 }

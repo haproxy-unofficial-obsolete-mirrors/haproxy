@@ -77,6 +77,9 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit);
 int http_process_res_common(struct stream *s, struct channel *rep, int an_bit, struct proxy *px);
 int http_request_forward_body(struct stream *s, struct channel *req, int an_bit);
 int http_response_forward_body(struct stream *s, struct channel *res, int an_bit);
+void http_msg_analyzer(struct http_msg *msg, struct hdr_idx *idx);
+void http_txn_reset_req(struct http_txn *txn);
+void http_txn_reset_res(struct http_txn *txn);
 
 void debug_hdr(const char *dir, struct stream *s, const char *start, const char *end);
 int apply_filter_to_req_headers(struct stream *s, struct channel *req, struct hdr_exp *exp);
@@ -94,7 +97,11 @@ int http_find_full_header2(const char *name, int len,
 int http_find_header2(const char *name, int len,
 		      char *sol, struct hdr_idx *idx,
 		      struct hdr_ctx *ctx);
+int http_find_next_header(char *sol, struct hdr_idx *idx,
+                          struct hdr_ctx *ctx);
 char *find_hdr_value_end(char *s, const char *e);
+char *extract_cookie_value(char *hdr, const char *hdr_end, char *cookie_name,
+                           size_t cookie_name_l, int list, char **value, int *value_l);
 int http_header_match2(const char *hdr, const char *end, const char *name, int len);
 int http_remove_header2(struct http_msg *msg, struct hdr_idx *idx, struct hdr_ctx *ctx);
 int http_header_add_tail2(struct http_msg *msg, struct hdr_idx *hdr_idx, const char *text, int len);
@@ -112,6 +119,8 @@ void http_capture_bad_message(struct error_snapshot *es, struct stream *s,
 unsigned int http_get_hdr(const struct http_msg *msg, const char *hname, int hlen,
 			  struct hdr_idx *idx, int occ,
 			  struct hdr_ctx *ctx, char **vptr, int *vlen);
+char *http_get_path(struct http_txn *txn);
+const char *get_reason(unsigned int status);
 
 struct http_txn *http_alloc_txn(struct stream *s);
 void http_init_txn(struct stream *s);

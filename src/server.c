@@ -907,7 +907,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			 *  - IP:+N => port=+N, relative
 			 *  - IP:-N => port=-N, relative
 			 */
-			sk = str2sa_range(args[2], &port1, &port2, &errmsg, NULL, &fqdn);
+			sk = str2sa_range(args[2], &port1, &port2, &errmsg, NULL, &fqdn, 1);
 			if (!sk) {
 				Alert("parsing [%s:%d] : '%s %s' : %s\n", file, linenum, args[0], args[1], errmsg);
 				err_code |= ERR_ALERT | ERR_FATAL;
@@ -1174,7 +1174,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 				int port1, port2;
 				struct protocol *proto;
 
-				sk = str2sa_range(args[cur_arg + 1], &port1, &port2, &errmsg, NULL, NULL);
+				sk = str2sa_range(args[cur_arg + 1], &port1, &port2, &errmsg, NULL, NULL, 1);
 				if (!sk) {
 					Alert("parsing [%s:%d] : '%s' : %s\n",
 					      file, linenum, args[cur_arg], errmsg);
@@ -1383,7 +1383,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 				}
 
 				newsrv->conn_src.opts |= CO_SRC_BIND;
-				sk = str2sa_range(args[cur_arg + 1], &port_low, &port_high, &errmsg, NULL, NULL);
+				sk = str2sa_range(args[cur_arg + 1], &port_low, &port_high, &errmsg, NULL, NULL, 1);
 				if (!sk) {
 					Alert("parsing [%s:%d] : '%s %s' : %s\n",
 					      file, linenum, args[cur_arg], args[cur_arg+1], errmsg);
@@ -1483,7 +1483,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 							struct sockaddr_storage *sk;
 							int port1, port2;
 
-							sk = str2sa_range(args[cur_arg + 1], &port1, &port2, &errmsg, NULL, NULL);
+							sk = str2sa_range(args[cur_arg + 1], &port1, &port2, &errmsg, NULL, NULL, 1);
 							if (!sk) {
 								Alert("parsing [%s:%d] : '%s %s' : %s\n",
 								      file, linenum, args[cur_arg], args[cur_arg+1], errmsg);
@@ -1897,9 +1897,8 @@ struct server *server_find_best_match(struct proxy *bk, char *name, int id, int 
 /* Update a server state using the parameters available in the params list */
 static void srv_update_state(struct server *srv, int version, char **params)
 {
-	int msg_default_len;
 	char *p;
-	struct chunk *msg = get_trash_chunk();
+	struct chunk *msg;
 
 	/* fields since version 1
 	 * and common to all other upcoming versions
@@ -1916,8 +1915,7 @@ static void srv_update_state(struct server *srv, int version, char **params)
 	int bk_f_forced_id;
 	int srv_f_forced_id;
 
-	chunk_printf(msg, "server-state application failed for server '%s/%s'", srv->proxy->id, srv->id);
-	msg_default_len = msg->len;
+	msg = get_trash_chunk();
 	switch (version) {
 		case 1:
 			/*
@@ -1968,16 +1966,14 @@ static void srv_update_state(struct server *srv, int version, char **params)
 			p = NULL;
 			errno = 0;
 			srv_uweight = strtol(params[3], &p, 10);
-			if ((p == params[3]) || errno == EINVAL || errno == ERANGE ||
-			    (srv_uweight < 0) || (srv_uweight > SRV_UWGHT_MAX))
+			if ((p == params[3]) || errno == EINVAL || errno == ERANGE || (srv_uweight > SRV_UWGHT_MAX))
 				chunk_appendf(msg, ", invalid srv_uweight value '%s'", params[3]);
 
 			/* validating srv_iweight */
 			p = NULL;
 			errno = 0;
 			srv_iweight = strtol(params[4], &p, 10);
-			if ((p == params[4]) || errno == EINVAL || errno == ERANGE ||
-			    (srv_iweight < 0) || (srv_iweight > SRV_UWGHT_MAX))
+			if ((p == params[4]) || errno == EINVAL || errno == ERANGE || (srv_iweight > SRV_UWGHT_MAX))
 				chunk_appendf(msg, ", invalid srv_iweight value '%s'", params[4]);
 
 			/* validating srv_last_time_change */
@@ -2047,7 +2043,7 @@ static void srv_update_state(struct server *srv, int version, char **params)
 
 
 			/* don't apply anything if one error has been detected */
-			if (msg->len > msg_default_len)
+			if (msg->len)
 				goto out;
 
 			/* recover operational state and apply it to this server
@@ -2153,11 +2149,9 @@ static void srv_update_state(struct server *srv, int version, char **params)
 	}
 
  out:
-	if (msg->len > msg_default_len) {
-		chunk_appendf(msg, "\n");
-		Warning(msg->str);
-	}
-
+	if (msg->len)
+		Warning("server-state application failed for server '%s/%s'%s",
+		        srv->proxy->id, srv->id, msg->str);
 }
 
 /* This function parses all the proxies and only take care of the backends (since we're looking for server)

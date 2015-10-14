@@ -19,14 +19,30 @@
 #include <proto/stream.h>
 #include <proto/stream_interface.h>
 
-struct list applet_runq = LIST_HEAD_INIT(applet_runq);
+struct list applet_active_queue = LIST_HEAD_INIT(applet_active_queue);
+struct list applet_run_queue    = LIST_HEAD_INIT(applet_run_queue);
 
 void applet_run_active()
 {
-	struct appctx *curr, *back;
+	struct appctx *curr;
 	struct stream_interface *si;
 
-	list_for_each_entry_safe(curr, back, &applet_runq, runq) {
+	if (LIST_ISEMPTY(&applet_active_queue))
+		return;
+
+	/* move active queue to run queue */
+	applet_active_queue.n->p = &applet_run_queue;
+	applet_active_queue.p->n = &applet_run_queue;
+
+	applet_run_queue = applet_active_queue;
+	LIST_INIT(&applet_active_queue);
+
+	/* The list is only scanned from the head. This guarantees that if any
+	 * applet removes another one, there is no side effect while walking
+	 * through the list.
+	 */
+	while (!LIST_ISEMPTY(&applet_run_queue)) {
+		curr = LIST_ELEM(applet_run_queue.n, typeof(curr), runq);
 		si = curr->owner;
 
 		/* now we'll need a buffer */
@@ -45,6 +61,12 @@ void applet_run_active()
 		si_applet_stop_put(si);
 
 		curr->applet->fct(curr);
-		si_applet_done(si);
+		si_applet_wake_cb(si);
+
+		if (applet_run_queue.n == &curr->runq) {
+			/* curr was left in the list, move it back to the active list */
+			LIST_DEL(&curr->runq);
+			LIST_ADDQ(&applet_active_queue, &curr->runq);
+		}
 	}
 }

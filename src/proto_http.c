@@ -458,6 +458,9 @@ const struct http_method_desc http_methods[26][3] = {
 	['H' - 'A'] = {
 		[0] = {	.meth = HTTP_METH_HEAD    , .len=4, .text="HEAD"    },
 	},
+	['O' - 'A'] = {
+		[0] = {	.meth = HTTP_METH_OPTIONS , .len=7, .text="OPTIONS" },
+	},
 	['P' - 'A'] = {
 		[0] = {	.meth = HTTP_METH_POST    , .len=4, .text="POST"    },
 		[1] = {	.meth = HTTP_METH_PUT     , .len=3, .text="PUT"     },
@@ -986,8 +989,7 @@ enum http_meth_t find_http_meth(const char *str, const int len)
  * phase) and look for the "/" beginning the PATH. If not found, return NULL.
  * It is returned otherwise.
  */
-static char *
-http_get_path(struct http_txn *txn)
+char *http_get_path(struct http_txn *txn)
 {
 	char *ptr, *end;
 
@@ -3498,6 +3500,7 @@ http_req_get_intercept_rule(struct proxy *px, struct list *rules, struct stream 
 	struct act_rule *rule;
 	struct hdr_ctx ctx;
 	const char *auth_realm;
+	int act_flags = 0;
 
 	/* If "the current_rule_list" match the executed rule list, we are in
 	 * resume condition. If a resume is needed it is always in the action
@@ -3528,6 +3531,7 @@ http_req_get_intercept_rule(struct proxy *px, struct list *rules, struct stream 
 				continue;
 		}
 
+		act_flags |= ACT_FLAG_FIRST;
 resume_execution:
 		switch (rule->action) {
 		case ACT_ACTION_ALLOW:
@@ -3710,7 +3714,10 @@ resume_execution:
 			}
 
 		case ACT_CUSTOM:
-			switch (rule->action_ptr(rule, px, s->sess, s)) {
+			if ((px->options & PR_O_ABRT_CLOSE) && (s->req.flags & (CF_SHUTR|CF_READ_NULL|CF_READ_ERROR)))
+				act_flags |= ACT_FLAG_FINAL;
+
+			switch (rule->action_ptr(rule, px, s->sess, s, act_flags)) {
 			case ACT_RET_ERR:
 			case ACT_RET_CONT:
 				break;
@@ -3805,6 +3812,7 @@ http_res_get_intercept_rule(struct proxy *px, struct list *rules, struct stream 
 	struct connection *cli_conn;
 	struct act_rule *rule;
 	struct hdr_ctx ctx;
+	int act_flags = 0;
 
 	/* If "the current_rule_list" match the executed rule list, we are in
 	 * resume condition. If a resume is needed it is always in the action
@@ -3835,6 +3843,7 @@ http_res_get_intercept_rule(struct proxy *px, struct list *rules, struct stream 
 				continue;
 		}
 
+		act_flags |= ACT_FLAG_FIRST;
 resume_execution:
 		switch (rule->action) {
 		case ACT_ACTION_ALLOW:
@@ -3992,7 +4001,10 @@ resume_execution:
 			return HTTP_RULE_RES_DONE;
 
 		case ACT_CUSTOM:
-			switch (rule->action_ptr(rule, px, s->sess, s)) {
+			if ((px->options & PR_O_ABRT_CLOSE) && (s->req.flags & (CF_SHUTR|CF_READ_NULL|CF_READ_ERROR)))
+				act_flags |= ACT_FLAG_FINAL;
+
+			switch (rule->action_ptr(rule, px, s->sess, s, act_flags)) {
 			case ACT_RET_ERR:
 			case ACT_RET_CONT:
 				break;
@@ -8842,6 +8854,26 @@ struct http_txn *http_alloc_txn(struct stream *s)
 	return txn;
 }
 
+void http_txn_reset_req(struct http_txn *txn)
+{
+	txn->req.flags = 0;
+	txn->req.sol = txn->req.eol = txn->req.eoh = 0; /* relative to the buffer */
+	txn->req.next = 0;
+	txn->req.chunk_len = 0LL;
+	txn->req.body_len = 0LL;
+	txn->req.msg_state = HTTP_MSG_RQBEFORE; /* at the very beginning of the request */
+}
+
+void http_txn_reset_res(struct http_txn *txn)
+{
+	txn->rsp.flags = 0;
+	txn->rsp.sol = txn->rsp.eol = txn->rsp.eoh = 0; /* relative to the buffer */
+	txn->rsp.next = 0;
+	txn->rsp.chunk_len = 0LL;
+	txn->rsp.body_len = 0LL;
+	txn->rsp.msg_state = HTTP_MSG_RPBEFORE; /* at the very beginning of the response */
+}
+
 /*
  * Initialize a new HTTP transaction for stream <s>. It is assumed that all
  * the required fields are properly allocated and that we only need to (re)init
@@ -8862,18 +8894,9 @@ void http_init_txn(struct stream *s)
 	txn->cli_cookie = NULL;
 	txn->uri = NULL;
 
-	txn->req.flags = 0;
-	txn->req.sol = txn->req.eol = txn->req.eoh = 0; /* relative to the buffer */
-	txn->req.next = 0;
-	txn->rsp.flags = 0;
-	txn->rsp.sol = txn->rsp.eol = txn->rsp.eoh = 0; /* relative to the buffer */
-	txn->rsp.next = 0;
-	txn->req.chunk_len = 0LL;
-	txn->req.body_len = 0LL;
-	txn->rsp.chunk_len = 0LL;
-	txn->rsp.body_len = 0LL;
-	txn->req.msg_state = HTTP_MSG_RQBEFORE; /* at the very beginning of the request */
-	txn->rsp.msg_state = HTTP_MSG_RPBEFORE; /* at the very beginning of the response */
+	http_txn_reset_req(txn);
+	http_txn_reset_res(txn);
+
 	txn->req.chn = &s->req;
 	txn->rsp.chn = &s->res;
 
@@ -9450,8 +9473,12 @@ struct act_rule *parse_http_req_cond(const char **args, const char *file, int li
 			goto out_err;
 		}
 	} else {
-		Alert("parsing [%s:%d]: 'http-request' expects 'allow', 'deny', 'auth', 'redirect', 'tarpit', 'add-header', 'set-header', 'replace-header', 'replace-value', 'set-nice', 'set-tos', 'set-mark', 'set-log-level', 'add-acl', 'del-acl', 'del-map', 'set-map', 'set-var', 'set-src', but got '%s'%s.\n",
-		      file, linenum, args[0], *args[0] ? "" : " (missing argument)");
+		action_build_list(&http_req_keywords.list, &trash);
+		Alert("parsing [%s:%d]: 'http-request' expects 'allow', 'deny', 'auth', 'redirect', "
+		      "'tarpit', 'add-header', 'set-header', 'replace-header', 'replace-value', 'set-nice', "
+		      "'set-tos', 'set-mark', 'set-log-level', 'add-acl', 'del-acl', 'del-map', 'set-map', "
+		      "'set-src'%s%s, but got '%s'%s.\n",
+		      file, linenum, *trash.str ? ", " : "", trash.str, args[0], *args[0] ? "" : " (missing argument)");
 		goto out_err;
 	}
 
@@ -9807,8 +9834,12 @@ struct act_rule *parse_http_res_cond(const char **args, const char *file, int li
 			goto out_err;
 		}
 	} else {
-		Alert("parsing [%s:%d]: 'http-response' expects 'allow', 'deny', 'redirect', 'add-header', 'del-header', 'set-header', 'replace-header', 'replace-value', 'set-nice', 'set-tos', 'set-mark', 'set-log-level', 'del-acl', 'add-acl', 'del-map', 'set-map', 'set-var' but got '%s'%s.\n",
-		      file, linenum, args[0], *args[0] ? "" : " (missing argument)");
+		action_build_list(&http_res_keywords.list, &trash);
+		Alert("parsing [%s:%d]: 'http-response' expects 'allow', 'deny', 'redirect', "
+		      "'add-header', 'del-header', 'set-header', 'replace-header', 'replace-value', 'set-nice', "
+		      "'set-tos', 'set-mark', 'set-log-level', 'add-acl', 'del-acl', 'del-map', 'set-map', "
+		      "'set-src'%s%s, but got '%s'%s.\n",
+		      file, linenum, *trash.str ? ", " : "", trash.str, args[0], *args[0] ? "" : " (missing argument)");
 		goto out_err;
 	}
 
@@ -10031,10 +10062,12 @@ int smp_prefetch_http(struct proxy *px, struct stream *s, unsigned int opt,
 
 	if (!s)
 		return 0;
+	if (!s->txn) {
+		if (unlikely(!http_alloc_txn(s)))
+			return 0; /* not enough memory */
+		http_init_txn(s);
+	}
 	txn = s->txn;
-
-	if (!txn)
-		return 0;
 	msg = &txn->req;
 
 	/* Check for a dependency on a request */
@@ -10971,7 +11004,7 @@ smp_fetch_http_auth_grp(const struct arg *args, struct sample *smp, const char *
  * of values (cookie headers). This makes it faster to abort parsing when no
  * list is expected.
  */
-static char *
+char *
 extract_cookie_value(char *hdr, const char *hdr_end,
 		  char *cookie_name, size_t cookie_name_l, int list,
 		  char **value, int *value_l)
@@ -12370,7 +12403,7 @@ void http_set_status(unsigned int status, struct stream *s)
  * occurs the action is canceled, but the rule processing continue.
  */
 enum act_return http_action_set_req_line(struct act_rule *rule, struct proxy *px,
-                                         struct session *sess, struct stream *s)
+                                         struct session *sess, struct stream *s, int flags)
 {
 	chunk_reset(&trash);
 
@@ -12385,7 +12418,7 @@ enum act_return http_action_set_req_line(struct act_rule *rule, struct proxy *px
 
 /* This function is just a compliant action wrapper for "set-status". */
 enum act_return action_http_set_status(struct act_rule *rule, struct proxy *px,
-                                       struct session *sess, struct stream *s)
+                                       struct session *sess, struct stream *s, int flags)
 {
 	http_set_status(rule->arg.status.code, s);
 	return ACT_RET_CONT;
@@ -12483,7 +12516,7 @@ enum act_parse_ret parse_http_set_status(const char **args, int *orig_arg, struc
  * processing continues.
  */
 enum act_return http_action_req_capture(struct act_rule *rule, struct proxy *px,
-                                        struct session *sess, struct stream *s)
+                                        struct session *sess, struct stream *s, int flags)
 {
 	struct sample *key;
 	struct cap_hdr *h = rule->arg.cap.hdr;
@@ -12515,7 +12548,7 @@ enum act_return http_action_req_capture(struct act_rule *rule, struct proxy *px,
  * error occurs the action is cancelled, but the rule processing continues.
  */
 enum act_return http_action_req_capture_by_id(struct act_rule *rule, struct proxy *px,
-                                              struct session *sess, struct stream *s)
+                                              struct session *sess, struct stream *s, int flags)
 {
 	struct sample *key;
 	struct cap_hdr *h;
@@ -12683,7 +12716,7 @@ enum act_parse_ret parse_http_req_capture(const char **args, int *orig_arg, stru
  * error occurs the action is cancelled, but the rule processing continues.
  */
 enum act_return http_action_res_capture_by_id(struct act_rule *rule, struct proxy *px,
-                                              struct session *sess, struct stream *s)
+                                              struct session *sess, struct stream *s, int flags)
 {
 	struct sample *key;
 	struct cap_hdr *h;

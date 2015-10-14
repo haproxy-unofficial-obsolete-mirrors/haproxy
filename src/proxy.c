@@ -741,6 +741,7 @@ void init_new_proxy(struct proxy *p)
 	LIST_INIT(&p->listener_queue);
 	LIST_INIT(&p->logsrvs);
 	LIST_INIT(&p->logformat);
+	LIST_INIT(&p->logformat_sd);
 	LIST_INIT(&p->format_unique_id);
 	LIST_INIT(&p->conf.bind);
 	LIST_INIT(&p->conf.listeners);
@@ -924,19 +925,23 @@ void soft_stop(void)
 			Warning("Stopping %s %s in %d ms.\n", proxy_cap_str(p->cap), p->id, p->grace);
 			send_log(p, LOG_WARNING, "Stopping %s %s in %d ms.\n", proxy_cap_str(p->cap), p->id, p->grace);
 			p->stop_time = tick_add(now_ms, p->grace);
-		}
-		if (p->table.size && p->table.sync_task)
-			 task_wakeup(p->table.sync_task, TASK_WOKEN_MSG);
 
-		/* wake every proxy task up so that they can handle the stopping */
-		if (p->task)
-			task_wakeup(p->task, TASK_WOKEN_MSG);
+			/* Note: do not wake up stopped proxies' task nor their tables'
+			 * tasks as these ones might point to already released entries.
+			 */
+			if (p->table.size && p->table.sync_task)
+				task_wakeup(p->table.sync_task, TASK_WOKEN_MSG);
+
+			if (p->task)
+				task_wakeup(p->task, TASK_WOKEN_MSG);
+		}
 		p = p->next;
 	}
 
 	prs = peers;
 	while (prs) {
-		stop_proxy((struct proxy *)prs->peers_fe);
+		if (prs->peers_fe)
+			stop_proxy(prs->peers_fe);
 		prs = prs->next;
 	}
 	/* signal zero is used to broadcast the "stopping" event */
@@ -1070,8 +1075,8 @@ void pause_proxies(void)
 
 	prs = peers;
 	while (prs) {
-		p = prs->peers_fe;
-		err |= !pause_proxy(p);
+		if (prs->peers_fe)
+			err |= !pause_proxy(prs->peers_fe);
 		prs = prs->next;
         }
 
@@ -1104,8 +1109,8 @@ void resume_proxies(void)
 
 	prs = peers;
 	while (prs) {
-		p = prs->peers_fe;
-		err |= !resume_proxy(p);
+		if (prs->peers_fe)
+			err |= !resume_proxy(prs->peers_fe);
 		prs = prs->next;
         }
 

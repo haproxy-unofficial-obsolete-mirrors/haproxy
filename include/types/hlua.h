@@ -9,14 +9,16 @@
 #include <types/proxy.h>
 #include <types/server.h>
 
-#define CLASS_CORE     "Core"
-#define CLASS_TXN      "TXN"
-#define CLASS_FETCHES  "Fetches"
-#define CLASS_CONVERTERS "Converters"
-#define CLASS_SOCKET   "Socket"
-#define CLASS_CHANNEL  "Channel"
-#define CLASS_HTTP     "HTTP"
-#define CLASS_MAP      "Map"
+#define CLASS_CORE         "Core"
+#define CLASS_TXN          "TXN"
+#define CLASS_FETCHES      "Fetches"
+#define CLASS_CONVERTERS   "Converters"
+#define CLASS_SOCKET       "Socket"
+#define CLASS_CHANNEL      "Channel"
+#define CLASS_HTTP         "HTTP"
+#define CLASS_MAP          "Map"
+#define CLASS_APPLET_TCP   "AppletTCP"
+#define CLASS_APPLET_HTTP  "AppletHTTP"
 
 struct stream;
 
@@ -25,6 +27,7 @@ struct stream;
 #define HLUA_WAKERESWR 0x00000004
 #define HLUA_WAKEREQWR 0x00000008
 #define HLUA_EXIT      0x00000010
+#define HLUA_MUST_GC   0x00000020
 
 enum hlua_exec {
 	HLUA_E_OK = 0,
@@ -44,7 +47,9 @@ struct hlua {
 	int nargs; /* The number of arguments in the stack at the start of execution. */
 	unsigned int flags; /* The current execution flags. */
 	int wake_time; /* The lua wants to be waked at this time, or before. */
-	int expire; /* Lua execution must be stopped over this time. */
+	unsigned int max_time; /* The max amount of execution time for an Lua process, in ms. */
+	unsigned int start_time; /* The ms time when the Lua starts the last execution. */
+	unsigned int run_time; /* Lua total execution time in ms. */
 	struct task *task; /* The task associated with the lua stack execution.
 	                      We must wake this task to continue the task execution */
 	struct list com; /* The list head of the signals attached to this task. */
@@ -95,6 +100,13 @@ struct hlua_rule {
 struct hlua_txn {
 	struct stream *s;
 	struct proxy *p;
+};
+
+/* This struct contains the applet context. */
+struct hlua_appctx {
+	struct appctx *appctx;
+	luaL_Buffer b; /* buffer used to prepare strings. */
+	struct hlua_txn htxn;
 };
 
 /* This struc is used with sample fetches and sample converters. */

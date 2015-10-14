@@ -345,7 +345,8 @@ struct proxy {
 	unsigned int log_count;			/* number of logs produced by the frontend */
 	struct list logsrvs;
 	struct list logformat; 			/* log_format linked list */
-	char *log_tag;                          /* override default syslog tag */
+	struct list logformat_sd;		/* log_format linked list for the RFC5424 structured-data part */
+	struct chunk log_tag;                   /* override default syslog tag */
 	char *header_unique_id; 		/* unique-id header */
 	struct list format_unique_id;		/* unique-id format */
 	int to_log;				/* things to be logged (LW_*) */
@@ -402,6 +403,9 @@ struct proxy {
 		int   uif_line;                 /* file name where the unique-id-format string appears */
 		char *uif_file;                 /* file name where the unique-id-format string appears (strdup) */
 		char *uniqueid_format_string;	/* unique-id format string */
+		char *logformat_sd_string;	/* log format string for the RFC5424 structured-data part */
+		char *lfsd_file;		/* file name where the structured-data logformat string for RFC5424 appears (strdup) */
+		int  lfsd_line;			/* file name where the structured-data logformat string for RFC5424 appears */
 	} conf;					/* config information */
 	void *parent;				/* parent of the proxy when applicable */
 	struct comp *comp;			/* http compression */

@@ -24,6 +24,7 @@
 
 #include <common/regex.h>
 
+#include <types/applet.h>
 #include <types/stick_table.h>
 
 enum act_from {
@@ -44,6 +45,13 @@ enum act_return {
 enum act_parse_ret {
 	ACT_RET_PRS_OK,    /* continue processing. */
 	ACT_RET_PRS_ERR,   /* abort processing. */
+};
+
+/* flags passed to custom actions */
+enum act_flag {
+	ACT_FLAG_NONE  = 0x00000000,  /* no flag */
+	ACT_FLAG_FINAL = 0x00000001,  /* last call, cannot yield */
+	ACT_FLAG_FIRST = 0x00000002,  /* first call for this action */
 };
 
 enum act_name {
@@ -91,9 +99,10 @@ struct act_rule {
 	enum act_name action;                  /* ACT_ACTION_* */
 	enum act_from from;                    /* ACT_F_* */
 	short deny_status;                     /* HTTP status to return to user when denying */
-	enum act_return (*action_ptr)(struct act_rule *rule, struct proxy *px,
-	                              struct session *sess, struct stream *s); /* ptr to custom action */
+	enum act_return (*action_ptr)(struct act_rule *rule, struct proxy *px,  /* ptr to custom action */
+	                              struct session *sess, struct stream *s, int flags);
 	struct action_kw *kw;
+	struct applet applet;                  /* used for the applet registration. */
 	union {
 		struct {
 			char *realm;

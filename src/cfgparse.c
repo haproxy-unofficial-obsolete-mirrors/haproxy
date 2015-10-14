@@ -240,7 +240,7 @@ int str2listener(char *str, struct proxy *curproxy, struct bind_conf *bind_conf,
 
 		ss2 = str2sa_range(str, &port, &end, err,
 		                   curproxy == global.stats_fe ? NULL : global.unix_bind.prefix,
-		                   NULL);
+		                   NULL, 1);
 		if (!ss2)
 			goto fail;
 
@@ -828,8 +828,11 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 		global.tune.bufsize = atol(args[1]);
-		if (global.tune.maxrewrite >= global.tune.bufsize / 2)
-			global.tune.maxrewrite = global.tune.bufsize / 2;
+		if (global.tune.bufsize <= 0) {
+			Alert("parsing [%s:%d] : '%s' expects a positive integer argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
 		chunk_init(&trash, realloc(trash.str, global.tune.bufsize), global.tune.bufsize);
 		alloc_trash_buffers(global.tune.bufsize);
 	}
@@ -842,8 +845,11 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 		global.tune.maxrewrite = atol(args[1]);
-		if (global.tune.maxrewrite >= global.tune.bufsize / 2)
-			global.tune.maxrewrite = global.tune.bufsize / 2;
+		if (global.tune.maxrewrite < 0) {
+			Alert("parsing [%s:%d] : '%s' expects a positive integer argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
 	}
 	else if (!strcmp(args[0], "tune.idletimer")) {
 		unsigned int idle;
@@ -1565,7 +1571,23 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 
 		if (logsrv->maxlen > global.max_syslog_len) {
 			global.max_syslog_len = logsrv->maxlen;
+			logheader = realloc(logheader, global.max_syslog_len + 1);
+			logheader_rfc5424 = realloc(logheader_rfc5424, global.max_syslog_len + 1);
 			logline = realloc(logline, global.max_syslog_len + 1);
+			logline_rfc5424 = realloc(logline_rfc5424, global.max_syslog_len + 1);
+		}
+
+		/* after the length, a format may be specified */
+		if (strcmp(args[arg+2], "format") == 0) {
+			logsrv->format = get_log_format(args[arg+3]);
+			if (logsrv->format < 0) {
+				Alert("parsing [%s:%d] : unknown log format '%s'\n", file, linenum, args[arg+3]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+
+			/* skip these two args */
+			arg += 2;
 		}
 
 		if (alertif_too_many_args_idx(3, arg + 1, file, linenum, args, &err_code))
@@ -1598,7 +1620,7 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			}
 		}
 
-		sk = str2sa_range(args[1], &port1, &port2, &errmsg, NULL, NULL);
+		sk = str2sa_range(args[1], &port1, &port2, &errmsg, NULL, NULL, 1);
 		if (!sk) {
 			Alert("parsing [%s:%d] : '%s': %s\n", file, linenum, args[0], errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -1625,7 +1647,6 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 	}
 	else if (!strcmp(args[0], "log-send-hostname")) { /* set the hostname in syslog header */
 		char *name;
-		int len;
 
 		if (global.log_send_hostname != NULL) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
@@ -1638,12 +1659,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		else
 			name = hostname;
 
-		len = strlen(name);
-
-		/* We'll add a space after the name to respect the log format */
 		free(global.log_send_hostname);
-		global.log_send_hostname = malloc(len + 2);
-		snprintf(global.log_send_hostname, len + 2, "%s ", name);
+		global.log_send_hostname = strdup(name);
 	}
 	else if (!strcmp(args[0], "server-state-base")) { /* path base where HAProxy can find server state files */
 		if (global.server_state_base != NULL) {
@@ -1683,8 +1700,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		free(global.log_tag);
-		global.log_tag = strdup(args[1]);
+		chunk_destroy(&global.log_tag);
+		chunk_initstr(&global.log_tag, strdup(args[1]));
 	}
 	else if (!strcmp(args[0], "spread-checks")) {  /* random time between checks (0-50) */
 		if (alertif_too_many_args(1, file, linenum, args, &err_code))
@@ -2059,7 +2076,7 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 		newpeer->last_change = now.tv_sec;
 		newpeer->id = strdup(args[1]);
 
-		sk = str2sa_range(args[2], &port1, &port2, &errmsg, NULL, NULL);
+		sk = str2sa_range(args[2], &port1, &port2, &errmsg, NULL, NULL, 1);
 		if (!sk) {
 			Alert("parsing [%s:%d] : '%s %s' : %s\n", file, linenum, args[0], args[1], errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -2259,7 +2276,7 @@ int cfg_parse_resolvers(const char *file, int linenum, char **args, int kwm)
 		newnameserver->conf.line = linenum;
 		newnameserver->id = strdup(args[1]);
 
-		sk = str2sa_range(args[2], &port1, &port2, &errmsg, NULL, NULL);
+		sk = str2sa_range(args[2], &port1, &port2, &errmsg, NULL, NULL, 1);
 		if (!sk) {
 			Alert("parsing [%s:%d] : '%s %s' : %s\n", file, linenum, args[0], args[1], errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -2443,7 +2460,7 @@ int cfg_parse_mailers(const char *file, int linenum, char **args, int kwm)
 
 		newmailer->id = strdup(args[1]);
 
-		sk = str2sa_range(args[2], &port1, &port2, &errmsg, NULL, NULL);
+		sk = str2sa_range(args[2], &port1, &port2, &errmsg, NULL, NULL, 1);
 		if (!sk) {
 			Alert("parsing [%s:%d] : '%s %s' : %s\n", file, linenum, args[0], args[1], errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -2701,6 +2718,17 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 				curproxy->conf.lfs_file = strdup(defproxy.conf.lfs_file);
 				curproxy->conf.lfs_line = defproxy.conf.lfs_line;
 			}
+
+			/* get either a pointer to the logformat string for RFC5424 structured-data or a copy of it */
+			curproxy->conf.logformat_sd_string = defproxy.conf.logformat_sd_string;
+			if (curproxy->conf.logformat_sd_string &&
+			    curproxy->conf.logformat_sd_string != default_rfc5424_sd_log_format)
+				curproxy->conf.logformat_sd_string = strdup(curproxy->conf.logformat_sd_string);
+
+			if (defproxy.conf.lfsd_file) {
+				curproxy->conf.lfsd_file = strdup(defproxy.conf.lfsd_file);
+				curproxy->conf.lfsd_line = defproxy.conf.lfsd_line;
+			}
 		}
 
 		if (curproxy->cap & PR_CAP_BE) {
@@ -2731,8 +2759,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		if (curproxy->conf.uniqueid_format_string)
 			curproxy->conf.uniqueid_format_string = strdup(curproxy->conf.uniqueid_format_string);
 
-		if (defproxy.log_tag)
-			curproxy->log_tag = strdup(defproxy.log_tag);
+		chunk_dup(&curproxy->log_tag, &defproxy.log_tag);
 
 		if (defproxy.conf.uif_file) {
 			curproxy->conf.uif_file = strdup(defproxy.conf.uif_file);
@@ -2814,8 +2841,12 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		free(defproxy.conf.uniqueid_format_string);
 		free(defproxy.conf.lfs_file);
 		free(defproxy.conf.uif_file);
-		free(defproxy.log_tag);
+		chunk_destroy(&defproxy.log_tag);
 		free_email_alert(&defproxy);
+
+		if (defproxy.conf.logformat_sd_string != default_rfc5424_sd_log_format)
+			free(defproxy.conf.logformat_sd_string);
+		free(defproxy.conf.lfsd_file);
 
 		for (rc = 0; rc < HTTP_ERR_SIZE; rc++)
 			chunk_destroy(&defproxy.errmsg[rc]);
@@ -3382,9 +3413,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
                 }
 
 		if (!strcmp(args[1], "command")) {
-			if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			if (alertif_too_many_args(2, file, linenum, args, &err_code))
 				goto out;
-			if (*(args[1]) == 0) {
+			if (*(args[2]) == 0) {
 				Alert("parsing [%s:%d] : missing argument after '%s'.\n",
 				      file, linenum, args[1]);
 				err_code |= ERR_ALERT | ERR_FATAL;
@@ -3394,9 +3425,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			curproxy->check_command = strdup(args[2]);
 		}
 		else if (!strcmp(args[1], "path")) {
-			if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			if (alertif_too_many_args(2, file, linenum, args, &err_code))
 				goto out;
-			if (*(args[1]) == 0) {
+			if (*(args[2]) == 0) {
 				Alert("parsing [%s:%d] : missing argument after '%s'.\n",
 				      file, linenum, args[1]);
 				err_code |= ERR_ALERT | ERR_FATAL;
@@ -5611,7 +5642,7 @@ stats_error_parsing:
 		else if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], NULL))
 			err_code |= ERR_WARN;
 
-		sk = str2sa_range(args[1], &port1, &port2, &errmsg, NULL, NULL);
+		sk = str2sa_range(args[1], &port1, &port2, &errmsg, NULL, NULL, 1);
 		if (!sk) {
 			Alert("parsing [%s:%d] : '%s' : %s\n", file, linenum, args[0], errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -5784,14 +5815,43 @@ stats_error_parsing:
 			err_code |= ERR_WARN;
 		}
 	}
+	else if (!strcmp(args[0], "log-format-sd")) {
+		if (!*(args[1])) {
+			Alert("parsing [%s:%d] : %s expects an argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		if (*(args[2])) {
+			Alert("parsing [%s:%d] : %s expects only one argument, don't forget to escape spaces!\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
+		if (curproxy->conf.logformat_sd_string != default_rfc5424_sd_log_format)
+			free(curproxy->conf.logformat_sd_string);
+		curproxy->conf.logformat_sd_string = strdup(args[1]);
+
+		free(curproxy->conf.lfsd_file);
+		curproxy->conf.lfsd_file = strdup(curproxy->conf.args.file);
+		curproxy->conf.lfsd_line = curproxy->conf.args.line;
+
+		/* get a chance to improve log-format-sd error reporting by
+		 * reporting the correct line-number when possible.
+		 */
+		if (curproxy != &defproxy && !(curproxy->cap & PR_CAP_FE)) {
+			Warning("parsing [%s:%d] : backend '%s' : 'log-format-sd' directive is ignored in backends.\n",
+				file, linenum, curproxy->id);
+			err_code |= ERR_WARN;
+		}
+	}
 	else if (!strcmp(args[0], "log-tag")) {  /* tag to report to syslog */
 		if (*(args[1]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects a tag for use in syslog.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		free(curproxy->log_tag);
-		curproxy->log_tag = strdup(args[1]);
+		chunk_destroy(&curproxy->log_tag);
+		chunk_initstr(&curproxy->log_tag, strdup(args[1]));
 	}
 	else if (!strcmp(args[0], "log") && kwm == KWM_NO) {
 		/* delete previous herited or defined syslog servers */
@@ -5847,7 +5907,23 @@ stats_error_parsing:
 
 			if (logsrv->maxlen > global.max_syslog_len) {
 				global.max_syslog_len = logsrv->maxlen;
+				logheader = realloc(logheader, global.max_syslog_len + 1);
+				logheader_rfc5424 = realloc(logheader_rfc5424, global.max_syslog_len + 1);
 				logline = realloc(logline, global.max_syslog_len + 1);
+				logline_rfc5424 = realloc(logline_rfc5424, global.max_syslog_len + 1);
+			}
+
+			/* after the length, a format may be specified */
+			if (strcmp(args[arg+2], "format") == 0) {
+				logsrv->format = get_log_format(args[arg+3]);
+				if (logsrv->format < 0) {
+					Alert("parsing [%s:%d] : unknown log format '%s'\n", file, linenum, args[arg+3]);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+
+				/* skip these two args */
+				arg += 2;
 			}
 
 			if (alertif_too_many_args_idx(3, arg + 1, file, linenum, args, &err_code))
@@ -5883,7 +5959,7 @@ stats_error_parsing:
 				}
 			}
 
-			sk = str2sa_range(args[1], &port1, &port2, &errmsg, NULL, NULL);
+			sk = str2sa_range(args[1], &port1, &port2, &errmsg, NULL, NULL, 1);
 			if (!sk) {
 				Alert("parsing [%s:%d] : '%s': %s\n", file, linenum, args[0], errmsg);
 				err_code |= ERR_ALERT | ERR_FATAL;
@@ -5935,7 +6011,7 @@ stats_error_parsing:
 		curproxy->conn_src.iface_name = NULL;
 		curproxy->conn_src.iface_len = 0;
 
-		sk = str2sa_range(args[1], &port1, &port2, &errmsg, NULL, NULL);
+		sk = str2sa_range(args[1], &port1, &port2, &errmsg, NULL, NULL, 1);
 		if (!sk) {
 			Alert("parsing [%s:%d] : '%s %s' : %s\n",
 			      file, linenum, args[0], args[1], errmsg);
@@ -6020,7 +6096,7 @@ stats_error_parsing:
 				} else {
 					struct sockaddr_storage *sk;
 
-					sk = str2sa_range(args[cur_arg + 1], &port1, &port2, &errmsg, NULL, NULL);
+					sk = str2sa_range(args[cur_arg + 1], &port1, &port2, &errmsg, NULL, NULL, 1);
 					if (!sk) {
 						Alert("parsing [%s:%d] : '%s %s' : %s\n",
 						      file, linenum, args[cur_arg], args[cur_arg+1], errmsg);
@@ -6359,8 +6435,8 @@ stats_error_parsing:
 		}
 
 		if (rc >= HTTP_ERR_SIZE) {
-			Warning("parsing [%s:%d] : status code %d not handled, error relocation will be ignored.\n",
-				file, linenum, errnum);
+			Warning("parsing [%s:%d] : status code %d not handled by '%s', error relocation will be ignored.\n",
+				file, linenum, errnum, args[0]);
 			free(err);
 		}
 	}
@@ -6419,8 +6495,8 @@ stats_error_parsing:
 		}
 
 		if (rc >= HTTP_ERR_SIZE) {
-			Warning("parsing [%s:%d] : status code %d not handled, error customization will be ignored.\n",
-				file, linenum, errnum);
+			Warning("parsing [%s:%d] : status code %d not handled by '%s', error customization will be ignored.\n",
+				file, linenum, errnum, args[0]);
 			err_code |= ERR_WARN;
 			free(err);
 		}
@@ -7209,6 +7285,7 @@ int check_config_validity()
 		struct sticking_rule *mrule;
 		struct act_rule *trule;
 		struct act_rule *hrqrule;
+		struct logsrv *tmplogsrv;
 		unsigned int next_id;
 		int nbproc;
 
@@ -7395,7 +7472,7 @@ int check_config_validity()
 				clear = 1;
 			}
 			if (curproxy->check_command[0] != '/' && !curproxy->check_path) {
-				Alert("Proxy '%s': '%s' does not have a leading '/' and 'external-command path' is not set.\n",
+				Alert("Proxy '%s': '%s' does not have a leading '/' and 'external-check path' is not set.\n",
 				      curproxy->id, "external-check command");
 				cfgerr++;
 			}
@@ -7810,6 +7887,17 @@ int check_config_validity()
 		}
 out_uri_auth_compat:
 
+		/* check whether we have a log server that uses RFC5424 log format */
+		list_for_each_entry(tmplogsrv, &curproxy->logsrvs, list) {
+			if (tmplogsrv->format == LOG_FORMAT_RFC5424) {
+				if (!curproxy->conf.logformat_sd_string) {
+					/* set the default logformat_sd_string */
+					curproxy->conf.logformat_sd_string = default_rfc5424_sd_log_format;
+				}
+				break;
+			}
+		}
+
 		/* compile the log format */
 		if (!(curproxy->cap & PR_CAP_FE)) {
 			if (curproxy->conf.logformat_string != default_http_log_format &&
@@ -7820,6 +7908,13 @@ out_uri_auth_compat:
 			free(curproxy->conf.lfs_file);
 			curproxy->conf.lfs_file = NULL;
 			curproxy->conf.lfs_line = 0;
+
+			if (curproxy->conf.logformat_sd_string != default_rfc5424_sd_log_format)
+				free(curproxy->conf.logformat_sd_string);
+			curproxy->conf.logformat_sd_string = NULL;
+			free(curproxy->conf.lfsd_file);
+			curproxy->conf.lfsd_file = NULL;
+			curproxy->conf.lfsd_line = 0;
 		}
 
 		if (curproxy->conf.logformat_string) {
@@ -7828,6 +7923,17 @@ out_uri_auth_compat:
 			curproxy->conf.args.line = curproxy->conf.lfs_line;
 			parse_logformat_string(curproxy->conf.logformat_string, curproxy, &curproxy->logformat, LOG_OPT_MANDATORY,
 					       SMP_VAL_FE_LOG_END, curproxy->conf.lfs_file, curproxy->conf.lfs_line);
+			curproxy->conf.args.file = NULL;
+			curproxy->conf.args.line = 0;
+		}
+
+		if (curproxy->conf.logformat_sd_string) {
+			curproxy->conf.args.ctx = ARGC_LOGSD;
+			curproxy->conf.args.file = curproxy->conf.lfsd_file;
+			curproxy->conf.args.line = curproxy->conf.lfsd_line;
+			parse_logformat_string(curproxy->conf.logformat_sd_string, curproxy, &curproxy->logformat_sd, LOG_OPT_MANDATORY,
+					       SMP_VAL_FE_LOG_END, curproxy->conf.lfsd_file, curproxy->conf.lfsd_line);
+			add_to_logformat_list(NULL, NULL, LF_SEPARATOR, &curproxy->logformat_sd);
 			curproxy->conf.args.file = NULL;
 			curproxy->conf.args.line = 0;
 		}
@@ -8192,7 +8298,8 @@ out_uri_auth_compat:
 			curproxy->to_log &= ~LW_BYTES;
 
 		if ((curproxy->mode == PR_MODE_TCP || curproxy->mode == PR_MODE_HTTP) &&
-		    (curproxy->cap & PR_CAP_FE) && !LIST_ISEMPTY(&curproxy->logformat) && LIST_ISEMPTY(&curproxy->logsrvs)) {
+		    (curproxy->cap & PR_CAP_FE) && LIST_ISEMPTY(&curproxy->logsrvs) &&
+		    (!LIST_ISEMPTY(&curproxy->logformat) || !LIST_ISEMPTY(&curproxy->logformat_sd))) {
 			Warning("config : log format ignored for %s '%s' since it has no log address.\n",
 				proxy_type_str(curproxy), curproxy->id);
 			err_code |= ERR_WARN;
@@ -8838,6 +8945,19 @@ int cfg_register_section(char *section_name,
 	LIST_ADDQ(&sections, &cs->list);
 
 	return 1;
+}
+
+/*
+ * free all config section entries
+ */
+void cfg_unregister_sections(void)
+{
+	struct cfg_section *cs, *ics;
+
+	list_for_each_entry_safe(cs, ics, &sections, list) {
+		LIST_DEL(&cs->list);
+		free(cs);
+	}
 }
 
 /*

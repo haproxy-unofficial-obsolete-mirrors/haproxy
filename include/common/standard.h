@@ -275,9 +275,10 @@ extern const char *invalid_domainchar(const char *name);
  * The IPv6 '::' address is IN6ADDR_ANY, so in order to bind to a given port on
  * IPv6, use ":::port". NULL is returned if the host part cannot be resolved.
  * If <pfx> is non-null, it is used as a string prefix before any path-based
- * address (typically the path to a unix socket).
+ * address (typically the path to a unix socket). If use_dns is not true,
+ * the funtion cannot accept the DNS resolution.
  */
-struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high, char **err, const char *pfx, char **fqdn);
+struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high, char **err, const char *pfx, char **fqdn, int use_dns);
 
 /* converts <str> to a struct in_addr containing a network mask. It can be
  * passed in dotted form (255.255.255.0) or in CIDR form (24). It returns 1
@@ -1003,6 +1004,7 @@ static inline unsigned char utf8_return_length(unsigned char code)
  * the whole code is optimized out. In little endian, with a decent compiler,
  * a few bswap and 2 shifts are left, which is the minimum acceptable.
  */
+#ifndef htonll
 static inline unsigned long long htonll(unsigned long long a)
 {
 	union {
@@ -1014,12 +1016,15 @@ static inline unsigned long long htonll(unsigned long long a)
 	} w = { .by64 = a };
 	return ((unsigned long long)htonl(w.by32.w1) << 32) | htonl(w.by32.w2);
 }
+#endif
 
 /* Turns 64-bit value <a> from network byte order to host byte order. */
+#ifndef ntohll
 static inline unsigned long long ntohll(unsigned long long a)
 {
 	return htonll(a);
 }
+#endif
 
 /* returns a 64-bit a timestamp with the finest resolution available. The
  * unit is intentionally not specified. It's mostly used to compare dates.
