@@ -2745,9 +2745,9 @@ static void dump_servers_state(struct proxy *backend, struct chunk *buf)
 
 	while (srv) {
 		srv_addr[0] = '\0';
-		srv_time_since_last_change = 0;
-		bk_f_forced_id = 0;
-		srv_f_forced_id = 0;
+		srv_time_since_last_change = now.tv_sec - srv->last_change;
+		bk_f_forced_id = backend->options & PR_O_FORCED_ID ? 1 : 0;
+		srv_f_forced_id = srv->flags & SRV_F_FORCED_ID ? 1 : 0;
 
 		switch (srv->addr.ss_family) {
 			case AF_INET:
@@ -2759,9 +2759,6 @@ static void dump_servers_state(struct proxy *backend, struct chunk *buf)
 					  srv_addr, INET6_ADDRSTRLEN + 1);
 				break;
 		}
-		srv_time_since_last_change = now.tv_sec - srv->last_change;
-		bk_f_forced_id = backend->options & PR_O_FORCED_ID ? 1 : 0;
-		srv_f_forced_id = srv->flags & SRV_F_FORCED_ID ? 1 : 0;
 
 		chunk_appendf(buf,
 				"%d %s "
