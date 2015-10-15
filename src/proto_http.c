@@ -2206,7 +2206,6 @@ static int http_forward_trailers(struct http_msg *msg)
 		const char *p1 = NULL, *p2 = NULL;
 		const char *ptr = b_ptr(buf, msg->next);
 		const char *stop = bi_end(buf);
-		int bytes;
 
 		/* scan current line and stop at LF or CRLF */
 		while (1) {
@@ -2237,10 +2236,6 @@ static int http_forward_trailers(struct http_msg *msg)
 		p2++;
 		if (p2 >= buf->data + buf->size)
 			p2 = buf->data;
-
-		bytes = p2 - b_ptr(buf, msg->next);
-		if (bytes < 0)
-			bytes += buf->size;
 
 		if (p1 == b_ptr(buf, msg->next)) {
 			/* LF/CRLF at beginning of line => end of trailers at p2.
