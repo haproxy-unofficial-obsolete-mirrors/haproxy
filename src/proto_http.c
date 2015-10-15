@@ -12376,7 +12376,7 @@ void http_set_status(unsigned int status, struct stream *s)
 	cur_end = s->res.buf->p + txn->rsp.sl.st.r + txn->rsp.sl.st.r_l;
 
 	/* commit changes and adjust message */
-	delta = buffer_replace2(s->res.buf, cur_ptr, cur_end, trash.str, trash.len);
+	buffer_replace2(s->res.buf, cur_ptr, cur_end, trash.str, trash.len);
 
 	/* adjust res line offsets and lengths */
 	txn->rsp.sl.st.r += c_l - txn->rsp.sl.st.c_l;
