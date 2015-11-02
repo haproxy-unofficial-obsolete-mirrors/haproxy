@@ -666,7 +666,7 @@ deviceatlas-separator <char>
   Sets the character separator for the API properties results. This directive
   is optional and set to | by default if not set.
 
-devicatlas-properties-cookie <name>
+deviceatlas-properties-cookie <name>
   Sets the client cookie's name used for the detection if the DeviceAtlas
   Client-side component was used during the request. This directive is optional
   and set to DAPROPS by default if not set.
@@ -2398,7 +2398,7 @@ capture request header <name> len <length>
   Example:
         capture request header Host len 15
         capture request header X-Forwarded-For len 15
-        capture request header Referrer len 15
+        capture request header Referer len 15
 
   See also : "capture cookie", "capture response header" as well as section 8
              about logging.

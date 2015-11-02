@@ -102,7 +102,11 @@ void dns_reset_resolution(struct dns_resolution *resolution)
 	resolution->qid.key = 0;
 
 	/* default values */
-	resolution->query_type = DNS_RTYPE_ANY;
+	if (resolution->resolver_family_priority == AF_INET) {
+		resolution->query_type = DNS_RTYPE_A;
+	} else {
+		resolution->query_type = DNS_RTYPE_AAAA;
+	}
 
 	/* the second resolution in the queue becomes the first one */
 	LIST_DEL(&resolution->list);
@@ -504,6 +508,8 @@ int dns_validate_dns_response(unsigned char *resp, unsigned char *bufend, char *
 					return DNS_RESP_INVALID;
 				if (memcmp(ptr, dn_name, dn_name_len) != 0)
 					return DNS_RESP_WRONG_NAME;
+
+				reader += (dn_name_len + 1);
 			}
 			else {
 				reader += (len + 1);
@@ -622,8 +628,11 @@ int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
 		else
 			ptr = reader;
 
-		if (cname && memcmp(ptr, cname, cnamelen))
-			return DNS_UPD_NAME_ERROR;
+		if (cname) {
+			if (memcmp(ptr, cname, cnamelen)) {
+				return DNS_UPD_NAME_ERROR;
+			}
+		}
 		else if (memcmp(ptr, dn_name, dn_name_len))
 			return DNS_UPD_NAME_ERROR;
 

@@ -1089,12 +1089,16 @@ ssl_sock_do_create_cert(const char *servername, unsigned int serial,
 	else if (EVP_PKEY_type (capkey->type) == EVP_PKEY_EC)
 		digest = EVP_sha256();
 	else {
+#if (OPENSSL_VERSION_NUMBER >= 0x1000000fL)
 		int nid;
 
 		if (EVP_PKEY_get_default_digest_nid(capkey, &nid) <= 0)
 			goto mkcert_error;
 		if (!(digest = EVP_get_digestbynid(nid)))
 			goto mkcert_error;
+#else
+		goto mkcert_error;
+#endif
 	}
 
 	if (!(X509_sign(newcrt, capkey, digest)))
@@ -1184,6 +1188,9 @@ ssl_sock_generated_cert_serial(const void *data, size_t len)
 	return XXH32(data, len, ssl_ctx_lru_seed);
 }
 
+/* Generate a cert and immediately assign it to the SSL session so that the cert's
+ * refcount is maintained regardless of the cert's presence in the LRU cache.
+ */
 static SSL_CTX *
 ssl_sock_generate_certificate(const char *servername, struct bind_conf *bind_conf, SSL *ssl)
 {
@@ -1201,9 +1208,14 @@ ssl_sock_generate_certificate(const char *servername, struct bind_conf *bind_con
 			ssl_ctx = ssl_sock_do_create_cert(servername, serial, bind_conf, ssl);
 			lru64_commit(lru, ssl_ctx, cacert, 0, (void (*)(void *))SSL_CTX_free);
 		}
+		SSL_set_SSL_CTX(ssl, ssl_ctx);
 	}
-	else
+	else {
 		ssl_ctx = ssl_sock_do_create_cert(servername, serial, bind_conf, ssl);
+		SSL_set_SSL_CTX(ssl, ssl_ctx);
+		/* No LRU cache, this CTX will be released as soon as the session dies */
+		SSL_CTX_free(ssl_ctx);
+	}
 	return ssl_ctx;
 }
 
@@ -1271,7 +1283,6 @@ static int ssl_sock_switchctx_cbk(SSL *ssl, int *al, struct bind_conf *s)
 		if (s->generate_certs &&
 		    (ctx = ssl_sock_generate_certificate(servername, s, ssl))) {
 			/* switch ctx */
-			SSL_set_SSL_CTX(ssl, ctx);
 			return SSL_TLSEXT_ERR_OK;
 		}
 		return (s->strict_sni ?
@@ -3123,13 +3134,6 @@ static int ssl_sock_from_buf(struct connection *conn, struct buffer *buf, int fl
 static void ssl_sock_close(struct connection *conn) {
 
 	if (conn->xprt_ctx) {
-#ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
-		if (!ssl_ctx_lru_tree && objt_listener(conn->target)) {
-			SSL_CTX *ctx = SSL_get_SSL_CTX(conn->xprt_ctx);
-			if (ctx != objt_listener(conn->target)->bind_conf->default_ctx)
-				SSL_CTX_free(ctx);
-		}
-#endif
 		SSL_free(conn->xprt_ctx);
 		conn->xprt_ctx = NULL;
 		sslconns--;
