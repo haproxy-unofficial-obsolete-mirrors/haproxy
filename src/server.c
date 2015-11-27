@@ -984,6 +984,9 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			newsrv->check.downinter	= curproxy->defsrv.check.downinter;
 			newsrv->agent.use_ssl	= curproxy->defsrv.agent.use_ssl;
 			newsrv->agent.port	= curproxy->defsrv.agent.port;
+			if (curproxy->defsrv.agent.send_string != NULL)
+				newsrv->agent.send_string = strdup(curproxy->defsrv.agent.send_string);
+			newsrv->agent.send_string_len = curproxy->defsrv.agent.send_string_len;
 			newsrv->agent.inter	= curproxy->defsrv.agent.inter;
 			newsrv->agent.fastinter	= curproxy->defsrv.agent.fastinter;
 			newsrv->agent.downinter	= curproxy->defsrv.agent.downinter;
@@ -1050,6 +1053,14 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			else if (!strcmp(args[cur_arg], "agent-port")) {
 				global.maxsock++;
 				newsrv->agent.port = atol(args[cur_arg + 1]);
+				cur_arg += 2;
+			}
+			else if (!strcmp(args[cur_arg], "agent-send")) {
+				global.maxsock++;
+				free(newsrv->agent.send_string);
+				newsrv->agent.send_string_len = strlen(args[cur_arg + 1]);
+				newsrv->agent.send_string = calloc(1, newsrv->agent.send_string_len + 1);
+				memcpy(newsrv->agent.send_string, args[cur_arg + 1], newsrv->agent.send_string_len);
 				cur_arg += 2;
 			}
 			else if (!defsrv && !strcmp(args[cur_arg], "cookie")) {
@@ -2319,12 +2330,16 @@ void apply_server_state(void)
 		version = 0;
 
 		/* first character of first line of the file must contain the version of the export */
-		fgets(mybuf, SRV_STATE_LINE_MAXLEN, f);
+		if (fgets(mybuf, SRV_STATE_LINE_MAXLEN, f) == NULL) {
+			Warning("Can't read first line of the server state file '%s'\n", filepath);
+			goto fileclose;
+		}
+
 		cur = mybuf;
 		version = atoi(cur);
 		if ((version < SRV_STATE_FILE_VERSION_MIN) ||
 		    (version > SRV_STATE_FILE_VERSION_MAX))
-			continue;
+			goto fileclose;
 
 		while (fgets(mybuf, SRV_STATE_LINE_MAXLEN, f)) {
 			int bk_f_forced_id = 0;
@@ -2451,6 +2466,7 @@ void apply_server_state(void)
 			/* now we can proceed with server's state update */
 			srv_update_state(srv, version, srv_params);
 		}
+fileclose:
 		fclose(f);
 	}
 }

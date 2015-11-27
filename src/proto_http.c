@@ -5272,14 +5272,16 @@ void http_end_txn_clean_session(struct stream *s)
 			s->res.flags |= CF_EXPECT_MORE;
 	}
 
-	/* we're removing the analysers, we MUST re-enable events detection */
+	/* we're removing the analysers, we MUST re-enable events detection.
+	 * We don't enable close on the response channel since it's either
+	 * already closed, or in keep-alive with an idle connection handler.
+	 */
 	channel_auto_read(&s->req);
 	channel_auto_close(&s->req);
 	channel_auto_read(&s->res);
-	channel_auto_close(&s->res);
 
-	/* we're in keep-alive with an idle connection, monitor it */
-	if (srv_conn) {
+	/* we're in keep-alive with an idle connection, monitor it if not already done */
+	if (srv_conn && LIST_ISEMPTY(&srv_conn->list)) {
 		srv = objt_server(srv_conn->target);
 		if (!srv)
 			si_idle_conn(&s->si[1], NULL);
@@ -5342,6 +5344,13 @@ int http_sync_req_state(struct stream *s)
 		 */
 		s->si[1].flags |= SI_FL_NOHALF;
 
+		/* In any case we've finished parsing the request so we must
+		 * disable Nagle when sending data because 1) we're not going
+		 * to shut this side, and 2) the server is waiting for us to
+		 * send pending data.
+		 */
+		chn->flags |= CF_NEVER_WAIT;
+
 		if (txn->rsp.msg_state == HTTP_MSG_ERROR)
 			goto wait_other_side;
 
@@ -5356,7 +5365,6 @@ int http_sync_req_state(struct stream *s)
 			/* if any side switches to tunnel mode, the other one does too */
 			channel_auto_read(chn);
 			txn->req.msg_state = HTTP_MSG_TUNNEL;
-			chn->flags |= CF_NEVER_WAIT;
 			goto wait_other_side;
 		}
 
@@ -5389,7 +5397,6 @@ int http_sync_req_state(struct stream *s)
 			if ((txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_TUN) {
 				channel_auto_read(chn);
 				txn->req.msg_state = HTTP_MSG_TUNNEL;
-				chn->flags |= CF_NEVER_WAIT;
 			}
 		}
 
@@ -6125,8 +6132,6 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 		else if (rep->flags & CF_READ_TIMEOUT) {
 			if (msg->err_pos >= 0)
 				http_capture_bad_message(&s->be->invalid_rep, s, msg, msg->msg_state, sess->fe);
-			else if (txn->flags & TX_NOT_FIRST)
-				goto abort_keep_alive;
 
 			s->be->be_counters.failed_resp++;
 			if (objt_server(s->target)) {
@@ -11573,10 +11578,11 @@ find_url_param_pos(const char **chunks,
 }
 
 /*
- * Given a url parameter name and a query string, returns its value and size
- * into *value and *value_l respectively, and returns non-zero. An empty
- * url_param_name matches the first available parameter. If the parameter is
- * not found, zero is returned and value/value_l are not touched.
+ * Given a url parameter name and a query string, find the next value.
+ * An empty url_param_name matches the first available parameter.
+ * If the parameter is found, 1 is returned and *vstart / *vend are updated to
+ * respectively provide a pointer to the value and its end.
+ * Otherwise, 0 is returned and vstart/vend are not modified.
  */
 static int
 find_next_url_param(const char **chunks,
@@ -11655,7 +11661,7 @@ find_next_url_param(const char **chunks,
 
 	*vstart = value_start;
 	*vend = value_end;
-	return value_end != value_start;
+	return 1;
 }
 
 /* This scans a URL-encoded query string. It takes an optionally wrapping

@@ -2262,6 +2262,15 @@ int cfg_parse_resolvers(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
+		list_for_each_entry(newnameserver, &curr_resolvers->nameserver_list, list) {
+			/* Error if two resolvers owns the same name */
+			if (strcmp(newnameserver->id, args[1]) == 0) {
+				Alert("Parsing [%s:%d]: nameserver '%s' has same name as another nameserver (declared at %s:%d).\n",
+					file, linenum, args[1], curr_resolvers->conf.file, curr_resolvers->conf.line);
+				err_code |= ERR_ALERT | ERR_FATAL;
+			}
+		}
+
 		if ((newnameserver = (struct dns_nameserver *)calloc(1, sizeof(struct dns_nameserver))) == NULL) {
 			Alert("parsing [%s:%d] : out of memory.\n", file, linenum);
 			err_code |= ERR_ALERT | ERR_ABORT;
@@ -7739,6 +7748,32 @@ int check_config_validity()
 				 * to pass a list of counters to track and allocate them right here using
 				 * stktable_alloc_data_type().
 				 */
+			}
+		}
+
+		/* parse http-request capture rules to ensure id really exists */
+		list_for_each_entry(hrqrule, &curproxy->http_req_rules, list) {
+			if (hrqrule->action  != ACT_CUSTOM ||
+			    hrqrule->action_ptr != http_action_req_capture_by_id)
+				continue;
+
+			if (hrqrule->arg.capid.idx >= curproxy->nb_req_cap) {
+				Alert("Proxy '%s': unable to find capture id '%d' referenced by http-request capture rule.\n",
+				      curproxy->id, hrqrule->arg.capid.idx);
+				cfgerr++;
+			}
+		}
+
+		/* parse http-response capture rules to ensure id really exists */
+		list_for_each_entry(hrqrule, &curproxy->http_res_rules, list) {
+			if (hrqrule->action  != ACT_CUSTOM ||
+			    hrqrule->action_ptr != http_action_res_capture_by_id)
+				continue;
+
+			if (hrqrule->arg.capid.idx >= curproxy->nb_rsp_cap) {
+				Alert("Proxy '%s': unable to find capture id '%d' referenced by http-response capture rule.\n",
+				      curproxy->id, hrqrule->arg.capid.idx);
+				cfgerr++;
 			}
 		}
 

@@ -134,7 +134,7 @@ struct global global = {
 	.nbproc = 1,
 	.req_count = 0,
 	.logsrvs = LIST_HEAD_INIT(global.logsrvs),
-#ifdef DEFAULT_MAXZLIBMEM
+#if defined(USE_ZLIB) && defined(DEFAULT_MAXZLIBMEM)
 	.maxzlibmem = DEFAULT_MAXZLIBMEM * 1024U * 1024U,
 #else
 	.maxzlibmem = 0,
@@ -1412,6 +1412,7 @@ void deinit(void)
 			free(s->check.bo);
 			free(s->agent.bi);
 			free(s->agent.bo);
+			free(s->agent.send_string);
 			free((char*)s->conf.file);
 #ifdef USE_OPENSSL
 			if (s->use_ssl || s->check.use_ssl)

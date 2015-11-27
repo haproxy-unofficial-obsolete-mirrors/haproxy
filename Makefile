@@ -98,7 +98,7 @@ DOCDIR = $(PREFIX)/doc/haproxy
 # Use TARGET=<target_name> to optimize for a specifc target OS among the
 # following list (use the default "generic" if uncertain) :
 #    generic, linux22, linux24, linux24e, linux26, solaris,
-#    freebsd, openbsd, netbsd, cygwin, custom, aix51, aix52
+#    freebsd, openbsd, netbsd, cygwin, haiku, custom, aix51, aix52
 TARGET =
 
 #### TARGET CPU
@@ -218,6 +218,12 @@ USE_POLL   = default
 ifeq ($(TARGET),generic)
   # generic system target has nothing specific
   USE_POLL   = implicit
+  USE_TPROXY = implicit
+else
+ifeq ($(TARGET),haiku)
+  # For Haiku
+  TARGET_LDFLAGS = -lnetwork
+  USE_POLL = implicit
   USE_TPROXY = implicit
 else
 ifeq ($(TARGET),linux22)
@@ -347,6 +353,7 @@ endif # linux26
 endif # linux24e
 endif # linux24
 endif # linux22
+endif # haiku
 endif # generic
 
 
@@ -562,7 +569,7 @@ OPTIONS_OBJS  += src/dlmalloc.o
 endif
 
 ifneq ($(USE_OPENSSL),)
-# OpenSSL is packaged in various forms and with various dependences.
+# OpenSSL is packaged in various forms and with various dependencies.
 # In general -lssl is enough, but on some platforms, -lcrypto may be needed,
 # reason why it's added by default. Some even need -lz, then you'll need to
 # pass it in the "ADDLIB" variable if needed. If your SSL libraries are not
@@ -607,6 +614,9 @@ OPTIONS_OBJS    += src/hlua.o
 endif
 
 ifneq ($(USE_DEVICEATLAS),)
+ifeq ($(USE_PCRE),)
+$(error the DeviceAtlas module needs the PCRE library in order to compile)
+endif
 # Use DEVICEATLAS_SRC and possibly DEVICEATLAS_INC and DEVICEATLAS_LIB to force path
 # to DeviceAtlas headers and libraries if needed.
 DEVICEATLAS_SRC =
@@ -805,10 +815,9 @@ install-doc:
 		install -m 644 doc/$$x.txt "$(DESTDIR)$(DOCDIR)" ; \
 	done
 
-install-bin: haproxy haproxy-systemd-wrapper
+install-bin: haproxy $(EXTRA)
 	install -d "$(DESTDIR)$(SBINDIR)"
-	install haproxy "$(DESTDIR)$(SBINDIR)"
-	install haproxy-systemd-wrapper "$(DESTDIR)$(SBINDIR)"
+	install haproxy $(EXTRA) "$(DESTDIR)$(SBINDIR)"
 
 install: install-bin install-man install-doc
 
