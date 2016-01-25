@@ -1709,6 +1709,13 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
+				/* search the first action (connect / send / expect) in the list */
+				l = &newsrv->proxy->tcpcheck_rules;
+				list_for_each_entry(n, l, list) {
+					r = (struct tcpcheck_rule *)n->list.n;
+					if (r->action != TCPCHK_ACT_COMMENT)
+						break;
+				}
 				if ((r->action != TCPCHK_ACT_CONNECT) || !r->port) {
 					Alert("parsing [%s:%d] : server %s has neither service port nor check port nor tcp_check rule 'connect' with port information. Check has been disabled.\n",
 					      file, linenum, newsrv->id);
@@ -1719,7 +1726,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 					/* scan the tcp-check ruleset to ensure a port has been configured */
 					l = &newsrv->proxy->tcpcheck_rules;
 					list_for_each_entry(n, l, list) {
-						r = (struct tcpcheck_rule *)n->list.p;
+						r = (struct tcpcheck_rule *)n->list.n;
 						if ((r->action == TCPCHK_ACT_CONNECT) && (!r->port)) {
 							Alert("parsing [%s:%d] : server %s has neither service port nor check port, and a tcp_check rule 'connect' with no port information. Check has been disabled.\n",
 							      file, linenum, newsrv->id);
@@ -1914,7 +1921,6 @@ static void srv_update_state(struct server *srv, int version, char **params)
 	/* fields since version 1
 	 * and common to all other upcoming versions
 	 */
-	struct sockaddr_storage addr;
 	enum srv_state srv_op_state;
 	enum srv_admin srv_admin_state;
 	unsigned srv_uweight, srv_iweight;
@@ -2148,9 +2154,19 @@ static void srv_update_state(struct server *srv, int version, char **params)
 
 			/* update server IP only if DNS resolution is used on the server */
 			if (srv->resolution) {
+				struct sockaddr_storage addr;
+
 				memset(&addr, 0, sizeof(struct sockaddr_storage));
-				if (str2ip2(params[0], &addr, 0))
-					memcpy(&srv->addr, &addr, sizeof(struct sockaddr_storage));
+
+				if (str2ip2(params[0], &addr, AF_UNSPEC)) {
+					int port;
+
+					/* save the port, applies the new IP then reconfigure the port */
+					port = get_host_port(&srv->addr);
+					srv->addr.ss_family = addr.ss_family;
+					str2ip2(params[0], &srv->addr, srv->addr.ss_family);
+					set_host_port(&srv->addr, port);
+				}
 				else
 					chunk_appendf(msg, ", can't parse IP: %s", params[0]);
 			}
@@ -2160,9 +2176,11 @@ static void srv_update_state(struct server *srv, int version, char **params)
 	}
 
  out:
-	if (msg->len)
+	if (msg->len) {
+		chunk_appendf(msg, "\n");
 		Warning("server-state application failed for server '%s/%s'%s",
 		        srv->proxy->id, srv->id, msg->str);
+	}
 }
 
 /* This function parses all the proxies and only take care of the backends (since we're looking for server)

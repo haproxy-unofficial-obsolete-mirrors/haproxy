@@ -119,33 +119,49 @@ Core class
 
 .. js:attribute:: core.emerg
 
+  :returns: integer
+
   This attribute is an integer, it contains the value of the loglevel "emergency" (0).
 
 .. js:attribute:: core.alert
+
+  :returns: integer
 
   This attribute is an integer, it contains the value of the loglevel "alert" (1).
 
 .. js:attribute:: core.crit
 
+  :returns: integer
+
   This attribute is an integer, it contains the value of the loglevel "critical" (2).
 
 .. js:attribute:: core.err
+
+  :returns: integer
 
   This attribute is an integer, it contains the value of the loglevel "error" (3).
 
 .. js:attribute:: core.warning
 
+  :returns: integer
+
   This attribute is an integer, it contains the value of the loglevel "warning" (4).
 
 .. js:attribute:: core.notice
+
+  :returns: integer
 
   This attribute is an integer, it contains the value of the loglevel "notice" (5).
 
 .. js:attribute:: core.info
 
+  :returns: integer
+
   This attribute is an integer, it contains the value of the loglevel "info" (6).
 
 .. js:attribute:: core.debug
+
+  :returns: integer
 
   This attribute is an integer, it contains the value of the loglevel "debug" (7).
 
@@ -178,9 +194,9 @@ Core class
 
 .. code-block:: lua
 
-	function Debug(msg)
-		core.log(core.debug, msg)
-	end
+  function Debug(msg)
+    core.log(core.debug, msg)
+  end
 ..
 
 .. js:function:: core.Info(msg)
@@ -192,9 +208,9 @@ Core class
 
 .. code-block:: lua
 
-	function Info(msg)
-		core.log(core.info, msg)
-	end
+  function Info(msg)
+    core.log(core.info, msg)
+  end
 ..
 
 .. js:function:: core.Warning(msg)
@@ -206,9 +222,9 @@ Core class
 
 .. code-block:: lua
 
-	function Warning(msg)
-		core.log(core.warning, msg)
-	end
+  function Warning(msg)
+    core.log(core.warning, msg)
+  end
 ..
 
 .. js:function:: core.Alert(msg)
@@ -220,9 +236,9 @@ Core class
 
 .. code-block:: lua
 
-	function Alert(msg)
-		core.log(core.alert, msg)
-	end
+  function Alert(msg)
+    core.log(core.alert, msg)
+  end
 ..
 
 .. js:function:: core.add_acl(filename, key)
@@ -283,7 +299,7 @@ Core class
   function(txn)
 ..
 
-  * **txn** (*class TXN*): this is a TXN object used for manipulating the
+  * **txn** (:ref:`txn_class`): this is a TXN object used for manipulating the
             current request or TCP stream.
 
   Here, an exemple of action registration. the action juste send an 'Hello world'
@@ -353,7 +369,7 @@ Core class
     string function(txn, [p1 [, p2 [, ... [, p5]]]])
 ..
 
-  * **txn** (*class txn*): this is the txn object associated with the current
+  * **txn** (:ref:`txn_class`): this is the txn object associated with the current
     request.
   * **p1** .. **p5** (*string*): this is a list of string arguments declared in
     the haroxy configuration file. The number of arguments doesn't exceed 5.
@@ -398,8 +414,16 @@ Core class
   function(applet)
 ..
 
-  * **txn** (*class AppletTCP*) or (*class AppletHTTP*): this is an object used
-            for manipulating the current HTTP request or TCP stream.
+  * **applet** *applet*  will be a :ref:`applettcp_class` or a
+    :ref:`applethttp_class`. It depends the type of registered applet. An applet
+    registered with the 'http' value for the *mode* parameter will gets a
+    :ref:`applethttp_class`. If the *mode* value is 'tcp', the applet will gets
+    a :ref:`applettcp_class`.
+
+  **warning**: Applets of type 'http' cannot be called from 'tcp-*'
+  rulesets. Only the 'http-*' rulesets are authorized, this means
+  that is not possible to call an HTTP applet from a proxy in tcp
+  mode. Applets of type 'tcp' can be called from anywhre.
 
   Here, an exemple of service registration. the service just send an 'Hello world'
   as an http response.
@@ -475,6 +499,10 @@ Core class
   set the value *value* associated to the key *key* in the map referenced by
   *filename*.
 
+  :param string filename: the Map reference
+  :param string key: the key to set or replace
+  :param string value: the associated value
+
 .. js:function:: core.sleep(int seconds)
 
   **context**: body, init, task, action
@@ -489,7 +517,7 @@ Core class
 
   This function returns a new object of a *socket* class.
 
-  :returns: A socket class object.
+  :returns: A :ref:`socket_class` object.
 
 .. js:function:: core.done(data)
 
@@ -511,6 +539,8 @@ Core class
   Give back the hand at the HAProxy scheduler. It is used when the LUA
   processing consumes a lot of processing time.
 
+.. _fetches_class:
+
 Fetches class
 =============
 
@@ -519,6 +549,9 @@ Fetches class
   This class contains a lot of internal HAProxy sample fetches. See the
   HAProxy "configuration.txt" documentation for more information about her
   usage. they are the chapters 7.3.2 to 7.3.6.
+
+  **warning** some sample fetches are not available in some context. These
+  limitations are specified in this documentation when theire useful.
 
   :see: TXN.f
   :see: TXN.sf
@@ -537,11 +570,13 @@ Fetches class
 
 .. code-block:: lua
 
-	function action(txn)
-		-- Get source IP
-		local clientip = txn.f:src()
-	end
+  function action(txn)
+    -- Get source IP
+    local clientip = txn.f:src()
+  end
 ..
+
+.. _converters_class:
 
 Converters class
 ================
@@ -564,6 +599,8 @@ Converters class
   * extracting preferred language comparing two lists,
   * turn to lower or upper chars,
   * deal with stick tables.
+
+.. _channel_class:
 
 Channel class
 =============
@@ -674,6 +711,8 @@ Channel class
   :param integer int: The amount of data which will be forwarded.
 
 
+.. _http_class:
+
 HTTP class
 ==========
 
@@ -689,6 +728,19 @@ HTTP class
   :returns: array of headers.
   :see: HTTP.res_get_headers()
 
+  This is the form of the returned array:
+
+.. code-block:: lua
+
+  HTTP:req_get_headers()['<header-name>'][<header-index>] = "<header-value>"
+
+  local hdr = HTTP:req_get_headers()
+  hdr["host"][0] = "www.test.com"
+  hdr["accept"][0] = "audio/basic q=1"
+  hdr["accept"][1] = "audio/*, q=0.2"
+  hdr["accept"][2] = "*/*, q=0.1"
+..
+
 .. js:function:: HTTP.res_get_headers(http)
 
   Returns an array containing all the response headers.
@@ -696,6 +748,19 @@ HTTP class
   :param class_http http: The related http object.
   :returns: array of headers.
   :see: HTTP.req_get_headers()
+
+  This is the form of the returned array:
+
+.. code-block:: lua
+
+  HTTP:res_get_headers()['<header-name>'][<header-index>] = "<header-value>"
+
+  local hdr = HTTP:req_get_headers()
+  hdr["host"][0] = "www.test.com"
+  hdr["accept"][0] = "audio/basic q=1"
+  hdr["accept"][1] = "audio/*, q=0.2"
+  hdr["accept"][2] = "*.*, q=0.1"
+..
 
 .. js:function:: HTTP.req_add_header(http, name, value)
 
@@ -854,6 +919,8 @@ HTTP class
   :param class_http http: The related http object.
   :param integer status: The new response status code.
 
+.. _txn_class:
+
 TXN class
 =========
 
@@ -871,31 +938,45 @@ TXN class
 
 .. js:attribute:: TXN.c
 
+  :returns: An :ref:`converters_class`.
+
   This attribute contains a Converters class object.
 
 .. js:attribute:: TXN.sc
+
+  :returns: An :ref:`converters_class`.
 
   This attribute contains a Converters class object. The functions of
   this object returns always a string.
 
 .. js:attribute:: TXN.f
 
+  :returns: An :ref:`fetches_class`.
+
   This attribute contains a Fetches class object.
 
 .. js:attribute:: TXN.sf
+
+  :returns: An :ref:`fetches_class`.
 
   This attribute contains a Fetches class object. The functions of
   this object returns always a string.
 
 .. js:attribute:: TXN.req
 
+  :returns: An :ref:`channel_class`.
+
   This attribute contains a channel class object for the request buffer.
 
 .. js:attribute:: TXN.res
 
+  :returns: An :ref:`channel_class`.
+
   This attribute contains a channel class object for the response buffer.
 
 .. js:attribute:: TXN.http
+
+  :returns: An :ref:`http_class`.
 
   This attribute contains an HTTP class object. It is avalaible only if the
   proxy has the "mode http" enabled.
@@ -937,9 +1018,9 @@ TXN class
 
 .. code-block:: lua
 
-	function Debug(txn, msg)
-		TXN.log(txn, core.debug, msg)
-	end
+  function Debug(txn, msg)
+    TXN.log(txn, core.debug, msg)
+  end
 ..
 
 .. js:function:: TXN.Info(txn, msg)
@@ -950,9 +1031,9 @@ TXN class
 
 .. code-block:: lua
 
-	function Debug(txn, msg)
-		TXN.log(txn, core.info, msg)
-	end
+  function Debug(txn, msg)
+    TXN.log(txn, core.info, msg)
+  end
 ..
 
 .. js:function:: TXN.Warning(txn, msg)
@@ -963,9 +1044,9 @@ TXN class
 
 .. code-block:: lua
 
-	function Debug(txn, msg)
-		TXN.log(txn, core.warning, msg)
-	end
+  function Debug(txn, msg)
+    TXN.log(txn, core.warning, msg)
+  end
 ..
 
 .. js:function:: TXN.Alert(txn, msg)
@@ -976,9 +1057,9 @@ TXN class
 
 .. code-block:: lua
 
-	function Debug(txn, msg)
-		TXN.log(txn, core.alert, msg)
-	end
+  function Debug(txn, msg)
+    TXN.log(txn, core.alert, msg)
+  end
 ..
 
 .. js:function:: TXN.get_priv(txn)
@@ -1028,12 +1109,6 @@ TXN class
 
   :param class_txn txn: The class txn object containing the data.
 
-
-
-
-
-
-
 .. js:function:: TXN.set_loglevel(txn, loglevel)
 
   Is used to change the log level of the current request. The "loglevel" must
@@ -1058,6 +1133,8 @@ TXN class
 
   :param class_txn txn: The class txn object containing the data.
   :param integer mark: The mark value.
+
+.. _socket_class:
 
 Socket class
 ============
@@ -1228,6 +1305,8 @@ Socket class
   :param class_socket socket: Is the manipulated Socket.
   :param integer value: The timeout value.
 
+.. _map_class:
+
 Map class
 =========
 
@@ -1238,33 +1317,33 @@ Map class
 
 .. code-block:: lua
 
-	default = "usa"
+  default = "usa"
 
-	-- Create and load map
-	geo = Map.new("geo.map", Map.ip);
+  -- Create and load map
+  geo = Map.new("geo.map", Map.ip);
 
-	-- Create new fetch that returns the user country
-	core.register_fetches("country", function(txn)
-		local src;
-		local loc;
+  -- Create new fetch that returns the user country
+  core.register_fetches("country", function(txn)
+    local src;
+    local loc;
 
-		src = txn.f:fhdr("x-forwarded-for");
-		if (src == nil) then
-			src = txn.f:src()
-			if (src == nil) then
-				return default;
-			end
-		end
+    src = txn.f:fhdr("x-forwarded-for");
+    if (src == nil) then
+      src = txn.f:src()
+      if (src == nil) then
+        return default;
+      end
+    end
 
-		-- Perform lookup
-		loc = geo:lookup(src);
+    -- Perform lookup
+    loc = geo:lookup(src);
 
-		if (loc == nil) then
-			return default;
-		end
+    if (loc == nil) then
+      return default;
+    end
 
-		return loc;
-	end);
+    return loc;
+  end);
 
 .. js:attribute:: Map.int
 
@@ -1347,8 +1426,10 @@ Map class
   :param string str: Is the string used as key.
   :returns: a string containing the result or empty string if no match.
 
+.. _applethttp_class:
+
 AppletHTTP class
-===============
+================
 
 .. js:class:: AppletHTTP
 
@@ -1359,6 +1440,7 @@ AppletHTTP class
   This is an hello world sample code:
 
 .. code-block:: lua
+
   core.register_service("hello-world", "http", function(applet)
      local response = "Hello World !"
      applet:set_status(200)
@@ -1368,55 +1450,171 @@ AppletHTTP class
      applet:send(response)
   end)
 
+.. js:attribute:: AppletHTTP.c
 
-.. js:function:: AppletHTTP.set_status(code)
+  :returns: A :ref:`converters_class`
+
+  This attribute contains a Converters class object.
+
+.. js:attribute:: AppletHTTP.sc
+
+  :returns: A :ref:`converters_class`
+
+  This attribute contains a Converters class object. The
+  functions of this object returns always a string.
+
+.. js:attribute:: AppletHTTP.f
+
+  :returns: A :ref:`fetches_class`
+
+  This attribute contains a Fetches class object. Note that the
+  applet execution place cannot access to a valid HAProxy core HTTP
+  transaction, so some sample fecthes related to the HTTP dependant
+  values (hdr, path, ...) are not available.
+
+.. js:attribute:: AppletHTTP.sf
+
+  :returns: A :ref:`fetches_class`
+
+  This attribute contains a Fetches class object. The functions of
+  this object returns always a string. Note that the applet
+  execution place cannot access to a valid HAProxy core HTTP
+  transaction, so some sample fecthes related to the HTTP dependant
+  values (hdr, path, ...) are not available.
+
+.. js:attribute:: AppletHTTP.method
+
+  :returns: string
+
+  The attribute method returns a string containing the HTTP
+  method.
+
+.. js:attribute:: AppletHTTP.version
+
+  :returns: string
+
+  The attribute version, returns a string containing the HTTP
+  request version.
+
+.. js:attribute:: AppletHTTP.path
+
+  :returns: string
+
+  The attribute path returns a string containing the HTTP
+  request path.
+
+.. js:attribute:: AppletHTTP.qs
+
+  :returns: string
+
+  The attribute qs returns a string containing the HTTP
+  request query string.
+
+.. js:attribute:: AppletHTTP.length
+
+  :returns: integer
+
+  The attribute length returns an integer containing the HTTP
+  body length.
+
+.. js:attribute:: AppletHTTP.headers
+
+  :returns: array
+
+  The attribute headers returns an array containing the HTTP
+  headers. The header names are always in lower case. As the header name can be
+  encountered more than once in each request, the value is indexed with 0 as
+  first index value. The array have this form:
+
+.. code-block:: lua
+
+  AppletHTTP.headers['<header-name>'][<header-index>] = "<header-value>"
+
+  AppletHTTP.headers["host"][0] = "www.test.com"
+  AppletHTTP.headers["accept"][0] = "audio/basic q=1"
+  AppletHTTP.headers["accept"][1] = "audio/*, q=0.2"
+  AppletHTTP.headers["accept"][2] = "*/*, q=0.1"
+..
+
+.. js:attribute:: AppletHTTP.headers
+
+  Contains an array containing all the request headers.
+
+.. js:function:: AppletHTTP.set_status(applet, code)
 
   This function sets the HTTP status code for the response. The allowed code are
   from 100 to 599.
 
+  :param class_AppletHTTP applet: An :ref:`applethttp_class`
   :param integer code: the status code returned to the client.
 
-.. js:function:: AppletHTTP.add_header(name, value)
+.. js:function:: AppletHTTP.add_header(applet, name, value)
 
   This function add an header in the response. Duplicated headers are not
   collapsed. The special header *content-length* is used to determinate the
   response length. If it not exists, a *transfer-encoding: chunked* is set, and
   all the write from the funcion *AppletHTTP:send()* become a chunk.
 
+  :param class_AppletHTTP applet: An :ref:`applethttp_class`
   :param string name: the header name
   :param string value: the header value
 
-.. js:function:: AppletHTTP.start_response()
+.. js:function:: AppletHTTP.start_response(applet)
 
   This function indicates to the HTTP engine that it can process and send the
   response headers. After this called we cannot add headers to the response; We
   cannot use the *AppletHTTP:send()* function if the
   *AppletHTTP:start_response()* is not called.
 
-.. js:function:: AppletHTTP.getline()
+  :param class_AppletHTTP applet: An :ref:`applethttp_class`
+
+.. js:function:: AppletHTTP.getline(applet)
 
   This function returns a string containing one line from the http body. If the
   data returned doesn't contains a final '\\n' its assumed than its the last
   available data before the end of stream.
 
+  :param class_AppletHTTP applet: An :ref:`applethttp_class`
   :returns: a string. The string can be empty if we reach the end of the stream.
 
-.. js:function:: AppletHTTP.receive([size])
+.. js:function:: AppletHTTP.receive(applet, [size])
 
   Reads data from the HTTP body, according to the specified read *size*. If the
   *size* is missing, the function tries to read all the content of the stream
   until the end. If the *size* is bigger than the http body, it returns the
   amount of data avalaible.
 
+  :param class_AppletHTTP applet: An :ref:`applethttp_class`
   :param integer size: the required read size.
   :returns: always return a string,the string can be empty is the connexion is
             closed.
 
-.. js:function:: AppletHTTP.send(msg)
+.. js:function:: AppletHTTP.send(applet, msg)
 
   Send the message *msg* on the http request body.
 
+  :param class_AppletHTTP applet: An :ref:`applethttp_class`
   :param string msg: the message to send.
+
+.. js:function:: AppletHTTP.get_priv(applet)
+
+  Return Lua data stored in the current transaction (with the
+  `AppletHTTP.set_priv()`) function. If no data are stored, it returns a nil
+  value.
+
+  :param class_AppletHTTP applet: An :ref:`applethttp_class`
+  :returns: the opaque data previsously stored, or nil if nothing is
+     avalaible.
+
+.. js:function:: AppletHTTP.set_priv(applet, data)
+
+  Store any data in the current HAProxy transaction. This action replace the
+  old stored data.
+
+  :param class_AppletHTTP applet: An :ref:`applethttp_class`
+  :param opaque data: The data which is stored in the transaction.
+
+.. _applettcp_class:
 
 AppletTCP class
 ===============
@@ -1427,29 +1625,75 @@ AppletTCP class
   can be registered with the *core.register_service()* function. They are used
   for processing a tcp stream like a server in back of HAProxy.
 
-.. js:function:: AppletTCP.getline()
+.. js:attribute:: AppletTCP.c
+
+  :returns: A :ref:`converters_class`
+
+  This attribute contains a Converters class object.
+
+.. js:attribute:: AppletTCP.sc
+
+  :returns: A :ref:`converters_class`
+
+  This attribute contains a Converters class object. The
+  functions of this object returns always a string.
+
+.. js:attribute:: AppletTCP.f
+
+  :returns: A :ref:`fetches_class`
+
+  This attribute contains a Fetches class object.
+
+.. js:attribute:: AppletTCP.sf
+
+  :returns: A :ref:`fetches_class`
+
+  This attribute contains a Fetches class object.
+
+.. js:function:: AppletTCP.getline(applet)
 
   This function returns a string containing one line from the stream. If the
   data returned doesn't contains a final '\\n' its assumed than its the last
   available data before the end of stream.
 
+  :param class_AppletTCP applet: An :ref:`applettcp_class`
   :returns: a string. The string can be empty if we reach the end of the stream.
 
-.. js:function:: AppletTCP.receive([size])
+.. js:function:: AppletTCP.receive(applet, [size])
 
   Reads data from the TCP stream, according to the specified read *size*. If the
   *size* is missing, the function tries to read all the content of the stream
   until the end.
 
+  :param class_AppletTCP applet: An :ref:`applettcp_class`
   :param integer size: the required read size.
   :returns: always return a string,the string can be empty is the connexion is
             closed.
 
-.. js:function:: AppletTCP.send(msg)
+.. js:function:: AppletTCP.send(appletmsg)
 
   Send the message on the stream.
 
+  :param class_AppletTCP applet: An :ref:`applettcp_class`
   :param string msg: the message to send.
+
+.. js:function:: AppletTCP.get_priv(applet)
+
+  Return Lua data stored in the current transaction (with the
+  `AppletTCP.set_priv()`) function. If no data are stored, it returns a nil
+  value.
+
+  :param class_AppletTCP applet: An :ref:`applettcp_class`
+  :returns: the opaque data previsously stored, or nil if nothing is
+     avalaible.
+
+.. js:function:: AppletTCP.set_priv(applet, data)
+
+  Store any data in the current HAProxy transaction. This action replace the
+  old stored data.
+
+  :param class_AppletTCP applet: An :ref:`applettcp_class`
+  :param opaque data: The data which is stored in the transaction.
 
 External Lua libraries
 ======================

@@ -707,6 +707,16 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		}
 		global.tune.chksize = atol(args[1]);
 	}
+	else if (!strcmp(args[0], "tune.recv_enough")) {
+		if (alertif_too_many_args(1, file, linenum, args, &err_code))
+			goto out;
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		global.tune.recv_enough = atol(args[1]);
+	}
 #ifdef USE_OPENSSL
 	else if (!strcmp(args[0], "tune.ssl.force-private-cache")) {
 		if (alertif_too_many_args(0, file, linenum, args, &err_code))
@@ -2307,6 +2317,13 @@ int cfg_parse_resolvers(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
+		if (!port1 && !port2) {
+			Alert("parsing [%s:%d] : '%s %s' : no UDP port specified\n",
+				file, linenum, args[0], args[1]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
 		newnameserver->addr = *sk;
 	}
 	else if (strcmp(args[0], "hold") == 0) { /* hold periods */
@@ -2804,6 +2821,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		if (defproxy.email_alert.myhostname)
 			curproxy->email_alert.myhostname = strdup(defproxy.email_alert.myhostname);
 		curproxy->email_alert.level = defproxy.email_alert.level;
+		curproxy->email_alert.set = defproxy.email_alert.set;
 
 		goto out;
 	}
@@ -3950,6 +3968,12 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 				if (err) {
 					Alert("parsing [%s:%d] : stick-table: unexpected character '%c' in argument of '%s'.\n",
 					      file, linenum, *err, args[myidx-1]);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+				if (val > INT_MAX) {
+					Alert("parsing [%s:%d] : Expire value [%u]ms exceeds maxmimum value of 24.85 days.\n",
+					      file, linenum, val);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
@@ -7469,7 +7493,7 @@ int check_config_validity()
 			    free_email_alert(curproxy);
 		    }
 		    if (!curproxy->email_alert.myhostname)
-			    curproxy->email_alert.myhostname = hostname;
+			    curproxy->email_alert.myhostname = strdup(hostname);
 		}
 
 		if (curproxy->check_command) {

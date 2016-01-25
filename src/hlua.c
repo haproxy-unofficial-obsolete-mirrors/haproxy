@@ -115,6 +115,7 @@ static int hlua_panic_ljmp(lua_State *L) { longjmp(safe_ljmp_env, 1); }
 #define APPLET_HDR_SENT 0x04 /* Response header sent. */
 #define APPLET_CHUNKED  0x08 /* Use transfer encoding chunked. */
 #define APPLET_LAST_CHK 0x10 /* Last chunk sent. */
+#define APPLET_HTTP11   0x20 /* Last chunk sent. */
 
 #define HTTP_100C "HTTP/1.1 100 Continue\r\n\r\n"
 
@@ -2961,7 +2962,7 @@ __LJMP static struct hlua_smp *hlua_checkfetches(lua_State *L, int ud)
 /* This function creates and push in the stack a fetch object according
  * with a current TXN.
  */
-static int hlua_fetches_new(lua_State *L, struct hlua_txn *txn, int stringsafe)
+static int hlua_fetches_new(lua_State *L, struct hlua_txn *txn, unsigned int flags)
 {
 	struct hlua_smp *hsmp;
 
@@ -2980,7 +2981,7 @@ static int hlua_fetches_new(lua_State *L, struct hlua_txn *txn, int stringsafe)
 	hsmp->s = txn->s;
 	hsmp->p = txn->p;
 	hsmp->dir = txn->dir;
-	hsmp->stringsafe = stringsafe;
+	hsmp->flags = flags;
 
 	/* Pop a class sesison metatable and affect it to the userdata. */
 	lua_rawgeti(L, LUA_REGISTRYINDEX, class_fetches_ref);
@@ -3009,6 +3010,14 @@ __LJMP static int hlua_run_sample_fetch(lua_State *L)
 	/* Get traditionnal arguments. */
 	hsmp = MAY_LJMP(hlua_checkfetches(L, 1));
 
+	/* Check execution authorization. */
+	if (f->use & SMP_USE_HTTP_ANY &&
+	    !(hsmp->flags & HLUA_F_MAY_USE_HTTP)) {
+		lua_pushfstring(L, "the sample-fetch '%s' needs an HTTP parser which "
+		                   "is not available in Lua services", f->kw);
+		WILL_LJMP(lua_error(L));
+	}
+
 	/* Get extra arguments. */
 	for (i = 0; i < lua_gettop(L) - 1; i++) {
 		if (i >= ARGM_NBARGS)
@@ -3035,7 +3044,7 @@ __LJMP static int hlua_run_sample_fetch(lua_State *L)
 	smp.strm = hsmp->s;
 	smp.opt = hsmp->dir & SMP_OPT_DIR;
 	if (!f->process(args, &smp, f->kw, f->private)) {
-		if (hsmp->stringsafe)
+		if (hsmp->flags & HLUA_F_AS_STRING)
 			lua_pushstring(L, "");
 		else
 			lua_pushnil(L);
@@ -3043,7 +3052,7 @@ __LJMP static int hlua_run_sample_fetch(lua_State *L)
 	}
 
 	/* Convert the returned sample in lua value. */
-	if (hsmp->stringsafe)
+	if (hsmp->flags & HLUA_F_AS_STRING)
 		hlua_smp2lua_str(L, &smp);
 	else
 		hlua_smp2lua(L, &smp);
@@ -3069,7 +3078,7 @@ __LJMP static struct hlua_smp *hlua_checkconverters(lua_State *L, int ud)
 /* This function creates and push in the stack a Converters object
  * according with a current TXN.
  */
-static int hlua_converters_new(lua_State *L, struct hlua_txn *txn, int stringsafe)
+static int hlua_converters_new(lua_State *L, struct hlua_txn *txn, unsigned int flags)
 {
 	struct hlua_smp *hsmp;
 
@@ -3088,7 +3097,7 @@ static int hlua_converters_new(lua_State *L, struct hlua_txn *txn, int stringsaf
 	hsmp->s = txn->s;
 	hsmp->p = txn->p;
 	hsmp->dir = txn->dir;
-	hsmp->stringsafe = stringsafe;
+	hsmp->flags = flags;
 
 	/* Pop a class stream metatable and affect it to the table. */
 	lua_rawgeti(L, LUA_REGISTRYINDEX, class_converters_ref);
@@ -3158,7 +3167,7 @@ __LJMP static int hlua_run_sample_conv(lua_State *L)
 	smp.strm = hsmp->s;
 	smp.opt = hsmp->dir & SMP_OPT_DIR;
 	if (!conv->process(args, &smp, conv->private)) {
-		if (hsmp->stringsafe)
+		if (hsmp->flags & HLUA_F_AS_STRING)
 			lua_pushstring(L, "");
 		else
 			lua_pushnil(L);
@@ -3166,7 +3175,7 @@ __LJMP static int hlua_run_sample_conv(lua_State *L)
 	}
 
 	/* Convert the returned sample in lua value. */
-	if (hsmp->stringsafe)
+	if (hsmp->flags & HLUA_F_AS_STRING)
 		hlua_smp2lua_str(L, &smp);
 	else
 		hlua_smp2lua(L, &smp);
@@ -3222,7 +3231,7 @@ static int hlua_applet_tcp_new(lua_State *L, struct appctx *ctx)
 
 	/* Create the "sf" field that contains a list of stringsafe fetches. */
 	lua_pushstring(L, "sf");
-	if (!hlua_fetches_new(L, &appctx->htxn, 1))
+	if (!hlua_fetches_new(L, &appctx->htxn, HLUA_F_AS_STRING))
 		return 0;
 	lua_settable(L, -3);
 
@@ -3234,13 +3243,44 @@ static int hlua_applet_tcp_new(lua_State *L, struct appctx *ctx)
 
 	/* Create the "sc" field that contains a list of stringsafe converters. */
 	lua_pushstring(L, "sc");
-	if (!hlua_converters_new(L, &appctx->htxn, 1))
+	if (!hlua_converters_new(L, &appctx->htxn, HLUA_F_AS_STRING))
 		return 0;
 	lua_settable(L, -3);
 
 	/* Pop a class stream metatable and affect it to the table. */
 	lua_rawgeti(L, LUA_REGISTRYINDEX, class_applet_tcp_ref);
 	lua_setmetatable(L, -2);
+
+	return 1;
+}
+
+__LJMP static int hlua_applet_tcp_set_priv(lua_State *L)
+{
+	struct hlua_appctx *appctx = MAY_LJMP(hlua_checkapplet_tcp(L, 1));
+	struct stream *s = appctx->htxn.s;
+	struct hlua *hlua = &s->hlua;
+
+	MAY_LJMP(check_args(L, 2, "set_priv"));
+
+	/* Remove previous value. */
+	if (hlua->Mref != -1)
+		luaL_unref(L, hlua->Mref, LUA_REGISTRYINDEX);
+
+	/* Get and store new value. */
+	lua_pushvalue(L, 2); /* Copy the element 2 at the top of the stack. */
+	hlua->Mref = luaL_ref(L, LUA_REGISTRYINDEX); /* pop the previously pushed value. */
+
+	return 0;
+}
+
+__LJMP static int hlua_applet_tcp_get_priv(lua_State *L)
+{
+	struct hlua_appctx *appctx = MAY_LJMP(hlua_checkapplet_tcp(L, 1));
+	struct stream *s = appctx->htxn.s;
+	struct hlua *hlua = &s->hlua;
+
+	/* Push configuration index in the stack. */
+	lua_rawgeti(L, LUA_REGISTRYINDEX, hlua->Mref);
 
 	return 1;
 }
@@ -3476,6 +3516,7 @@ __LJMP static struct hlua_appctx *hlua_checkapplet_http(lua_State *L, int ud)
 static int hlua_applet_http_new(lua_State *L, struct appctx *ctx)
 {
 	struct hlua_appctx *appctx;
+	struct hlua_txn htxn;
 	struct stream_interface *si = ctx->owner;
 	struct stream *s = si_strm(si);
 	struct proxy *px = s->be;
@@ -3508,7 +3549,7 @@ static int hlua_applet_http_new(lua_State *L, struct appctx *ctx)
 
 	/* Create the "sf" field that contains a list of stringsafe fetches. */
 	lua_pushstring(L, "sf");
-	if (!hlua_fetches_new(L, &appctx->htxn, 1))
+	if (!hlua_fetches_new(L, &appctx->htxn, HLUA_F_AS_STRING))
 		return 0;
 	lua_settable(L, -3);
 
@@ -3520,7 +3561,7 @@ static int hlua_applet_http_new(lua_State *L, struct appctx *ctx)
 
 	/* Create the "sc" field that contains a list of stringsafe converters. */
 	lua_pushstring(L, "sc");
-	if (!hlua_converters_new(L, &appctx->htxn, 1))
+	if (!hlua_converters_new(L, &appctx->htxn, HLUA_F_AS_STRING))
 		return 0;
 	lua_settable(L, -3);
 
@@ -3532,6 +3573,17 @@ static int hlua_applet_http_new(lua_State *L, struct appctx *ctx)
 	/* Stores the http version. */
 	lua_pushstring(L, "version");
 	lua_pushlstring(L, txn->req.chn->buf->p + txn->req.sl.rq.v, txn->req.sl.rq.v_l);
+	lua_settable(L, -3);
+
+	/* creates an array of headers. hlua_http_get_headers() crates and push
+	 * the array on the top of the stack.
+	 */
+	lua_pushstring(L, "headers");
+	htxn.s = s;
+	htxn.p = px;
+	htxn.dir = SMP_OPT_DIR_REQ;
+	if (!hlua_http_get_headers(L, &htxn, &htxn.s->txn->req))
+		return 0;
 	lua_settable(L, -3);
 
 	/* Get path and qs */
@@ -3571,6 +3623,37 @@ static int hlua_applet_http_new(lua_State *L, struct appctx *ctx)
 	/* Pop a class stream metatable and affect it to the table. */
 	lua_rawgeti(L, LUA_REGISTRYINDEX, class_applet_http_ref);
 	lua_setmetatable(L, -2);
+
+	return 1;
+}
+
+__LJMP static int hlua_applet_http_set_priv(lua_State *L)
+{
+	struct hlua_appctx *appctx = MAY_LJMP(hlua_checkapplet_http(L, 1));
+	struct stream *s = appctx->htxn.s;
+	struct hlua *hlua = &s->hlua;
+
+	MAY_LJMP(check_args(L, 2, "set_priv"));
+
+	/* Remove previous value. */
+	if (hlua->Mref != -1)
+		luaL_unref(L, hlua->Mref, LUA_REGISTRYINDEX);
+
+	/* Get and store new value. */
+	lua_pushvalue(L, 2); /* Copy the element 2 at the top of the stack. */
+	hlua->Mref = luaL_ref(L, LUA_REGISTRYINDEX); /* pop the previously pushed value. */
+
+	return 0;
+}
+
+__LJMP static int hlua_applet_http_get_priv(lua_State *L)
+{
+	struct hlua_appctx *appctx = MAY_LJMP(hlua_checkapplet_http(L, 1));
+	struct stream *s = appctx->htxn.s;
+	struct hlua *hlua = &s->hlua;
+
+	/* Push configuration index in the stack. */
+	lua_rawgeti(L, LUA_REGISTRYINDEX, hlua->Mref);
 
 	return 1;
 }
@@ -3949,9 +4032,6 @@ __LJMP static int hlua_applet_http_start_response(lua_State *L)
 {
 	struct chunk *tmp = get_trash_chunk();
 	struct hlua_appctx *appctx = MAY_LJMP(hlua_checkapplet_http(L, 1));
-	struct stream_interface *si = appctx->appctx->owner;
-	struct stream *s = si_strm(si);
-	struct http_txn *txn = s->txn;
 	const char *name;
 	const char *value;
 	int id;
@@ -3961,7 +4041,7 @@ __LJMP static int hlua_applet_http_start_response(lua_State *L)
 
 	/* Use the same http version than the request. */
 	chunk_appendf(tmp, "HTTP/1.%c %d %s\r\n",
-	              txn->req.flags & HTTP_MSGF_VER_11 ? '1' : '0',
+	              appctx->appctx->ctx.hlua_apphttp.flags & APPLET_HTTP11 ? '1' : '0',
 	              appctx->appctx->ctx.hlua_apphttp.status,
 	              get_reason(appctx->appctx->ctx.hlua_apphttp.status));
 
@@ -4057,7 +4137,7 @@ __LJMP static int hlua_applet_http_start_response(lua_State *L)
 	 * respected by haproxy. HAProcy considers that the application cloe the connection
 	 * and it keep the connection from the client open.
 	 */
-	if (txn->req.flags & HTTP_MSGF_VER_11 && !hdr_connection)
+	if (appctx->appctx->ctx.hlua_apphttp.flags & APPLET_HTTP11 && !hdr_connection)
 		chunk_appendf(tmp, "Connection: close\r\n");
 
 	/* If we dont have a content-length set, we must announce a transfer enconding
@@ -4616,13 +4696,13 @@ static int hlua_txn_new(lua_State *L, struct stream *s, struct proxy *p, int dir
 
 	/* Create the "f" field that contains a list of fetches. */
 	lua_pushstring(L, "f");
-	if (!hlua_fetches_new(L, htxn, 0))
+	if (!hlua_fetches_new(L, htxn, HLUA_F_MAY_USE_HTTP))
 		return 0;
 	lua_rawset(L, -3);
 
 	/* Create the "sf" field that contains a list of stringsafe fetches. */
 	lua_pushstring(L, "sf");
-	if (!hlua_fetches_new(L, htxn, 1))
+	if (!hlua_fetches_new(L, htxn, HLUA_F_MAY_USE_HTTP | HLUA_F_AS_STRING))
 		return 0;
 	lua_rawset(L, -3);
 
@@ -4634,7 +4714,7 @@ static int hlua_txn_new(lua_State *L, struct stream *s, struct proxy *p, int dir
 
 	/* Create the "sc" field that contains a list of stringsafe converters. */
 	lua_pushstring(L, "sc");
-	if (!hlua_converters_new(L, htxn, 1))
+	if (!hlua_converters_new(L, htxn, HLUA_F_AS_STRING))
 		return 0;
 	lua_rawset(L, -3);
 
@@ -5763,11 +5843,13 @@ static int hlua_applet_http_init(struct appctx *ctx, struct proxy *px, struct st
 	 */
 	if ((txn->flags & TX_CON_WANT_MSK) == TX_CON_WANT_KAL)
 		txn->flags = (txn->flags & ~TX_CON_WANT_MSK) | TX_CON_WANT_SCL;
-	req->analysers |= AN_REQ_HTTP_XFER_BODY;
 
 	HLUA_INIT(hlua);
 	ctx->ctx.hlua_apphttp.left_bytes = -1;
 	ctx->ctx.hlua_apphttp.flags = 0;
+
+	if (txn->req.flags & HTTP_MSGF_VER_11)
+		ctx->ctx.hlua_apphttp.flags |= APPLET_HTTP11;
 
 	/* Create task used by signal to wakeup applets. */
 	task = task_new();
@@ -5855,7 +5937,6 @@ static void hlua_applet_http_fct(struct appctx *ctx)
 	struct stream_interface *si = ctx->owner;
 	struct stream *strm = si_strm(si);
 	struct channel *res = si_ic(si);
-	struct channel *req = si_oc(si);
 	struct act_rule *rule = ctx->rule;
 	struct proxy *px = strm->be;
 	struct hlua *hlua = &ctx->ctx.hlua_apphttp.hlua;
@@ -5872,12 +5953,6 @@ static void hlua_applet_http_fct(struct appctx *ctx)
 	/* Set the currently running flag. */
 	if (!HLUA_IS_RUNNING(hlua) &&
 	    !(ctx->ctx.hlua_apphttp.flags & APPLET_DONE)) {
-
-		/* enable the minimally required analyzers to handle keep-alive
-		 * and compression on the HTTP response
-		 */
-		req->analysers = (req->analysers & AN_REQ_HTTP_BODY) |
-		                 AN_REQ_HTTP_XFER_BODY | AN_REQ_HTTP_INNER;
 
 		/* Wait for full HTTP analysys. */
 		if (unlikely(strm->txn->req.msg_state < HTTP_MSG_BODY)) {
@@ -6041,6 +6116,17 @@ static enum act_parse_ret action_register_service_http(const char **args, int *c
 {
 	struct hlua_function *fcn = (struct hlua_function *)rule->kw->private;
 
+	/* HTTP applets are forbidden in tcp-request rules.
+	 * HTTP applet request requires everything initilized by
+	 * "http_process_request" (analyzer flag AN_REQ_HTTP_INNER).
+	 * The applet will be immediately initilized, but its before
+	 * the call of this analyzer.
+	 */
+	if (rule->from != ACT_F_HTTP_REQ) {
+		memprintf(err, "HTTP applets are forbidden from 'tcp-request' rulesets");
+		return ACT_RET_PRS_ERR;
+	}
+
 	/* Memory for the rule. */
 	rule->arg.hlua_rule = calloc(1, sizeof(*rule->arg.hlua_rule));
 	if (!rule->arg.hlua_rule) {
@@ -6077,7 +6163,7 @@ __LJMP static int hlua_register_action(lua_State *L)
 	int len;
 	struct hlua_function *fcn;
 
-	MAY_LJMP(check_args(L, 3, "register_service"));
+	MAY_LJMP(check_args(L, 3, "register_action"));
 
 	/* First argument : converter name. */
 	name = MAY_LJMP(luaL_checkstring(L, 1));
@@ -6802,9 +6888,11 @@ void hlua_init(void)
 	lua_newtable(gL.T);
 
 	/* Register Lua functions. */
-	hlua_class_function(gL.T, "getline", hlua_applet_tcp_getline);
-	hlua_class_function(gL.T, "receive", hlua_applet_tcp_recv);
-	hlua_class_function(gL.T, "send",    hlua_applet_tcp_send);
+	hlua_class_function(gL.T, "getline",  hlua_applet_tcp_getline);
+	hlua_class_function(gL.T, "receive",  hlua_applet_tcp_recv);
+	hlua_class_function(gL.T, "send",     hlua_applet_tcp_send);
+	hlua_class_function(gL.T, "set_priv", hlua_applet_tcp_set_priv);
+	hlua_class_function(gL.T, "get_priv", hlua_applet_tcp_get_priv);
 
 	lua_settable(gL.T, -3);
 
@@ -6833,6 +6921,8 @@ void hlua_init(void)
 	lua_newtable(gL.T);
 
 	/* Register Lua functions. */
+	hlua_class_function(gL.T, "set_priv",       hlua_applet_http_set_priv);
+	hlua_class_function(gL.T, "get_priv",       hlua_applet_http_get_priv);
 	hlua_class_function(gL.T, "getline",        hlua_applet_http_getline);
 	hlua_class_function(gL.T, "receive",        hlua_applet_http_recv);
 	hlua_class_function(gL.T, "send",           hlua_applet_http_send);
