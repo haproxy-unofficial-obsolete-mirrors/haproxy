@@ -448,7 +448,7 @@ smp_fetch_req_ssl_ver(const struct arg *args, struct sample *smp, const char *kw
 		silen   = (data[4] <<  8) + data[5]; /* session_id_len: 0 or 16 */
 		chlen   = (data[6] <<  8) + data[7]; /* 16<=challenge length<=32 */
 
-		bleft -= 8; data += 8;
+		bleft -= 8;
 		if (cilen % 3 != 0)
 			goto not_ssl;
 		if (silen && silen != 16)

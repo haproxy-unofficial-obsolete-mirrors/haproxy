@@ -1854,7 +1854,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 	}
 
  out:
-	free(errmsg);
+	if (errmsg)
+        free(errmsg);
 	return err_code;
 }
 

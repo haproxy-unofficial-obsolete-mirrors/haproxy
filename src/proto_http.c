@@ -1950,7 +1950,6 @@ static int http_upgrade_v09_to_v10(struct http_txn *txn)
 		return 0;
 
 	cur_end = msg->chn->buf->p + msg->sl.rq.l;
-	delta = 0;
 
 	if (msg->sl.rq.u_l == 0) {
 		/* HTTP/0.9 requests *must* have a request URI, per RFC 1945 */
@@ -2213,7 +2212,6 @@ static int http_forward_trailers(struct http_msg *msg)
 		const char *p1 = NULL, *p2 = NULL;
 		const char *ptr = b_ptr(buf, msg->next);
 		const char *stop = bi_end(buf);
-		int bytes;
 
 		/* scan current line and stop at LF or CRLF */
 		while (1) {
@@ -2244,10 +2242,6 @@ static int http_forward_trailers(struct http_msg *msg)
 		p2++;
 		if (p2 >= buf->data + buf->size)
 			p2 = buf->data;
-
-		bytes = p2 - b_ptr(buf, msg->next);
-		if (bytes < 0)
-			bytes += buf->size;
 
 		if (p1 == b_ptr(buf, msg->next)) {
 			/* LF/CRLF at beginning of line => end of trailers at p2.
@@ -12397,7 +12391,7 @@ void http_set_status(unsigned int status, struct stream *s)
 	cur_end = s->res.buf->p + txn->rsp.sl.st.r + txn->rsp.sl.st.r_l;
 
 	/* commit changes and adjust message */
-	delta = buffer_replace2(s->res.buf, cur_ptr, cur_end, trash.str, trash.len);
+	buffer_replace2(s->res.buf, cur_ptr, cur_end, trash.str, trash.len);
 
 	/* adjust res line offsets and lengths */
 	txn->rsp.sl.st.r += c_l - txn->rsp.sl.st.c_l;
