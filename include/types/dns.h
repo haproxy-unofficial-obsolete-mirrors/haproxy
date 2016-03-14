@@ -55,6 +55,11 @@
 #define DNS_FLAG_TRUNCATED	0x0200	/* mask for truncated flag */
 #define DNS_FLAG_REPLYCODE	0x000F	/* mask for reply code */
 
+/* max number of network preference entries are avalaible from the
+ * configuration file.
+ */
+#define SRV_MAX_PREF_NET 5
+
 /* DNS request or response header structure */
 struct dns_header {
 	unsigned short	id:16;		/* identifier */
@@ -140,6 +145,22 @@ struct dns_nameserver {
 	} counters;
 };
 
+struct dns_options {
+	int family_prio;	/* which IP family should the resolver use when both are returned */
+	struct {
+		int family;
+		union {
+			struct in_addr in4;
+			struct in6_addr in6;
+		} addr;
+		union {
+			struct in_addr in4;
+			struct in6_addr in6;
+		} mask;
+	} pref_net[SRV_MAX_PREF_NET];
+	int pref_net_nb;               /* The number of registered prefered networks. */
+};
+
 /*
  * resolution structure associated to single server and used to manage name resolution for
  * this server.
@@ -155,7 +176,7 @@ struct dns_resolution {
 					/* requester callback, for error management */
 	char *hostname_dn;		/* server hostname in domain name label format */
 	int hostname_dn_len;		/* server domain name label len */
-	int resolver_family_priority;	/* which IP family should the resolver use when both are returned */
+	struct dns_options *opts;       /* IP selection options inherited from the configuration file. */
 	unsigned int last_resolution;	/* time of the lastest valid resolution */
 	unsigned int last_sent_packet;	/* time of the latest DNS packet sent */
 	unsigned int last_status_change;	/* time of the latest DNS resolution status change */

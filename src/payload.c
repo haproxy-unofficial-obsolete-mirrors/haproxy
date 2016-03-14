@@ -46,10 +46,10 @@ smp_fetch_len(const struct arg *args, struct sample *smp, const char *kw, void *
 {
 	struct channel *chn;
 
-	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
-	if (!chn->buf)
+	if (!smp->strm)
 		return 0;
 
+	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
 	smp->data.type = SMP_T_SINT;
 	smp->data.u.sint = chn->buf->i;
 	smp->flags = SMP_F_VOLATILE | SMP_F_MAY_CHANGE;
@@ -68,10 +68,10 @@ smp_fetch_req_ssl_st_ext(const struct arg *args, struct sample *smp, const char 
 	struct channel *chn;
 	unsigned char *data;
 
-	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
-	if (!chn->buf)
+	if (!smp->strm)
 		goto not_ssl_hello;
 
+	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
 	bleft = chn->buf->i;
 	data = (unsigned char *)chn->buf->p;
 
@@ -201,10 +201,10 @@ smp_fetch_req_ssl_ec_ext(const struct arg *args, struct sample *smp, const char 
 	struct channel *chn;
 	unsigned char *data;
 
-	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
-	if (!chn->buf)
+	if (!smp->strm)
 		goto not_ssl_hello;
 
+	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
 	bleft = chn->buf->i;
 	data = (unsigned char *)chn->buf->p;
 
@@ -322,10 +322,10 @@ smp_fetch_ssl_hello_type(const struct arg *args, struct sample *smp, const char 
 	struct channel *chn;
 	const unsigned char *data;
 
-	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
-	if (!chn->buf)
+	if (!smp->strm)
 		goto not_ssl_hello;
 
+	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
 	bleft = chn->buf->i;
 	data = (const unsigned char *)chn->buf->p;
 
@@ -386,11 +386,12 @@ smp_fetch_req_ssl_ver(const struct arg *args, struct sample *smp, const char *kw
 {
 	int version, bleft, msg_len;
 	const unsigned char *data;
-	struct channel *req = &smp->strm->req;
+	struct channel *req;
 
-	if (!req->buf)
+	if (!smp->strm)
 		return 0;
 
+	req = &smp->strm->req;
 	msg_len = 0;
 	bleft = req->buf->i;
 	if (!bleft)
@@ -527,10 +528,10 @@ smp_fetch_ssl_hello_sni(const struct arg *args, struct sample *smp, const char *
 	struct channel *chn;
 	unsigned char *data;
 
-	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
-	if (!chn->buf)
+	if (!smp->strm)
 		goto not_ssl_hello;
 
+	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
 	bleft = chn->buf->i;
 	data = (unsigned char *)chn->buf->p;
 
@@ -662,9 +663,6 @@ fetch_rdp_cookie_name(struct stream *s, struct sample *smp, const char *cname, i
 	int bleft;
 	const unsigned char *data;
 
-	if (!s->req.buf)
-		return 0;
-
 	smp->flags = SMP_F_CONST;
 	smp->data.type = SMP_T_STR;
 
@@ -751,6 +749,9 @@ fetch_rdp_cookie_name(struct stream *s, struct sample *smp, const char *cname, i
 int
 smp_fetch_rdp_cookie(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
+	if (!smp->strm)
+		return 0;
+
 	return fetch_rdp_cookie_name(smp->strm, smp, args ? args->data.str.str : NULL, args ? args->data.str.len : 0);
 }
 
@@ -786,10 +787,10 @@ smp_fetch_payload_lv(const struct arg *arg_p, struct sample *smp, const char *kw
 	/* by default buf offset == len offset + len size */
 	/* buf offset could be absolute or relative to len offset + len size if prefixed by + or - */
 
-	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
-	if (!chn->buf)
+	if (!smp->strm)
 		return 0;
 
+	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
 	if (len_offset + len_size > chn->buf->i)
 		goto too_short;
 
@@ -836,10 +837,10 @@ smp_fetch_payload(const struct arg *arg_p, struct sample *smp, const char *kw, v
 	unsigned int buf_size = arg_p[1].data.sint;
 	struct channel *chn;
 
-	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
-	if (!chn->buf)
+	if (!smp->strm)
 		return 0;
 
+	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
 	if (!buf_size || buf_size > global.tune.bufsize || buf_offset + buf_size > global.tune.bufsize) {
 		/* will never match */
 		smp->flags = 0;

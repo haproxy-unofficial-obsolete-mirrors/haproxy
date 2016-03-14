@@ -1,3 +1,15 @@
+/*
+ * Lua unsafe core engine
+ *
+ * Copyright 2015-2016 Thierry Fournier <tfournier@arpalert.org>
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version
+ * 2 of the License, or (at your option) any later version.
+ *
+ */
+
 #include <sys/socket.h>
 
 #include <ctype.h>
@@ -24,6 +36,7 @@
 #include <proto/channel.h>
 #include <proto/hdr_idx.h>
 #include <proto/hlua.h>
+#include <proto/hlua_fcn.h>
 #include <proto/map.h>
 #include <proto/obj_type.h>
 #include <proto/pattern.h>
@@ -303,47 +316,6 @@ __LJMP static inline void check_args(lua_State *L, int nb, char *fcn)
 	if (lua_gettop(L) == nb)
 		return;
 	WILL_LJMP(luaL_error(L, "'%s' needs %d arguments", fcn, nb));
-}
-
-/* Return true if the data in stack[<ud>] is an object of
- * type <class_ref>.
- */
-static int hlua_metaistype(lua_State *L, int ud, int class_ref)
-{
-	if (!lua_getmetatable(L, ud))
-		return 0;
-
-	lua_rawgeti(L, LUA_REGISTRYINDEX, class_ref);
-	if (!lua_rawequal(L, -1, -2)) {
-		lua_pop(L, 2);
-		return 0;
-	}
-
-	lua_pop(L, 2);
-	return 1;
-}
-
-/* Return an object of the expected type, or throws an error. */
-__LJMP static void *hlua_checkudata(lua_State *L, int ud, int class_ref)
-{
-	void *p;
-
-	/* Check if the stack entry is an array. */
-	if (!lua_istable(L, ud))
-		WILL_LJMP(luaL_argerror(L, ud, NULL));
-	/* Check if the metadata have the expected type. */
-	if (!hlua_metaistype(L, ud, class_ref))
-		WILL_LJMP(luaL_argerror(L, ud, NULL));
-	/* Push on the stack at the entry [0] of the table. */
-	lua_rawgeti(L, ud, 0);
-	/* Check if this entry is userdata. */
-	p = lua_touserdata(L, -1);
-	if (!p)
-		WILL_LJMP(luaL_argerror(L, ud, NULL));
-	/* Remove the entry returned by lua_rawgeti(). */
-	lua_pop(L, 1);
-	/* Return the associated struct. */
-	return p;
 }
 
 /* This fucntion push an error string prefixed by the file name
@@ -3039,10 +3011,7 @@ __LJMP static int hlua_run_sample_fetch(lua_State *L)
 	memset(&smp, 0, sizeof(smp));
 
 	/* Run the sample fetch process. */
-	smp.px = hsmp->p;
-	smp.sess = hsmp->s->sess;
-	smp.strm = hsmp->s;
-	smp.opt = hsmp->dir & SMP_OPT_DIR;
+	smp_set_owner(&smp, hsmp->p, hsmp->s->sess, hsmp->s, hsmp->dir & SMP_OPT_DIR);
 	if (!f->process(args, &smp, f->kw, f->private)) {
 		if (hsmp->flags & HLUA_F_AS_STRING)
 			lua_pushstring(L, "");
@@ -3149,6 +3118,8 @@ __LJMP static int hlua_run_sample_conv(lua_State *L)
 		WILL_LJMP(lua_error(L));
 	}
 
+	smp_set_owner(&smp, hsmp->p, hsmp->s->sess, hsmp->s, hsmp->dir & SMP_OPT_DIR);
+
 	/* Apply expected cast. */
 	if (!sample_casts[smp.data.type][conv->in_type]) {
 		hlua_pusherror(L, "invalid input argument: cannot cast '%s' to '%s'",
@@ -3162,10 +3133,6 @@ __LJMP static int hlua_run_sample_conv(lua_State *L)
 	}
 
 	/* Run the sample conversion process. */
-	smp.px = hsmp->p;
-	smp.sess = hsmp->s->sess;
-	smp.strm = hsmp->s;
-	smp.opt = hsmp->dir & SMP_OPT_DIR;
 	if (!conv->process(args, &smp, conv->private)) {
 		if (hsmp->flags & HLUA_F_AS_STRING)
 			lua_pushstring(L, "");
@@ -4601,7 +4568,8 @@ __LJMP static int hlua_set_var(lua_State *L)
 	hlua_lua2smp(L, 3, &smp);
 
 	/* Store the sample in a variable. */
-	vars_set_by_name(name, len, htxn->s, &smp);
+	smp_set_owner(&smp, htxn->p, htxn->s->sess, htxn->s, htxn->dir & SMP_OPT_DIR);
+	vars_set_by_name(name, len, &smp);
 	return 0;
 }
 
@@ -4620,7 +4588,8 @@ __LJMP static int hlua_get_var(lua_State *L)
 	htxn = MAY_LJMP(hlua_checktxn(L, 1));
 	name = MAY_LJMP(luaL_checklstring(L, 2, &len));
 
-	if (!vars_get_by_name(name, len, htxn->s, &smp)) {
+	smp_set_owner(&smp, htxn->p, htxn->s->sess, htxn->s, htxn->dir & SMP_OPT_DIR);
+	if (!vars_get_by_name(name, len, &smp)) {
 		lua_pushnil(L);
 		return 1;
 	}
@@ -5191,6 +5160,9 @@ static int hlua_sample_conv_wrapper(const struct arg *arg_p, struct sample *smp,
 	struct hlua_function *fcn = (struct hlua_function *)private;
 	struct stream *stream = smp->strm;
 
+	if (!stream)
+		return 0;
+
 	/* In the execution wrappers linked with a stream, the
 	 * Lua context can be not initialized. This behavior
 	 * permits to save performances because a systematic
@@ -5282,13 +5254,17 @@ static int hlua_sample_conv_wrapper(const struct arg *arg_p, struct sample *smp,
 
 /* Wrapper called by HAProxy to execute a sample-fetch. this wrapper
  * doesn't allow "yield" functions because the HAProxy engine cannot
- * resume sample-fetches.
+ * resume sample-fetches. This function will be called by the sample
+ * fetch engine to call lua-based fetch operations.
  */
 static int hlua_sample_fetch_wrapper(const struct arg *arg_p, struct sample *smp,
                                      const char *kw, void *private)
 {
 	struct hlua_function *fcn = (struct hlua_function *)private;
 	struct stream *stream = smp->strm;
+
+	if (!stream)
+		return 0;
 
 	/* In the execution wrappers linked with a stream, the
 	 * Lua context can be not initialized. This behavior
@@ -5775,6 +5751,8 @@ static void hlua_applet_tcp_fct(struct appctx *ctx)
 
 	/* yield. */
 	case HLUA_E_AGAIN:
+		if (hlua->wake_time != TICK_ETERNITY)
+			task_schedule(ctx->ctx.hlua_apptcp.task, hlua->wake_time);
 		return;
 
 	/* finished with error. */
@@ -5998,6 +5976,8 @@ static void hlua_applet_http_fct(struct appctx *ctx)
 
 		/* yield. */
 		case HLUA_E_AGAIN:
+			if (hlua->wake_time != TICK_ETERNITY)
+				task_schedule(ctx->ctx.hlua_apphttp.task, hlua->wake_time);
 			return;
 
 		/* finished with error. */
@@ -6591,6 +6571,12 @@ void hlua_init(void)
 	/* Initialise lua. */
 	luaL_openlibs(gL.T);
 
+	/* Set safe environment for the initialisation. */
+	if (!SET_SAFE_LJMP(gL.T)) {
+		fprintf(stderr, "Lua init: critical error.\n");
+		exit(1);
+	}
+
 	/*
 	 *
 	 * Create "core" object.
@@ -6626,6 +6612,7 @@ void hlua_init(void)
 	hlua_class_function(gL.T, "Warning", hlua_log_warning);
 	hlua_class_function(gL.T, "Alert", hlua_log_alert);
 	hlua_class_function(gL.T, "done", hlua_done);
+	hlua_fcn_reg_core_fcn(gL.T);
 
 	lua_setglobal(gL.T, "core");
 
@@ -7019,7 +7006,6 @@ void hlua_init(void)
 
 	/* Register previous table in the registry with reference and named entry. */
 	lua_pushvalue(gL.T, -1); /* Copy the -1 entry and push it on the stack. */
-	lua_pushvalue(gL.T, -1); /* Copy the -1 entry and push it on the stack. */
 	lua_setfield(gL.T, LUA_REGISTRYINDEX, CLASS_SOCKET); /* register class socket. */
 	class_socket_ref = luaL_ref(gL.T, LUA_REGISTRYINDEX); /* reference class socket. */
 
@@ -7151,4 +7137,6 @@ void hlua_init(void)
 	/* Initialize SSL server. */
 	ssl_sock_prepare_srv_ctx(&socket_ssl, &socket_proxy);
 #endif
+
+	RESET_SAFE_LJMP(gL.T);
 }

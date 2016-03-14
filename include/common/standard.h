@@ -380,6 +380,17 @@ char *encode_chunk(char *start, char *stop,
                    const char escape, const fd_set *map,
                    const struct chunk *chunk);
 
+/*
+ * Tries to prefix characters tagged in the <map> with the <escape>
+ * character. <chunk> contains the input to be escaped. The result will be
+ * stored between <start> (included) and <stop> (excluded). The function
+ * will always try to terminate the resulting string with a '\0' before
+ * <stop>, and will return its position if the conversion completes.
+ */
+char *escape_chunk(char *start, char *stop,
+                   const char escape, const fd_set *map,
+                   const struct chunk *chunk);
+
 
 /* Check a string for using it in a CSV output format. If the string contains
  * one of the following four char <">, <,>, CR or LF, the string is
@@ -821,6 +832,16 @@ static inline int set_host_port(struct sockaddr_storage *addr, int port)
 	return 0;
 }
 
+/* Convert mask from bit length form to in_addr form.
+ * This function never fails.
+ */
+void len2mask4(int len, struct in_addr *addr);
+
+/* Convert mask from bit length form to in6_addr form.
+ * This function never fails.
+ */
+void len2mask6(int len, struct in6_addr *addr);
+
 /* Return true if IPv4 address is part of the network */
 extern int in_net_ipv4(struct in_addr *addr, struct in_addr *mask, struct in_addr *net);
 
@@ -839,9 +860,6 @@ char *human_time(int t, short hz_div);
 
 extern const char *monthname[];
 
-/* numeric timezone (that is, the hour and minute offset from UTC) */
-char localtimezone[6];
-
 /* date2str_log: write a date in the format :
  * 	sprintf(str, "%02d/%s/%04d:%02d:%02d:%02d.%03d",
  *		tm.tm_mday, monthname[tm.tm_mon], tm.tm_year+1900,
@@ -851,6 +869,12 @@ char localtimezone[6];
  * NULL if there isn't enough space.
  */
 char *date2str_log(char *dest, struct tm *tm, struct timeval *date, size_t size);
+
+/* Return the GMT offset for a specific local time.
+ * The string returned has the same format as returned by strftime(... "%z", tm).
+ * Offsets are kept in an internal cache for better performances.
+ */
+const char *get_gmt_offset(struct tm *tm);
 
 /* gmt2str_log: write a date in the format :
  * "%02d/%s/%04d:%02d:%02d:%02d +0000" without using snprintf
@@ -865,6 +889,15 @@ char *gmt2str_log(char *dst, struct tm *tm, size_t size);
  * NULL if there isn't enough space.
  */
 char *localdate2str_log(char *dst, struct tm *tm, size_t size);
+
+/* These 3 functions parses date string and fills the
+ * corresponding broken-down time in <tm>. In succes case,
+ * it returns 1, otherwise, it returns 0.
+ */
+int parse_http_date(const char *date, int len, struct tm *tm);
+int parse_imf_date(const char *date, int len, struct tm *tm);
+int parse_rfc850_date(const char *date, int len, struct tm *tm);
+int parse_asctime_date(const char *date, int len, struct tm *tm);
 
 /* Dynamically allocates a string of the proper length to hold the formatted
  * output. NULL is returned on error. The caller is responsible for freeing the

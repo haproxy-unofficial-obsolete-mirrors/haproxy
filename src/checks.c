@@ -2218,8 +2218,8 @@ int trigger_resolution(struct server *s)
 	resolution->query_id = query_id;
 	resolution->qid.key = query_id;
 	resolution->step = RSLV_STEP_RUNNING;
-	resolution->resolver_family_priority = s->resolver_family_priority;
-	if (resolution->resolver_family_priority == AF_INET) {
+	resolution->opts = &s->dns_opts;
+	if (resolution->opts->family_prio == AF_INET) {
 		resolution->query_type = DNS_RTYPE_A;
 	} else {
 		resolution->query_type = DNS_RTYPE_AAAA;
@@ -3108,9 +3108,7 @@ static int init_email_alert_checks(struct server *s)
 
 		LIST_INIT(&q->email_alerts);
 
-		check->inter = DEF_CHKINTR; /* XXX: Would like to Skip to the next alert, if any, ASAP.
-					     * But need enough time so that timeouts don't occur
-					     * during tcp check procssing. For now just us an arbitrary default. */
+		check->inter = p->email_alert.mailers.m->timeout.mail;
 		check->rise = DEF_AGENT_RISETIME;
 		check->fall = DEF_AGENT_FALLTIME;
 		err_str = init_check(check, PR_O2_TCPCHK_CHK);
@@ -3249,12 +3247,12 @@ static int enqueue_one_email_alert(struct email_alertq *q, const char *msg)
 		struct tm tm;
 		char datestr[48];
 		const char * const strs[18] = {
-			"From: ", p->email_alert.from, "\n",
-			"To: ", p->email_alert.to, "\n",
-			"Date: ", datestr, "\n",
-			"Subject: [HAproxy Alert] ", msg, "\n",
-			"\n",
-			msg, "\n",
+			"From: ", p->email_alert.from, "\r\n",
+			"To: ", p->email_alert.to, "\r\n",
+			"Date: ", datestr, "\r\n",
+			"Subject: [HAproxy Alert] ", msg, "\r\n",
+			"\r\n",
+			msg, "\r\n",
 			"\r\n",
 			".\r\n",
 			NULL

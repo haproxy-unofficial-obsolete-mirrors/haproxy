@@ -35,6 +35,7 @@
 
 #include <proto/backend.h>
 #include <proto/fd.h>
+#include <proto/filters.h>
 #include <proto/hdr_idx.h>
 #include <proto/listener.h>
 #include <proto/log.h>
@@ -747,6 +748,7 @@ void init_new_proxy(struct proxy *p)
 	LIST_INIT(&p->conf.listeners);
 	LIST_INIT(&p->conf.args.list);
 	LIST_INIT(&p->tcpcheck_rules);
+	LIST_INIT(&p->filter_configs);
 
 	/* Timeouts are defined as -1 */
 	proxy_reset_timeouts(p);
@@ -1136,6 +1138,9 @@ int stream_set_backend(struct stream *s, struct proxy *be)
 		be->be_counters.conn_max = be->beconn;
 	proxy_inc_be_ctr(be);
 
+	if (flt_set_stream_backend(s, be) < 0)
+		return 0;
+
 	/* assign new parameters to the stream from the new backend */
 	s->si[1].flags &= ~SI_FL_INDEP_STR;
 	if (be->options2 & PR_O2_INDEPSTR)
@@ -1146,9 +1151,7 @@ int stream_set_backend(struct stream *s, struct proxy *be)
 	 * be more reliable to store the list of analysers that have been run,
 	 * but what we do here is OK for now.
 	 */
-	s->req.analysers |= be->be_req_ana;
-	if (strm_li(s))
-		s->req.analysers &= ~strm_li(s)->analysers;
+	s->req.analysers |= be->be_req_ana & (strm_li(s) ? ~strm_li(s)->analysers : 0);
 
 	/* If the target backend requires HTTP processing, we have to allocate
 	 * the HTTP transaction and hdr_idx if we did not have one.
@@ -1160,6 +1163,11 @@ int stream_set_backend(struct stream *s, struct proxy *be)
 		/* and now initialize the HTTP transaction state */
 		http_init_txn(s);
 	}
+
+	/* Be sure to filter request headers if the backend is an HTTP proxy and
+	 * if there are filters attached to the stream. */
+	if (s->be->mode == PR_MODE_HTTP && HAS_FILTERS(s))
+		s->req.analysers |= AN_FLT_HTTP_HDRS;
 
 	if (s->txn) {
 		if (be->options2 & PR_O2_RSPBUG_OK)

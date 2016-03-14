@@ -39,7 +39,7 @@ int srv_downtime(const struct server *s);
 int srv_lastsession(const struct server *s);
 int srv_getinter(const struct check *check);
 int parse_server(const char *file, int linenum, char **args, struct proxy *curproxy, struct proxy *defproxy);
-int update_server_addr(struct server *s, void *ip, int ip_sin_family, char *updater);
+int update_server_addr(struct server *s, void *ip, int ip_sin_family, const char *updater);
 struct server *server_find_by_id(struct proxy *bk, int id);
 struct server *server_find_by_name(struct proxy *bk, const char *name);
 struct server *server_find_best_match(struct proxy *bk, char *name, int id, int *diff);
@@ -105,11 +105,12 @@ const char *server_parse_weight_change_request(struct server *sv,
 					       const char *weight_str);
 
 /*
- * Parses addr_str and configures sv accordingly.
+ * Parses addr_str and configures sv accordingly. updater precise
+ * the source of the change in the associated message log.
  * Returns NULL on success, error message string otherwise.
  */
 const char *server_parse_addr_change_request(struct server *sv,
-                                             const char *addr_str);
+                                             const char *addr_str, const char *updater);
 
 /*
  * Return true if the server has a zero user-weight, meaning it's in draining
@@ -124,13 +125,13 @@ static inline int server_is_draining(const struct server *s)
  * code in <why>, which must be one of SF_ERR_* indicating the reason for the
  * shutdown.
  */
-void srv_shutdown_sessions(struct server *srv, int why);
+void srv_shutdown_streams(struct server *srv, int why);
 
 /* Shutdown all connections of all backup servers of a proxy. The caller must
  * pass a termination code in <why>, which must be one of SF_ERR_* indicating
  * the reason for the shutdown.
  */
-void srv_shutdown_backup_sessions(struct proxy *px, int why);
+void srv_shutdown_backup_streams(struct proxy *px, int why);
 
 /* Appends some information to a message string related to a server going UP or
  * DOWN.  If both <forced> and <reason> are null and the server tracks another

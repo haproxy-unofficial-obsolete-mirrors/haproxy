@@ -1,9 +1,8 @@
 /*
- * include/proto/compression.h
- * This file defines function prototypes for compression.
+ * include/proto/flt_http_comp.h
+ * This file defines function prototypes for the compression filter.
  *
- * Copyright 2012 (C) Exceliance, David Du Colombier <dducolombier@exceliance.fr>
- *                                William Lallemand <wlallemand@exceliance.fr>
+ * Copyright (C) 2015 Qualys Inc., Christopher Faulet <cfaulet@qualys.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -19,26 +18,12 @@
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
+#ifndef _PROTO_FLT_HTTP_COMP_H
+#define _PROTO_FLT_HTTP_COMP_H
 
-#ifndef _PROTO_COMP_H
-#define _PROTO_COMP_H
+#include <types/proxy.h>
 
-#include <types/compression.h>
+int check_legacy_http_comp_flt(struct proxy *proxy);
 
-extern unsigned int compress_min_idle;
 
-int comp_append_type(struct comp *comp, const char *type);
-int comp_append_algo(struct comp *comp, const char *algo);
-
-#ifdef USE_ZLIB
-extern long zlib_used_memory;
-#endif /* USE_ZLIB */
-
-#endif /* _PROTO_COMP_H */
-
-/*
- * Local variables:
- *  c-indent-level: 8
- *  c-basic-offset: 8
- * End:
- */
+#endif // _PROTO_FLT_HTTP_COMP_H

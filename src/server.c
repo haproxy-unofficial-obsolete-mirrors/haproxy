@@ -808,22 +808,23 @@ const char *server_parse_weight_change_request(struct server *sv,
 }
 
 /*
- * Parses <addr_str> and configures <sv> accordingly.
+ * Parses <addr_str> and configures <sv> accordingly. <from> precise
+ * the source of the change in the associated message log.
  * Returns:
  *  - error string on error
  *  - NULL on success
  */
 const char *server_parse_addr_change_request(struct server *sv,
-                                             const char *addr_str)
+                                             const char *addr_str, const char *updater)
 {
 	unsigned char ip[INET6_ADDRSTRLEN];
 
 	if (inet_pton(AF_INET6, addr_str, ip)) {
-		update_server_addr(sv, ip, AF_INET6, "stats command\n");
+		update_server_addr(sv, ip, AF_INET6, updater);
 		return NULL;
 	}
 	if (inet_pton(AF_INET, addr_str, ip)) {
-		update_server_addr(sv, ip, AF_INET, "stats command\n");
+		update_server_addr(sv, ip, AF_INET, updater);
 		return NULL;
 	}
 
@@ -1017,15 +1018,19 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			newsrv->agent.fall	= curproxy->defsrv.agent.fall;
 			newsrv->agent.health	= newsrv->agent.rise;	/* up, but will fall down at first failure */
 			newsrv->agent.server	= newsrv;
-			newsrv->resolver_family_priority = curproxy->defsrv.resolver_family_priority;
-			if (newsrv->resolver_family_priority == AF_UNSPEC)
-				newsrv->resolver_family_priority = AF_INET6;
+			newsrv->dns_opts.family_prio = curproxy->defsrv.dns_opts.family_prio;
+			if (newsrv->dns_opts.family_prio == AF_UNSPEC)
+				newsrv->dns_opts.family_prio = AF_INET6;
+			memcpy(newsrv->dns_opts.pref_net,
+			       curproxy->defsrv.dns_opts.pref_net,
+			       sizeof(newsrv->dns_opts.pref_net));
+			newsrv->dns_opts.pref_net_nb = curproxy->defsrv.dns_opts.pref_net_nb;
 
 			cur_arg = 3;
 		} else {
 			newsrv = &curproxy->defsrv;
 			cur_arg = 1;
-			newsrv->resolver_family_priority = AF_INET6;
+			newsrv->dns_opts.family_prio = AF_INET6;
 		}
 
 		while (*args[cur_arg]) {
@@ -1079,15 +1084,71 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			}
 			else if (!strcmp(args[cur_arg], "resolve-prefer")) {
 				if (!strcmp(args[cur_arg + 1], "ipv4"))
-					newsrv->resolver_family_priority = AF_INET;
+					newsrv->dns_opts.family_prio = AF_INET;
 				else if (!strcmp(args[cur_arg + 1], "ipv6"))
-					newsrv->resolver_family_priority = AF_INET6;
+					newsrv->dns_opts.family_prio = AF_INET6;
 				else {
 					Alert("parsing [%s:%d]: '%s' expects either ipv4 or ipv6 as argument.\n",
 						file, linenum, args[cur_arg]);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
+				cur_arg += 2;
+			}
+			else if (!strcmp(args[cur_arg], "resolve-net")) {
+				char *p, *e;
+				unsigned char mask;
+				struct dns_options *opt;
+
+				if (!args[cur_arg + 1] || args[cur_arg + 1][0] == '\0') {
+					Alert("parsing [%s:%d]: '%s' expects a list of networks.\n",
+					      file, linenum, args[cur_arg]);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+
+				opt = &newsrv->dns_opts;
+
+				/* Split arguments by comma, and convert it from ipv4 or ipv6
+				 * string network in in_addr or in6_addr.
+				 */
+				p = args[cur_arg + 1];
+				e = p;
+				while (*p != '\0') {
+					/* If no room avalaible, return error. */
+					if (opt->pref_net_nb > SRV_MAX_PREF_NET) {
+						Alert("parsing [%s:%d]: '%s' exceed %d networks.\n",
+						      file, linenum, args[cur_arg], SRV_MAX_PREF_NET);
+						err_code |= ERR_ALERT | ERR_FATAL;
+						goto out;
+					}
+					/* look for end or comma. */
+					while (*e != ',' && *e != '\0')
+						e++;
+					if (*e == ',') {
+						*e = '\0';
+						e++;
+					}
+					if (str2net(p, 0, &opt->pref_net[opt->pref_net_nb].addr.in4,
+					                  &opt->pref_net[opt->pref_net_nb].mask.in4)) {
+						/* Try to convert input string from ipv4 or ipv6 network. */
+						opt->pref_net[opt->pref_net_nb].family = AF_INET;
+					} else if (str62net(p, &opt->pref_net[opt->pref_net_nb].addr.in6,
+					                     &mask)) {
+						/* Try to convert input string from ipv6 network. */
+						len2mask6(mask, &opt->pref_net[opt->pref_net_nb].mask.in6);
+						opt->pref_net[opt->pref_net_nb].family = AF_INET6;
+					} else {
+						/* All network conversions fail, retrun error. */
+						Alert("parsing [%s:%d]: '%s': invalid network '%s'.\n",
+						      file, linenum, args[cur_arg], p);
+						err_code |= ERR_ALERT | ERR_FATAL;
+						goto out;
+					}
+					opt->pref_net_nb++;
+					p = e;
+				}
+
 				cur_arg += 2;
 			}
 			else if (!strcmp(args[cur_arg], "rise")) {
@@ -1699,7 +1760,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			if (!newsrv->check.port &&
 			    (is_inet_addr(&newsrv->check.addr) ||
 			     (!is_addr(&newsrv->check.addr) && is_inet_addr(&newsrv->addr)))) {
-				struct tcpcheck_rule *n = NULL, *r = NULL;
+				struct tcpcheck_rule *r = NULL;
 				struct list *l;
 
 				r = (struct tcpcheck_rule *)newsrv->proxy->tcpcheck_rules.n;
@@ -1711,8 +1772,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 				}
 				/* search the first action (connect / send / expect) in the list */
 				l = &newsrv->proxy->tcpcheck_rules;
-				list_for_each_entry(n, l, list) {
-					r = (struct tcpcheck_rule *)n->list.n;
+				list_for_each_entry(r, l, list) {
 					if (r->action != TCPCHK_ACT_COMMENT)
 						break;
 				}
@@ -1725,8 +1785,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 				else {
 					/* scan the tcp-check ruleset to ensure a port has been configured */
 					l = &newsrv->proxy->tcpcheck_rules;
-					list_for_each_entry(n, l, list) {
-						r = (struct tcpcheck_rule *)n->list.n;
+					list_for_each_entry(r, l, list) {
 						if ((r->action == TCPCHK_ACT_CONNECT) && (!r->port)) {
 							Alert("parsing [%s:%d] : server %s has neither service port nor check port, and a tcp_check rule 'connect' with no port information. Check has been disabled.\n",
 							      file, linenum, newsrv->id);
@@ -1746,7 +1805,7 @@ int parse_server(const char *file, int linenum, char **args, struct proxy *curpr
 			}
 
 			if (newsrv->resolution)
-				newsrv->resolution->resolver_family_priority = newsrv->resolver_family_priority;
+				newsrv->resolution->opts = &newsrv->dns_opts;
 
 			newsrv->check.state |= CHK_ST_CONFIGURED | CHK_ST_ENABLED;
 		}
@@ -2498,7 +2557,7 @@ fileclose:
  *
  * A log line and a stderr warning message is generated based on server's backend options.
  */
-int update_server_addr(struct server *s, void *ip, int ip_sin_family, char *updater)
+int update_server_addr(struct server *s, void *ip, int ip_sin_family, const char *updater)
 {
 	/* generates a log line and a warning on stderr */
 	if (1) {
@@ -2625,9 +2684,9 @@ int snr_resolution_cb(struct dns_resolution *resolution, struct dns_nameserver *
 			goto invalid;
 	}
 
-	ret = dns_get_ip_from_response(response, response_end, resolution->hostname_dn, resolution->hostname_dn_len,
-			serverip, server_sin_family, resolution->resolver_family_priority, &firstip,
-			&firstip_sin_family);
+	ret = dns_get_ip_from_response(response, response_end, resolution,
+	                               serverip, server_sin_family, &firstip,
+	                               &firstip_sin_family);
 
 	switch (ret) {
 		case DNS_UPD_NO:
@@ -2737,8 +2796,8 @@ int snr_resolution_error_cb(struct dns_resolution *resolution, int error_code)
 		case DNS_RESP_TRUNCATED:
 		case DNS_RESP_ERROR:
 		case DNS_RESP_NO_EXPECTED_RECORD:
-			res_preferred_afinet = resolution->resolver_family_priority == AF_INET && resolution->query_type == DNS_RTYPE_A;
-			res_preferred_afinet6 = resolution->resolver_family_priority == AF_INET6 && resolution->query_type == DNS_RTYPE_AAAA;
+			res_preferred_afinet = resolution->opts->family_prio == AF_INET && resolution->query_type == DNS_RTYPE_A;
+			res_preferred_afinet6 = resolution->opts->family_prio == AF_INET6 && resolution->query_type == DNS_RTYPE_AAAA;
 
 			if ((res_preferred_afinet || res_preferred_afinet6)
 				       || (resolution->try > 0)) {
@@ -2753,7 +2812,7 @@ int snr_resolution_error_cb(struct dns_resolution *resolution, int error_code)
 				}
 				else {
 					resolution->try -= 1;
-					if (resolution->resolver_family_priority == AF_INET) {
+					if (resolution->opts->family_prio == AF_INET) {
 						resolution->query_type = DNS_RTYPE_A;
 					} else {
 						resolution->query_type = DNS_RTYPE_AAAA;

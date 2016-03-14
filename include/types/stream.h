@@ -32,7 +32,7 @@
 #include <common/mini-clist.h>
 
 #include <types/channel.h>
-#include <types/compression.h>
+#include <types/filters.h>
 #include <types/hlua.h>
 #include <types/obj_type.h>
 #include <types/proto_http.h>
@@ -44,7 +44,6 @@
 #include <types/task.h>
 #include <types/stick_table.h>
 #include <types/vars.h>
-
 
 /* Various Stream Flags, bits values 0x01 to 0x100 (shift 0) */
 #define SF_DIRECT	0x00000001	/* connection made on the server matching the client cookie */
@@ -90,8 +89,7 @@
 
 #define SF_IGNORE_PRST	0x00080000	/* ignore persistence */
 
-#define SF_COMP_READY   0x00100000	/* the compression is initialized */
-#define SF_SRV_REUSED   0x00200000	/* the server-side connection was reused */
+#define SF_SRV_REUSED   0x00100000	/* the server-side connection was reused */
 
 /* some external definitions */
 struct strm_logs {
@@ -142,6 +140,8 @@ struct stream {
 
 	struct stkctr stkctr[MAX_SESS_STKCTR];  /* content-aware stick counters */
 
+	struct strm_flt strm_flt;               /* current state of filters active on this stream */
+
 	char **req_cap;                         /* array of captures from the request (may be NULL) */
 	char **res_cap;                         /* array of captures from the response (may be NULL) */
 	struct vars vars_txn;                   /* list of variables for the txn scope. */
@@ -153,8 +153,7 @@ struct stream {
 	void (*do_log)(struct stream *s);       /* the function to call in order to log (or NULL) */
 	void (*srv_error)(struct stream *s,     /* the function to call upon unrecoverable server errors (or NULL) */
 			  struct stream_interface *si);
-	struct comp_ctx *comp_ctx;              /* HTTP compression context */
-	struct comp_algo *comp_algo;            /* HTTP compression algorithm if not NULL */
+
 	char *unique_id;                        /* custom unique ID */
 
 	/* These two pointers are used to resume the execution of the rule lists. */

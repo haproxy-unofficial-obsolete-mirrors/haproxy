@@ -4,7 +4,7 @@
                          ----------------------
                               version 1.7
                              willy tarreau
-                              2015/12/20
+                              2016/03/13
 
 
 This document covers the configuration language as implemented in the version
@@ -538,9 +538,12 @@ The following keywords are supported in the "global" section :
    - nbproc
    - node
    - pidfile
+   - presetenv
+   - resetenv
    - uid
    - ulimit-n
    - user
+   - setenv
    - stats
    - ssl-default-bind-ciphers
    - ssl-default-bind-options
@@ -549,6 +552,7 @@ The following keywords are supported in the "global" section :
    - ssl-dh-param-file
    - ssl-server-verify
    - unix-bind
+   - unsetenv
    - 51degrees-data-file
    - 51degrees-property-name-list
    - 51degrees-property-separator
@@ -778,6 +782,22 @@ pidfile <pidfile>
   the "-p" command line argument. The file must be accessible to the user
   starting the process. See also "daemon".
 
+presetenv <name> <value>
+  Sets environment variable <name> to value <value>. If the variable exists, it
+  is NOT overwritten. The changes immediately take effect so that the next line
+  in the configuration file sees the new value. See also "setenv", "resetenv",
+  and "unsetenv".
+
+resetenv [<name> ...]
+  Removes all environment variables except the ones specified in argument. It
+  allows to use a clean controlled environment before setting new values with
+  setenv or unsetenv. Please note that some internal functions may make use of
+  some environment variables, such as time manipulation functions, but also
+  OpenSSL or even external checks. This must be used with extreme care and only
+  after complete validation. The changes immediately take effect so that the
+  next line in the configuration file sees the new environment. See also
+  "setenv", "presetenv", and "unsetenv".
+
 stats bind-process [ all | odd | even | <number 1-64>[-<number 1-64>] ] ...
   Limits the stats socket to a certain set of processes numbers. By default the
   stats socket is bound to all processes, causing a warning to be emitted when
@@ -805,6 +825,12 @@ server-state-file <file>
   for each server found in the file and available in its current running
   configuration. See also "server-state-base" and "show servers state",
   "load-server-state-from-file" and "server-state-file-name"
+
+setenv <name> <value>
+  Sets environment variable <name> to value <value>. If the variable exists, it
+  is overwritten. The changes immediately take effect so that the next line in
+  the configuration file sees the new value. See also "presetenv", "resetenv",
+  and "unsetenv".
 
 ssl-default-bind-ciphers <ciphers>
   This setting is only available when support for OpenSSL was built in. It sets
@@ -900,6 +926,15 @@ unix-bind [ prefix <prefix> ] [ mode <mode> ] [ user <user> ] [ uid <uid> ]
   all have the same meaning as their homonyms used by the "bind" statement. If
   both are specified, the "bind" statement has priority, meaning that the
   "unix-bind" settings may be seen as process-wide default settings.
+
+unsetenv [<name> ...]
+  Removes environment variables specified in arguments. This can be useful to
+  hide some sensitive information that are occasionally inherited from the
+  user's environment during some operations. Variables which did not exist are
+  silently ignored so that after the operation, it is certain that none of
+  these variables remain. The changes immediately take effect so that the next
+  line in the configuration file will not see these variables. See also
+  "setenv", "presetenv", and "resetenv".
 
 user <user name>
   Similar to "uid" but uses the UID of user name <user name> from /etc/passwd.
@@ -1539,6 +1574,16 @@ mailer <mailername> <ip>:<port>
         server srv1 192.168.0.30:80
         server srv2 192.168.0.31:80
 
+timeout mail <time>
+  Defines the time available for a mail/connection to be made and send to
+  the mail-server. If not defined the default value is 10 seconds. To allow
+  for at least two SYN-ACK packets to be send during initial TCP handshake it
+  is advised to keep this value above 4 seconds.
+
+  Example:
+    mailers mymailers
+        timeout mail 20s
+        mailer smtp1 192.168.0.1:587
 
 4. Proxies
 ----------
@@ -2620,11 +2665,11 @@ cookie <name> [ rewrite | insert | prefix ] [ indirect ] [ nocache ]
               of complex combinations of "Set-cookie" and "Cache-control"
               headers is left to the application. The application can then
               decide whether or not it is appropriate to emit a persistence
-              cookie. Since all responses should be monitored, this mode only
-              works in HTTP close mode. Unless the application behaviour is
-              very complex and/or broken, it is advised not to start with this
-              mode for new deployments. This keyword is incompatible with
-              "insert" and "prefix".
+              cookie. Since all responses should be monitored, this mode
+              doesn't work in HTTP tunnel mode. Unless the application
+              behaviour is very complex and/or broken, it is advised not to
+              start with this mode for new deployments. This keyword is
+              incompatible with "insert" and "prefix".
 
     insert    This keyword indicates that the persistence cookie will have to
               be inserted by haproxy in server responses if the client did not
@@ -2650,7 +2695,7 @@ cookie <name> [ rewrite | insert | prefix ] [ indirect ] [ nocache ]
               and a delimiter. The prefix will be removed from all client
               requests so that the server still finds the cookie it emitted.
               Since all requests and responses are subject to being modified,
-              this mode requires the HTTP close mode. The "prefix" keyword is
+              this mode doesn't work with tunnel mode. The "prefix" keyword is
               not compatible with "rewrite" and "insert". Note: it is highly
               recommended not to use "indirect" with "prefix", otherwise server
               cookie updates would not be sent to clients.
@@ -5347,11 +5392,9 @@ no option http-use-proxy-header
 
   By setting this option in a frontend, haproxy can automatically switch to use
   that non-standard header if it sees proxied requests. A proxied request is
-  defined here as one where the URI begins with neither a '/' nor a '*'. The
-  choice of header only affects requests passing through proxies making use of
-  one of the "httpclose", "forceclose" and "http-server-close" options. Note
-  that this option can only be specified in a frontend and will affect the
-  request along its whole life.
+  defined here as one where the URI begins with neither a '/' nor a '*'. This
+  is incompatible with the HTTP tunnel mode. Note that this option can only be
+  specified in a frontend and will affect the request along its whole life.
 
   Also, when this option is set, a request which requires authentication will
   automatically switch to use proxy authentication headers if it is itself a
@@ -5500,10 +5543,8 @@ no option http_proxy
 
   No host address resolution is performed, so this only works when pure IP
   addresses are passed. Since this option's usage perimeter is rather limited,
-  it will probably be used only by experts who know they need exactly it. Last,
-  if the clients are susceptible of sending keep-alive requests, it will be
-  needed to add "option httpclose" to ensure that all requests will correctly
-  be analyzed.
+  it will probably be used only by experts who know they need exactly it. This
+  is incompatible with the HTTP tunnel mode.
 
   If this option has been enabled in a "defaults" section, it can be disabled
   in a specific instance by prepending the "no" keyword before it.
@@ -6497,7 +6538,7 @@ rate-limit sessions <rate>
             mode tcp
             bind :25
             rate-limit sessions 10
-            server 127.0.0.1:1025
+            server smtp1 127.0.0.1:1025
 
   Note : when the maximum rate is reached, the frontend's status is not changed
          but its sockets appear as "WAITING" in the statistics if the
@@ -10564,6 +10605,18 @@ resolve-prefer <family>
 
   Example: server s1 app1.domain.com:80 resolvers mydns resolve-prefer ipv6
 
+resolve-net <network>[,<network[,...]]
+  This options prioritize th choice of an ip address matching a network. This is
+  useful with clouds to prefer a local ip. In some cases, a cloud high
+  avalailibility service can be announced with many ip addresses on many
+  differents datacenters. The latency between datacenter is not negligible, so
+  this patch permitsto prefers a local datacenter. If none address matchs the
+  configured network, another address is selected.
+
+  Supported in default-server: Yes
+
+  Example: server s1 app1.domain.com:80 resolvers mydns resolve-net 10.0.0.0/8
+
 resolvers <id>
   Points to an existing "resolvers" section to resolve current server's
   hostname.
@@ -11819,12 +11872,18 @@ map_<match_type>_<output_type>(<map_file>[,<default_value>])
   -----------+--------------+-----------------+-----------------+---------------
     str      | end          | map_end         | map_end_int     | map_end_ip
   -----------+--------------+-----------------+-----------------+---------------
-    str      | reg          | map_reg         | map_reg_int     | map_reg_ip
+             |              | map_reg         |                 |
+    str      | reg          +-----------------+ map_reg_int     | map_reg_ip
+             |              | map_regm        |                 |
   -----------+--------------+-----------------+-----------------+---------------
     int      | int          | map_int         | map_int_int     | map_int_ip
   -----------+--------------+-----------------+-----------------+---------------
     ip       | ip           | map_ip          | map_ip_int      | map_ip_ip
   -----------+--------------+-----------------+-----------------+---------------
+
+  The special map called "map_regm" expect matching zone in the regular
+  expression and modify the output replacing back reference (like "\1") by
+  the corresponding match text.
 
   The file contains one key + value per line. Lines which start with '#' are
   ignored, just like empty lines. Leading tabs and spaces are stripped. The key
@@ -14498,7 +14557,7 @@ prefixing them with a '+' or '-' sign.
 
 Special variable "%o" may be used to propagate its flags to all other
 variables on the same format string. This is particularly handy with quoted
-string formats ("Q").
+("Q") and escaped ("E") string formats.
 
 If a variable is named between square brackets ('[' .. ']') then it is used
 as a sample expression rule (see section 7.3). This it useful to add some
@@ -14509,14 +14568,23 @@ Note: spaces must be escaped. A space character is considered as a separator.
 In order to emit a verbatim '%', it must be preceded by another '%' resulting
 in '%%'. HAProxy will automatically merge consecutive separators.
 
+Note: when using the RFC5424 syslog message format, the characters '"',
+'\' and ']' inside PARAM-VALUE should be escaped with '\' as prefix (see
+https://tools.ietf.org/html/rfc5424#section-6.3.3 for more details). In
+such cases, the use of the flag "E" should be considered.
+
 Flags are :
   * Q: quote a string
   * X: hexadecimal representation (IPs, Ports, %Ts, %rt, %pid)
+  * E: escape characters '"', '\' and ']' in a string with '\' as prefix
+       (intended purpose is for the RFC5424 structured-data log formats)
 
   Example:
 
     log-format %T\ %t\ Some\ Text
     log-format %{+Q}o\ %t\ %s\ %{-Q}r
+
+    log-format-sd %{+Q,+E}o\ [exampleSDID@1234\ header=%[capture.req.hdr(0)]]
 
 At the moment, the default HTTP format is defined this way :
 
@@ -14773,7 +14841,7 @@ Most common cases :
     spent accepting these connections will inevitably slightly delay processing
     of other connections, and it can happen that request times in the order of
     a few tens of milliseconds are measured after a few thousands of new
-    connections have been accepted at once. Setting "option http-server-close"
+    connections have been accepted at once. Using one of the keep-alive modes
     may display larger request times since "Tq" also measures the time spent
     waiting for additional requests.
 

@@ -45,6 +45,7 @@
 
 #include <types/capture.h>
 #include <types/compression.h>
+#include <types/filters.h>
 #include <types/global.h>
 #include <types/obj_type.h>
 #include <types/peers.h>
@@ -58,6 +59,7 @@
 #include <proto/checks.h>
 #include <proto/compression.h>
 #include <proto/dumpstats.h>
+#include <proto/filters.h>
 #include <proto/frontend.h>
 #include <proto/hdr_idx.h>
 #include <proto/lb_chash.h>
@@ -1073,7 +1075,12 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		global.uid = atol(args[1]);
+		if (strl2irc(args[1], strlen(args[1]), &global.uid) != 0) {
+			Warning("parsing [%s:%d] :  uid: string '%s' is not a number.\n   | You might want to use the 'user' parameter to use a system user name.\n", file, linenum, args[1]);
+			err_code |= ERR_WARN;
+			goto out;
+		}
+
 	}
 	else if (!strcmp(args[0], "gid")) {
 		if (alertif_too_many_args(1, file, linenum, args, &err_code))
@@ -1088,7 +1095,11 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		global.gid = atol(args[1]);
+		if (strl2irc(args[1], strlen(args[1]), &global.gid) != 0) {
+			Warning("parsing [%s:%d] :  gid: string '%s' is not a number.\n   | You might want to use the 'group' parameter to use a system group name.\n", file, linenum, args[1]);
+			err_code |= ERR_WARN;
+			goto out;
+		}
 	}
 	else if (!strcmp(args[0], "external-check")) {
 		if (alertif_too_many_args(0, file, linenum, args, &err_code))
@@ -1824,6 +1835,78 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		goto out;
 #endif
 	}
+	else if (strcmp(args[0], "setenv") == 0 || strcmp(args[0], "presetenv") == 0) {
+		if (alertif_too_many_args(3, file, linenum, args, &err_code))
+			goto out;
+
+		if (*(args[2]) == 0) {
+			Alert("parsing [%s:%d]: '%s' expects a name and a value.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
+		/* "setenv" overwrites, "presetenv" only sets if not yet set */
+		if (setenv(args[1], args[2], (args[0][0] == 's')) != 0) {
+			Alert("parsing [%s:%d]: '%s' failed on variable '%s' : %s.\n", file, linenum, args[0], args[1], strerror(errno));
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+	}
+	else if (!strcmp(args[0], "unsetenv")) {
+		int arg;
+
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d]: '%s' expects at least one variable name.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
+		for (arg = 1; *args[arg]; arg++) {
+			if (unsetenv(args[arg]) != 0) {
+				Alert("parsing [%s:%d]: '%s' failed on variable '%s' : %s.\n", file, linenum, args[0], args[arg], strerror(errno));
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+		}
+	}
+	else if (!strcmp(args[0], "resetenv")) {
+		extern char **environ;
+		char **env = environ;
+
+		/* args contain variable names to keep, one per argument */
+		while (*env) {
+			int arg;
+
+			/* look for current variable in among all those we want to keep */
+			for (arg = 1; *args[arg]; arg++) {
+				if (strncmp(*env, args[arg], strlen(args[arg])) == 0 &&
+				    (*env)[strlen(args[arg])] == '=')
+					break;
+			}
+
+			/* delete this variable */
+			if (!*args[arg]) {
+				char *delim = strchr(*env, '=');
+
+				if (!delim || delim - *env >= trash.size) {
+					Alert("parsing [%s:%d]: '%s' failed to unset invalid variable '%s'.\n", file, linenum, args[0], *env);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+
+				memcpy(trash.str, *env, delim - *env);
+				trash.str[delim - *env] = 0;
+
+				if (unsetenv(trash.str) != 0) {
+					Alert("parsing [%s:%d]: '%s' failed to unset variable '%s' : %s.\n", file, linenum, args[0], *env, strerror(errno));
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+				}
+			}
+			else
+				env++;
+		}
+	}
 	else {
 		struct cfg_kw_list *kwl;
 		int index;
@@ -2364,23 +2447,37 @@ int cfg_parse_resolvers(const char *file, int linenum, char **args, int kwm)
 		curr_resolvers->resolve_retries = atoi(args[1]);
 	}
 	else if (strcmp(args[0], "timeout") == 0) {
-		const char *res;
-		unsigned int timeout_retry;
-
-		if (!*args[2]) {
+		if (!*args[1]) {
 			Alert("parsing [%s:%d] : '%s' expects 'retry' and <time> as arguments.\n",
 				file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		res = parse_time_err(args[2], &timeout_retry, TIME_UNIT_MS);
-		if (res) {
-			Alert("parsing [%s:%d]: unexpected character '%c' in argument to <%s>.\n",
-				file, linenum, *res, args[0]);
+		else if (strcmp(args[1], "retry") == 0) {
+			const char *res;
+			unsigned int timeout_retry;
+
+			if (!*args[2]) {
+				Alert("parsing [%s:%d] : '%s %s' expects <time> as argument.\n",
+					file, linenum, args[0], args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			res = parse_time_err(args[2], &timeout_retry, TIME_UNIT_MS);
+			if (res) {
+				Alert("parsing [%s:%d]: unexpected character '%c' in argument to <%s %s>.\n",
+					file, linenum, *res, args[0], args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			curr_resolvers->timeout.retry = timeout_retry;
+		}
+		else {
+			Alert("parsing [%s:%d] : '%s' expects 'retry' and <time> as arguments got '%s'.\n",
+				file, linenum, args[0], args[1]);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		curr_resolvers->timeout.retry = timeout_retry;
 	} /* neither "nameserver" nor "resolvers" */
 	else if (*args[0] != 0) {
 		Alert("parsing [%s:%d] : unknown keyword '%s' in '%s' section\n", file, linenum, args[0], cursection);
@@ -2449,6 +2546,9 @@ int cfg_parse_mailers(const char *file, int linenum, char **args, int kwm)
 		curmailers->conf.file = strdup(file);
 		curmailers->conf.line = linenum;
 		curmailers->id = strdup(args[1]);
+		curmailers->timeout.mail = DEF_MAILALERTTIME;/* XXX: Would like to Skip to the next alert, if any, ASAP.
+			* But need enough time so that timeouts don't occur
+			* during tcp procssing. For now just us an arbitrary default. */
 	}
 	else if (strcmp(args[0], "mailer") == 0) { /* mailer definition */
 		struct sockaddr_storage *sk;
@@ -2519,7 +2619,43 @@ int cfg_parse_mailers(const char *file, int linenum, char **args, int kwm)
 		newmailer->proto = proto;
 		newmailer->xprt  = &raw_sock;
 		newmailer->sock_init_arg = NULL;
-	} /* neither "mailer" nor "mailers" */
+	}
+	else if (strcmp(args[0], "timeout") == 0) {
+		if (!*args[1]) {
+			Alert("parsing [%s:%d] : '%s' expects 'mail' and <time> as arguments.\n",
+				file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		else if (strcmp(args[1], "mail") == 0) {
+			const char *res;
+			unsigned int timeout_mail;
+			if (!*args[2]) {
+				Alert("parsing [%s:%d] : '%s %s' expects <time> as argument.\n",
+					file, linenum, args[0], args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			res = parse_time_err(args[2], &timeout_mail, TIME_UNIT_MS);
+			if (res) {
+				Alert("parsing [%s:%d]: unexpected character '%c' in argument to <%s>.\n",
+					file, linenum, *res, args[0]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			if (timeout_mail <= 0) {
+				Alert("parsing [%s:%d] : '%s %s' expects a positive <time> argument.\n", file, linenum, args[0], args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			curmailers->timeout.mail = timeout_mail;
+		} else {
+			Alert("parsing [%s:%d] : '%s' expects 'mail' and <time> as arguments got '%s'.\n",
+				file, linenum, args[0], args[1]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+	}
 	else if (*args[0] != 0) {
 		Alert("parsing [%s:%d] : unknown keyword '%s' in '%s' section\n", file, linenum, args[0], cursection);
 		err_code |= ERR_ALERT | ERR_FATAL;
@@ -6534,70 +6670,6 @@ stats_error_parsing:
 			free(err);
 		}
 	}
-	else if (!strcmp(args[0], "compression")) {
-		struct comp *comp;
-		if (curproxy->comp == NULL) {
-			comp = calloc(1, sizeof(struct comp));
-			curproxy->comp = comp;
-		} else {
-			comp = curproxy->comp;
-		}
-
-		if (!strcmp(args[1], "algo")) {
-			int cur_arg;
-			struct comp_ctx *ctx;
-
-			cur_arg = 2;
-			if (!*args[cur_arg]) {
-				Alert("parsing [%s:%d] : '%s' expects <algorithm>\n",
-				      file, linenum, args[0]);
-				err_code |= ERR_ALERT | ERR_FATAL;
-				goto out;
-			}
-			while (*(args[cur_arg])) {
-				if (comp_append_algo(comp, args[cur_arg]) < 0) {
-					Alert("parsing [%s:%d] : '%s' : '%s' is not a supported algorithm.\n",
-					      file, linenum, args[0], args[cur_arg]);
-					err_code |= ERR_ALERT | ERR_FATAL;
-					goto out;
-				}
-				if (curproxy->comp->algos->init(&ctx, 9) == 0) {
-					curproxy->comp->algos->end(&ctx);
-				} else {
-					Alert("parsing [%s:%d] : '%s' : Can't init '%s' algorithm.\n",
-					      file, linenum, args[0], args[cur_arg]);
-					err_code |= ERR_ALERT | ERR_FATAL;
-					goto out;
-				}
-				cur_arg ++;
-				continue;
-			}
-		}
-		else if (!strcmp(args[1], "offload")) {
-			comp->offload = 1;
-		}
-		else if (!strcmp(args[1], "type")) {
-			int cur_arg;
-			cur_arg = 2;
-			if (!*args[cur_arg]) {
-				Alert("parsing [%s:%d] : '%s' expects <type>\n",
-				      file, linenum, args[0]);
-				err_code |= ERR_ALERT | ERR_FATAL;
-				goto out;
-			}
-			while (*(args[cur_arg])) {
-				comp_append_type(comp, args[cur_arg]);
-				cur_arg ++;
-				continue;
-			}
-		}
-		else {
-			Alert("parsing [%s:%d] : '%s' expects 'algo', 'type' or 'offload'\n",
-			      file, linenum, args[0]);
-			err_code |= ERR_ALERT | ERR_FATAL;
-				goto out;
-		}
-	}
 	else {
 		struct cfg_kw_list *kwl;
 		int index;
@@ -8477,6 +8549,9 @@ out_uri_auth_compat:
 			}
 		}
 
+		/* Check filter configuration, if any */
+		cfgerr += flt_check(curproxy);
+
 		if (curproxy->cap & PR_CAP_FE) {
 			if (!curproxy->accept)
 				curproxy->accept = frontend_accept;
@@ -8492,6 +8567,16 @@ out_uri_auth_compat:
 
 			/* both TCP and HTTP must check switching rules */
 			curproxy->fe_req_ana |= AN_REQ_SWITCHING_RULES;
+
+			/* Add filters analyzers if needed */
+			if (!LIST_ISEMPTY(&curproxy->filter_configs)) {
+				curproxy->fe_req_ana |= AN_FLT_ALL_FE;
+				curproxy->fe_rsp_ana |= AN_FLT_ALL_FE;
+				if (curproxy->mode == PR_MODE_HTTP) {
+					curproxy->fe_req_ana |= AN_FLT_HTTP_HDRS;
+					curproxy->fe_rsp_ana |= AN_FLT_HTTP_HDRS;
+				}
+			}
 		}
 
 		if (curproxy->cap & PR_CAP_BE) {
@@ -8512,6 +8597,16 @@ out_uri_auth_compat:
 			 */
 			if (curproxy->options2 & PR_O2_RDPC_PRST)
 				curproxy->be_req_ana |= AN_REQ_PRST_RDP_COOKIE;
+
+			/* Add filters analyzers if needed */
+			if (!LIST_ISEMPTY(&curproxy->filter_configs)) {
+				curproxy->be_req_ana |= AN_FLT_ALL_BE;
+				curproxy->be_rsp_ana |= AN_FLT_ALL_BE;
+				if (curproxy->mode == PR_MODE_HTTP) {
+					curproxy->be_req_ana |= AN_FLT_HTTP_HDRS;
+					curproxy->be_rsp_ana |= AN_FLT_HTTP_HDRS;
+				}
+			}
 		}
 	}
 
@@ -8561,7 +8656,7 @@ out_uri_auth_compat:
 		list_for_each_entry(bind_conf, &global.stats_fe->conf.bind, by_fe) {
 			unsigned long mask;
 
-			mask = bind_conf->bind_proc ? bind_conf->bind_proc : nbits(global.nbproc);
+			mask = bind_conf->bind_proc ? bind_conf->bind_proc : 0;
 			global.stats_fe->bind_proc |= mask;
 		}
 		if (!global.stats_fe->bind_proc)

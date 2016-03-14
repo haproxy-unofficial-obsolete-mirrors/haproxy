@@ -126,6 +126,7 @@ struct http_txn *http_alloc_txn(struct stream *s);
 void http_init_txn(struct stream *s);
 void http_end_txn(struct stream *s);
 void http_reset_txn(struct stream *s);
+void http_end_txn_clean_session(struct stream *s);
 void http_adjust_conn_mode(struct stream *s, struct http_txn *txn, struct http_msg *msg);
 
 struct act_rule *parse_http_req_cond(const char **args, const char *file, int linenum, struct proxy *proxy);
@@ -152,6 +153,8 @@ enum act_return http_action_req_capture_by_id(struct act_rule *rule, struct prox
                                               struct session *sess, struct stream *s, int flags);
 enum act_return http_action_res_capture_by_id(struct act_rule *rule, struct proxy *px,
                                               struct session *sess, struct stream *s, int flags);
+
+int parse_qvalue(const char *qvalue, const char **end);
 
 /* Note: these functions *do* modify the sample. Even in case of success, at
  * least the type and uint value are modified.
@@ -284,6 +287,7 @@ static inline const char *http_msg_state_str(int msg_state)
 	case HTTP_MSG_DATA:        return "MSG_DATA";
 	case HTTP_MSG_CHUNK_CRLF:  return "MSG_CHUNK_CRLF";
 	case HTTP_MSG_TRAILERS:    return "MSG_TRAILERS";
+	case HTTP_MSG_ENDING:      return "MSG_ENDING";
 	case HTTP_MSG_DONE:        return "MSG_DONE";
 	case HTTP_MSG_CLOSING:     return "MSG_CLOSING";
 	case HTTP_MSG_CLOSED:      return "MSG_CLOSED";

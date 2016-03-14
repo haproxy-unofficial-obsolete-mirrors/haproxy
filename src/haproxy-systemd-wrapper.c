@@ -123,18 +123,22 @@ static int read_pids(char ***pid_strv)
 
 static void signal_handler(int signum)
 {
-	caught_signal = signum;
+	if (caught_signal != SIGINT && caught_signal != SIGTERM)
+		caught_signal = signum;
 }
 
-static void do_restart(void)
+/* handles SIGUSR2 and SIGHUP only */
+static void do_restart(int sig)
 {
 	setenv(REEXEC_FLAG, "1", 1);
-	fprintf(stderr, SD_NOTICE "haproxy-systemd-wrapper: re-executing\n");
+	fprintf(stderr, SD_NOTICE "haproxy-systemd-wrapper: re-executing on %s.\n",
+	        sig == SIGUSR2 ? "SIGUSR2" : "SIGHUP");
 
 	execv(wrapper_argv[0], wrapper_argv);
 }
 
-static void do_shutdown(void)
+/* handles SIGTERM and SIGINT only */
+static void do_shutdown(int sig)
 {
 	int i, pid;
 	char **pid_strv = NULL;
@@ -142,8 +146,9 @@ static void do_shutdown(void)
 	for (i = 0; i < nb_pid; ++i) {
 		pid = atoi(pid_strv[i]);
 		if (pid > 0) {
-			fprintf(stderr, SD_DEBUG "haproxy-systemd-wrapper: SIGINT -> %d\n", pid);
-			kill(pid, SIGINT);
+			fprintf(stderr, SD_DEBUG "haproxy-systemd-wrapper: %s -> %d.\n",
+			        sig == SIGTERM ? "SIGTERM" : "SIGINT", pid);
+			kill(pid, sig);
 			free(pid_strv[i]);
 		}
 	}
@@ -197,14 +202,16 @@ int main(int argc, char **argv)
 	}
 
 	status = -1;
-	while (-1 != wait(&status) || errno == EINTR) {
+	while (caught_signal || wait(&status) != -1 || errno == EINTR) {
+		int sig = caught_signal;
+
 		if (caught_signal == SIGUSR2 || caught_signal == SIGHUP) {
 			caught_signal = 0;
-			do_restart();
+			do_restart(sig);
 		}
 		else if (caught_signal == SIGINT || caught_signal == SIGTERM) {
 			caught_signal = 0;
-			do_shutdown();
+			do_shutdown(sig);
 		}
 	}
 

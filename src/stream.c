@@ -22,6 +22,7 @@
 
 #include <types/applet.h>
 #include <types/capture.h>
+#include <types/filters.h>
 #include <types/global.h>
 
 #include <proto/acl.h>
@@ -33,6 +34,7 @@
 #include <proto/connection.h>
 #include <proto/dumpstats.h>
 #include <proto/fd.h>
+#include <proto/filters.h>
 #include <proto/freq_ctr.h>
 #include <proto/frontend.h>
 #include <proto/hdr_idx.h>
@@ -144,7 +146,6 @@ struct stream *stream_new(struct session *sess, struct task *t, enum obj_type *o
 	 * when the default backend is assigned.
 	 */
 	s->be  = sess->fe;
-	s->comp_algo = NULL;
 	s->req.buf = s->res.buf = NULL;
 	s->req_cap = NULL;
 	s->res_cap = NULL;
@@ -214,6 +215,9 @@ struct stream *stream_new(struct session *sess, struct task *t, enum obj_type *o
 
 	HLUA_INIT(&s->hlua);
 
+	if (flt_stream_init(s) < 0 || flt_stream_start(s) < 0)
+		goto out_fail_accept;
+
 	/* finish initialization of the accepted file descriptor */
 	if (conn)
 		conn_data_want_recv(conn);
@@ -232,6 +236,7 @@ struct stream *stream_new(struct session *sess, struct task *t, enum obj_type *o
 
 	/* Error unrolling */
  out_fail_accept:
+	flt_stream_release(s, 0);
 	LIST_DEL(&s->list);
 	pool_free2(pool2_stream, s);
 	return NULL;
@@ -306,14 +311,17 @@ static void stream_free(struct stream *s)
 		s->txn = NULL;
 	}
 
+	flt_stream_stop(s);
+	flt_stream_release(s, 0);
+
 	if (fe) {
 		pool_free2(fe->rsp_cap_pool, s->res_cap);
 		pool_free2(fe->req_cap_pool, s->req_cap);
 	}
 
 	/* Cleanup all variable contexts. */
-	vars_prune(&s->vars_txn, s);
-	vars_prune(&s->vars_reqres, s);
+	vars_prune(&s->vars_txn, s->sess, s);
+	vars_prune(&s->vars_reqres, s->sess, s);
 
 	stream_store_counters(s);
 
@@ -747,6 +755,12 @@ static void sess_establish(struct stream *s)
 	}
 
 	rep->analysers |= strm_fe(s)->fe_rsp_ana | s->be->be_rsp_ana;
+
+	/* Be sure to filter response headers if the backend is an HTTP proxy
+	 * and if there are filters attached to the stream. */
+	if (s->be->mode == PR_MODE_HTTP && HAS_FILTERS(s))
+		rep->analysers |= AN_FLT_HTTP_HDRS;
+
 	rep->flags |= CF_READ_ATTACHED; /* producer is now attached */
 	if (req->flags & CF_WAKE_CONNECT) {
 		req->flags |= CF_WAKE_ONCE;
@@ -1166,6 +1180,7 @@ static int process_switching_rules(struct stream *s, struct channel *req, int an
 	if (fe == s->be) {
 		s->req.analysers &= ~AN_REQ_INSPECT_BE;
 		s->req.analysers &= ~AN_REQ_HTTP_PROCESS_BE;
+		s->req.analysers &= ~AN_FLT_START_BE;
 	}
 
 	/* as soon as we know the backend, we must check if we have a matching forced or ignored
@@ -1206,7 +1221,7 @@ static int process_switching_rules(struct stream *s, struct channel *req, int an
 
 	if (s->txn)
 		s->txn->status = 500;
-	s->req.analysers = 0;
+	s->req.analysers &= AN_FLT_END;
 	s->req.analyse_exp = TICK_ETERNITY;
 	return 0;
 }
@@ -1749,83 +1764,124 @@ struct task *process_stream(struct task *t)
 			ana_list = ana_back = req->analysers;
 			while (ana_list && max_loops--) {
 				/* Warning! ensure that analysers are always placed in ascending order! */
+				if (ana_list & AN_FLT_START_FE) {
+					if (!flt_start_analyze(s, req, AN_FLT_START_FE))
+						break;
+					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_FLT_START_FE);
+				}
 
 				if (ana_list & AN_REQ_INSPECT_FE) {
+					CALL_FILTER_ANALYZER(flt_analyze, s, req, AN_REQ_INSPECT_FE);
 					if (!tcp_inspect_request(s, req, AN_REQ_INSPECT_FE))
 						break;
 					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_REQ_INSPECT_FE);
 				}
 
 				if (ana_list & AN_REQ_WAIT_HTTP) {
+					CALL_FILTER_ANALYZER(flt_analyze, s, req, AN_REQ_WAIT_HTTP);
 					if (!http_wait_for_request(s, req, AN_REQ_WAIT_HTTP))
 						break;
 					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_REQ_WAIT_HTTP);
 				}
 
 				if (ana_list & AN_REQ_HTTP_BODY) {
+					CALL_FILTER_ANALYZER(flt_analyze, s, req, AN_REQ_HTTP_BODY);
 					if (!http_wait_for_request_body(s, req, AN_REQ_HTTP_BODY))
 						break;
 					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_REQ_HTTP_BODY);
 				}
 
 				if (ana_list & AN_REQ_HTTP_PROCESS_FE) {
+					CALL_FILTER_ANALYZER(flt_analyze, s, req, AN_REQ_HTTP_PROCESS_FE);
 					if (!http_process_req_common(s, req, AN_REQ_HTTP_PROCESS_FE, sess->fe))
 						break;
 					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_REQ_HTTP_PROCESS_FE);
 				}
 
 				if (ana_list & AN_REQ_SWITCHING_RULES) {
+					CALL_FILTER_ANALYZER(flt_analyze, s, req, AN_REQ_SWITCHING_RULES);
 					if (!process_switching_rules(s, req, AN_REQ_SWITCHING_RULES))
 						break;
 					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_REQ_SWITCHING_RULES);
 				}
 
+				if (ana_list & AN_FLT_START_BE) {
+					if (!flt_start_analyze(s, req, AN_FLT_START_BE))
+						break;
+					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_FLT_START_BE);
+				}
+
 				if (ana_list & AN_REQ_INSPECT_BE) {
+					CALL_FILTER_ANALYZER(flt_analyze, s, req, AN_REQ_INSPECT_BE);
 					if (!tcp_inspect_request(s, req, AN_REQ_INSPECT_BE))
 						break;
 					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_REQ_INSPECT_BE);
 				}
 
 				if (ana_list & AN_REQ_HTTP_PROCESS_BE) {
+					CALL_FILTER_ANALYZER(flt_analyze, s, req, AN_REQ_HTTP_PROCESS_BE);
 					if (!http_process_req_common(s, req, AN_REQ_HTTP_PROCESS_BE, s->be))
 						break;
 					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_REQ_HTTP_PROCESS_BE);
 				}
 
 				if (ana_list & AN_REQ_HTTP_TARPIT) {
+					CALL_FILTER_ANALYZER(flt_analyze, s, req, AN_REQ_HTTP_TARPIT);
 					if (!http_process_tarpit(s, req, AN_REQ_HTTP_TARPIT))
 						break;
 					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_REQ_HTTP_TARPIT);
 				}
 
 				if (ana_list & AN_REQ_SRV_RULES) {
+					CALL_FILTER_ANALYZER(flt_analyze, s, req, AN_REQ_SRV_RULES);
 					if (!process_server_rules(s, req, AN_REQ_SRV_RULES))
 						break;
 					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_REQ_SRV_RULES);
 				}
 
 				if (ana_list & AN_REQ_HTTP_INNER) {
+					CALL_FILTER_ANALYZER(flt_analyze, s, req, AN_REQ_HTTP_INNER);
 					if (!http_process_request(s, req, AN_REQ_HTTP_INNER))
 						break;
 					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_REQ_HTTP_INNER);
 				}
 
 				if (ana_list & AN_REQ_PRST_RDP_COOKIE) {
+					CALL_FILTER_ANALYZER(flt_analyze, s, req, AN_REQ_PRST_RDP_COOKIE);
 					if (!tcp_persist_rdp_cookie(s, req, AN_REQ_PRST_RDP_COOKIE))
 						break;
 					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_REQ_PRST_RDP_COOKIE);
 				}
 
 				if (ana_list & AN_REQ_STICKING_RULES) {
+					CALL_FILTER_ANALYZER(flt_analyze, s, req, AN_REQ_STICKING_RULES);
 					if (!process_sticking_rules(s, req, AN_REQ_STICKING_RULES))
 						break;
 					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_REQ_STICKING_RULES);
+				}
+
+				if (ana_list & AN_FLT_HTTP_HDRS) {
+					if (!flt_analyze_http_headers(s, req, AN_FLT_HTTP_HDRS))
+						break;
+					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_FLT_HTTP_HDRS);
+				}
+
+				if (ana_list & AN_FLT_XFER_DATA) {
+					if (!flt_xfer_data(s, req, AN_FLT_XFER_DATA))
+						break;
+					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_FLT_XFER_DATA);
 				}
 
 				if (ana_list & AN_REQ_HTTP_XFER_BODY) {
 					if (!http_request_forward_body(s, req, AN_REQ_HTTP_XFER_BODY))
 						break;
 					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_REQ_HTTP_XFER_BODY);
+				}
+
+				if (ana_list & AN_FLT_END) {
+					if (!flt_end_analyze(s, req, AN_FLT_END))
+						break;
+					UPDATE_ANALYSERS(req->analysers, ana_list, ana_back, AN_FLT_END);
 				}
 				break;
 			}
@@ -1896,35 +1952,68 @@ struct task *process_stream(struct task *t)
 			ana_list = ana_back = res->analysers;
 			while (ana_list && max_loops--) {
 				/* Warning! ensure that analysers are always placed in ascending order! */
+				if (ana_list & AN_FLT_START_FE) {
+					if (!flt_start_analyze(s, res, AN_FLT_START_FE))
+						break;
+					UPDATE_ANALYSERS(res->analysers, ana_list, ana_back, AN_FLT_START_FE);
+				}
+
+				if (ana_list & AN_FLT_START_BE) {
+					if (!flt_start_analyze(s, res, AN_FLT_START_BE))
+						break;
+					UPDATE_ANALYSERS(res->analysers, ana_list, ana_back, AN_FLT_START_BE);
+				}
 
 				if (ana_list & AN_RES_INSPECT) {
+					CALL_FILTER_ANALYZER(flt_analyze, s, res, AN_RES_INSPECT);
 					if (!tcp_inspect_response(s, res, AN_RES_INSPECT))
 						break;
 					UPDATE_ANALYSERS(res->analysers, ana_list, ana_back, AN_RES_INSPECT);
 				}
 
 				if (ana_list & AN_RES_WAIT_HTTP) {
+					CALL_FILTER_ANALYZER(flt_analyze, s, res, AN_RES_WAIT_HTTP);
 					if (!http_wait_for_response(s, res, AN_RES_WAIT_HTTP))
 						break;
 					UPDATE_ANALYSERS(res->analysers, ana_list, ana_back, AN_RES_WAIT_HTTP);
 				}
 
 				if (ana_list & AN_RES_STORE_RULES) {
+					CALL_FILTER_ANALYZER(flt_analyze, s, res, AN_RES_STORE_RULES);
 					if (!process_store_rules(s, res, AN_RES_STORE_RULES))
 						break;
 					UPDATE_ANALYSERS(res->analysers, ana_list, ana_back, AN_RES_STORE_RULES);
 				}
 
 				if (ana_list & AN_RES_HTTP_PROCESS_BE) {
+					CALL_FILTER_ANALYZER(flt_analyze, s, res, AN_RES_HTTP_PROCESS_BE);
 					if (!http_process_res_common(s, res, AN_RES_HTTP_PROCESS_BE, s->be))
 						break;
 					UPDATE_ANALYSERS(res->analysers, ana_list, ana_back, AN_RES_HTTP_PROCESS_BE);
+				}
+
+				if (ana_list & AN_FLT_HTTP_HDRS) {
+					if (!flt_analyze_http_headers(s, res, AN_FLT_HTTP_HDRS))
+						break;
+					UPDATE_ANALYSERS(res->analysers, ana_list, ana_back, AN_FLT_HTTP_HDRS);
+				}
+
+				if (ana_list & AN_FLT_XFER_DATA) {
+					if (!flt_xfer_data(s, res, AN_FLT_XFER_DATA))
+						break;
+					UPDATE_ANALYSERS(res->analysers, ana_list, ana_back, AN_FLT_XFER_DATA);
 				}
 
 				if (ana_list & AN_RES_HTTP_XFER_BODY) {
 					if (!http_response_forward_body(s, res, AN_RES_HTTP_XFER_BODY))
 						break;
 					UPDATE_ANALYSERS(res->analysers, ana_list, ana_back, AN_RES_HTTP_XFER_BODY);
+				}
+
+				if (ana_list & AN_FLT_END) {
+					if (!flt_end_analyze(s, res, AN_FLT_END))
+						break;
+					UPDATE_ANALYSERS(res->analysers, ana_list, ana_back, AN_FLT_END);
 				}
 				break;
 			}
@@ -2149,7 +2238,7 @@ struct task *process_stream(struct task *t)
 
 		/* prune the request variables and swap to the response variables. */
 		if (s->vars_reqres.scope != SCOPE_RES) {
-			vars_prune(&s->vars_reqres, s);
+			vars_prune(&s->vars_reqres, s->sess, s);
 			vars_init(&s->vars_reqres, SCOPE_RES);
 		}
 
@@ -2444,15 +2533,11 @@ struct task *process_stream(struct task *t)
 
 		if (sess->fe->mode == PR_MODE_HTTP) {
 			sess->fe->fe_counters.p.http.rsp[n]++;
-			if (s->comp_algo && (s->flags & SF_COMP_READY))
-				sess->fe->fe_counters.p.http.comp_rsp++;
 		}
 		if ((s->flags & SF_BE_ASSIGNED) &&
 		    (s->be->mode == PR_MODE_HTTP)) {
 			s->be->be_counters.p.http.rsp[n]++;
 			s->be->be_counters.p.http.cum_req++;
-			if (s->comp_algo && (s->flags & SF_COMP_READY))
-				s->be->be_counters.p.http.comp_rsp++;
 		}
 	}
 
@@ -2732,6 +2817,9 @@ smp_create_src_stkctr(struct session *sess, struct stream *strm, const struct ar
 static int
 smp_fetch_sc_tracked(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
+	if (!smp->strm)
+		return 0;
+
 	smp->flags = SMP_F_VOL_TEST;
 	smp->data.type = SMP_T_BOOL;
 	smp->data.u.sint = !!smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
@@ -2746,8 +2834,12 @@ smp_fetch_sc_tracked(const struct arg *args, struct sample *smp, const char *kw,
 static int
 smp_fetch_sc_get_gpt0(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -2772,8 +2864,12 @@ smp_fetch_sc_get_gpt0(const struct arg *args, struct sample *smp, const char *kw
 static int
 smp_fetch_sc_get_gpc0(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -2798,8 +2894,12 @@ smp_fetch_sc_get_gpc0(const struct arg *args, struct sample *smp, const char *kw
 static int
 smp_fetch_sc_gpc0_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -2823,8 +2923,12 @@ smp_fetch_sc_gpc0_rate(const struct arg *args, struct sample *smp, const char *k
 static int
 smp_fetch_sc_inc_gpc0(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -2866,8 +2970,12 @@ smp_fetch_sc_inc_gpc0(const struct arg *args, struct sample *smp, const char *kw
 static int
 smp_fetch_sc_clr_gpc0(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -2897,8 +3005,12 @@ smp_fetch_sc_clr_gpc0(const struct arg *args, struct sample *smp, const char *kw
 static int
 smp_fetch_sc_conn_cnt(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -2921,8 +3033,12 @@ smp_fetch_sc_conn_cnt(const struct arg *args, struct sample *smp, const char *kw
 static int
 smp_fetch_sc_conn_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -2988,8 +3104,12 @@ smp_fetch_src_updt_conn_cnt(const struct arg *args, struct sample *smp, const ch
 static int
 smp_fetch_sc_conn_cur(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3012,8 +3132,12 @@ smp_fetch_sc_conn_cur(const struct arg *args, struct sample *smp, const char *kw
 static int
 smp_fetch_sc_sess_cnt(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3035,8 +3159,12 @@ smp_fetch_sc_sess_cnt(const struct arg *args, struct sample *smp, const char *kw
 static int
 smp_fetch_sc_sess_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3060,8 +3188,12 @@ smp_fetch_sc_sess_rate(const struct arg *args, struct sample *smp, const char *k
 static int
 smp_fetch_sc_http_req_cnt(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3084,8 +3216,12 @@ smp_fetch_sc_http_req_cnt(const struct arg *args, struct sample *smp, const char
 static int
 smp_fetch_sc_http_req_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3109,8 +3245,12 @@ smp_fetch_sc_http_req_rate(const struct arg *args, struct sample *smp, const cha
 static int
 smp_fetch_sc_http_err_cnt(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3133,8 +3273,12 @@ smp_fetch_sc_http_err_cnt(const struct arg *args, struct sample *smp, const char
 static int
 smp_fetch_sc_http_err_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3158,8 +3302,12 @@ smp_fetch_sc_http_err_rate(const struct arg *args, struct sample *smp, const cha
 static int
 smp_fetch_sc_kbytes_in(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3182,8 +3330,12 @@ smp_fetch_sc_kbytes_in(const struct arg *args, struct sample *smp, const char *k
 static int
 smp_fetch_sc_bytes_in_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3207,8 +3359,12 @@ smp_fetch_sc_bytes_in_rate(const struct arg *args, struct sample *smp, const cha
 static int
 smp_fetch_sc_kbytes_out(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3231,8 +3387,12 @@ smp_fetch_sc_kbytes_out(const struct arg *args, struct sample *smp, const char *
 static int
 smp_fetch_sc_bytes_out_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
@@ -3255,8 +3415,12 @@ smp_fetch_sc_bytes_out_rate(const struct arg *args, struct sample *smp, const ch
 static int
 smp_fetch_sc_trackers(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	struct stkctr *stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
+	struct stkctr *stkctr;
 
+	if (!smp->strm)
+		return 0;
+
+	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
 	if (!stkctr)
 		return 0;
 
