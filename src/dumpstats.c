@@ -131,68 +131,6 @@ enum {
 };
 
 
-/* Show Info fields for CLI output. For any field added here, please add the text
- * representation in the info_field_names array below. Please only append at the end,
- * before the INF_TOTAL_FIELDS entry, and never insert anything in the middle
- * nor at the beginning.
- */
-enum info_field {
-	INF_NAME,
-	INF_VERSION,
-	INF_RELEASE_DATE,
-	INF_NBPROC,
-	INF_PROCESS_NUM,
-	INF_PID,
-	INF_UPTIME,
-	INF_UPTIME_SEC,
-	INF_MEMMAX_MB,
-	INF_POOL_ALLOC_MB,
-	INF_POOL_USED_MB,
-	INF_POOL_FAILED,
-	INF_ULIMIT_N,
-	INF_MAXSOCK,
-	INF_MAXCONN,
-	INF_HARD_MAXCONN,
-	INF_CURR_CONN,
-	INF_CUM_CONN,
-	INF_CUM_REQ,
-	INF_MAX_SSL_CONNS,
-	INF_CURR_SSL_CONNS,
-	INF_CUM_SSL_CONNS,
-	INF_MAXPIPES,
-	INF_PIPES_USED,
-	INF_PIPES_FREE,
-	INF_CONN_RATE,
-	INF_CONN_RATE_LIMIT,
-	INF_MAX_CONN_RATE,
-	INF_SESS_RATE,
-	INF_SESS_RATE_LIMIT,
-	INF_MAX_SESS_RATE,
-	INF_SSL_RATE,
-	INF_SSL_RATE_LIMIT,
-	INF_MAX_SSL_RATE,
-	INF_SSL_FRONTEND_KEY_RATE,
-	INF_SSL_FRONTEND_MAX_KEY_RATE,
-	INF_SSL_FRONTEND_SESSION_REUSE_PCT,
-	INF_SSL_BACKEND_KEY_RATE,
-	INF_SSL_BACKEND_MAX_KEY_RATE,
-	INF_SSL_CACHE_LOOKUPS,
-	INF_SSL_CACHE_MISSES,
-	INF_COMPRESS_BPS_IN,
-	INF_COMPRESS_BPS_OUT,
-	INF_COMPRESS_BPS_RATE_LIM,
-	INF_ZLIB_MEM_USAGE,
-	INF_MAX_ZLIB_MEM_USAGE,
-	INF_TASKS,
-	INF_RUN_QUEUE,
-	INF_IDLE_PCT,
-	INF_NODE,
-	INF_DESCRIPTION,
-
-	/* must always be the last one */
-	INF_TOTAL_FIELDS
-};
-
 /* These are the field names for each INF_* field position. Please pay attention
  * to always use the exact same name except that the strings for new names must
  * be lower case or CamelCase while the enum entries must be upper case.
@@ -253,98 +191,6 @@ const char *info_field_names[INF_TOTAL_FIELDS] = {
 
 /* one line of stats */
 static struct field info[INF_TOTAL_FIELDS];
-
-/* Stats fields for CSV output. For any field added here, please add the text
- * representation in the stat_field_names array below. Please only append at the end,
- * before the ST_F_TOTAL_FIELDS entry, and never insert anything in the middle
- * nor at the beginning.
- */
-enum stat_field {
-	ST_F_PXNAME,
-	ST_F_SVNAME,
-	ST_F_QCUR,
-	ST_F_QMAX,
-	ST_F_SCUR,
-	ST_F_SMAX,
-	ST_F_SLIM,
-	ST_F_STOT,
-	ST_F_BIN ,
-	ST_F_BOUT,
-	ST_F_DREQ,
-	ST_F_DRESP,
-	ST_F_EREQ,
-	ST_F_ECON,
-	ST_F_ERESP,
-	ST_F_WRETR,
-	ST_F_WREDIS,
-	ST_F_STATUS,
-	ST_F_WEIGHT,
-	ST_F_ACT,
-	ST_F_BCK,
-	ST_F_CHKFAIL,
-	ST_F_CHKDOWN,
-	ST_F_LASTCHG,
-	ST_F_DOWNTIME,
-	ST_F_QLIMIT,
-	ST_F_PID,
-	ST_F_IID,
-	ST_F_SID,
-	ST_F_THROTTLE,
-	ST_F_LBTOT,
-	ST_F_TRACKED,
-	ST_F_TYPE,
-	ST_F_RATE,
-	ST_F_RATE_LIM,
-	ST_F_RATE_MAX,
-	ST_F_CHECK_STATUS,
-	ST_F_CHECK_CODE,
-	ST_F_CHECK_DURATION,
-	ST_F_HRSP_1XX,
-	ST_F_HRSP_2XX,
-	ST_F_HRSP_3XX,
-	ST_F_HRSP_4XX,
-	ST_F_HRSP_5XX,
-	ST_F_HRSP_OTHER,
-	ST_F_HANAFAIL,
-	ST_F_REQ_RATE,
-	ST_F_REQ_RATE_MAX,
-	ST_F_REQ_TOT,
-	ST_F_CLI_ABRT,
-	ST_F_SRV_ABRT,
-	ST_F_COMP_IN,
-	ST_F_COMP_OUT,
-	ST_F_COMP_BYP,
-	ST_F_COMP_RSP,
-	ST_F_LASTSESS,
-	ST_F_LAST_CHK,
-	ST_F_LAST_AGT,
-	ST_F_QTIME,
-	ST_F_CTIME,
-	ST_F_RTIME,
-	ST_F_TTIME,
-	ST_F_AGENT_STATUS,
-	ST_F_AGENT_CODE,
-	ST_F_AGENT_DURATION,
-	ST_F_CHECK_DESC,
-	ST_F_AGENT_DESC,
-	ST_F_CHECK_RISE,
-	ST_F_CHECK_FALL,
-	ST_F_CHECK_HEALTH,
-	ST_F_AGENT_RISE,
-	ST_F_AGENT_FALL,
-	ST_F_AGENT_HEALTH,
-	ST_F_ADDR,
-	ST_F_COOKIE,
-	ST_F_MODE,
-	ST_F_ALGO,
-	ST_F_CONN_RATE,
-	ST_F_CONN_RATE_MAX,
-	ST_F_CONN_TOT,
-	ST_F_INTERCEPTED,
-
-	/* must always be the last one */
-	ST_F_TOTAL_FIELDS
-};
 
 /* These are the field names for each ST_F_* field position. Please pay attention
  * to always use the exact same name except that the strings must be lower case
@@ -567,7 +413,7 @@ static struct proxy *alloc_stats_fe(const char *name, const char *file, int line
 {
 	struct proxy *fe;
 
-	fe = (struct proxy *)calloc(1, sizeof(struct proxy));
+	fe = calloc(1, sizeof(*fe));
 	if (!fe)
 		return NULL;
 
@@ -3102,15 +2948,15 @@ static int stats_dump_typed_info_fields(struct chunk *out, const struct field *i
 	return 1;
 }
 
-/* This function dumps information onto the stream interface's read buffer.
- * It returns 0 as long as it does not complete, non-zero upon completion.
- * No state is used.
+/* Fill <info> with HAProxy global info. <info> is preallocated
+ * array of length <len>. The length of the aray must be
+ * INF_TOTAL_FIELDS. If this length is less then this value, the
+ * function returns 0, otherwise, it returns 1.
  */
-static int stats_dump_info_to_buffer(struct stream_interface *si)
+int stats_fill_info(struct field *info, int len)
 {
 	unsigned int up = (now.tv_sec - start_date.tv_sec);
 	struct chunk *out = get_trash_chunk();
-	struct appctx *appctx = __objt_appctx(si->end);
 
 #ifdef USE_OPENSSL
 	int ssl_sess_rate = read_freq_ctr(&global.ssl_per_sec);
@@ -3123,8 +2969,11 @@ static int stats_dump_info_to_buffer(struct stream_interface *si)
 	}
 #endif
 
+	if (len < INF_TOTAL_FIELDS)
+		return 0;
+
 	chunk_reset(out);
-	memset(&info, 0, sizeof(info));
+	memset(info, 0, sizeof(*info) * len);
 
 	info[INF_NAME]                           = mkf_str(FO_PRODUCT|FN_OUTPUT|FS_SERVICE, PRODUCT_NAME);
 	info[INF_VERSION]                        = mkf_str(FO_PRODUCT|FN_OUTPUT|FS_SERVICE, HAPROXY_VERSION);
@@ -3189,6 +3038,20 @@ static int stats_dump_info_to_buffer(struct stream_interface *si)
 	info[INF_NODE]                           = mkf_str(FO_CONFIG|FN_OUTPUT|FS_SERVICE, global.node);
 	if (global.desc)
 		info[INF_DESCRIPTION]            = mkf_str(FO_CONFIG|FN_OUTPUT|FS_SERVICE, global.desc);
+
+	return 1;
+}
+
+/* This function dumps information onto the stream interface's read buffer.
+ * It returns 0 as long as it does not complete, non-zero upon completion.
+ * No state is used.
+ */
+static int stats_dump_info_to_buffer(struct stream_interface *si)
+{
+	struct appctx *appctx = __objt_appctx(si->end);
+
+	if (!stats_fill_info(info, INF_TOTAL_FIELDS))
+		return 0;
 
 	chunk_reset(&trash);
 
@@ -3348,7 +3211,7 @@ static int stats_dump_fields_csv(struct chunk *out, const struct field *stats)
 		if (!chunk_strcat(out, ","))
 			return 0;
 	}
-	chunk_strcat(&trash, "\n");
+	chunk_strcat(out, "\n");
 	return 1;
 }
 
@@ -4030,21 +3893,17 @@ static int stats_dump_one_line(const struct field *stats, unsigned int flags, st
 		return stats_dump_fields_csv(&trash, stats);
 }
 
-/* Dumps a frontend's line to the trash for the current proxy <px> and uses
- * the state from stream interface <si>. The caller is responsible for clearing
- * the trash if needed. Returns non-zero if it emits anything, zero otherwise.
+/* Fill <stats> with the frontend statistics. <stats> is
+ * preallocated array of length <len>. The length of the array
+ * must be at least ST_F_TOTAL_FIELDS. If this length is less then
+ * this value, the function returns 0, otherwise, it returns 1.
  */
-static int stats_dump_fe_stats(struct stream_interface *si, struct proxy *px)
+int stats_fill_fe_stats(struct proxy *px, struct field *stats, int len)
 {
-	struct appctx *appctx = __objt_appctx(si->end);
-
-	if (!(px->cap & PR_CAP_FE))
+	if (len < ST_F_TOTAL_FIELDS)
 		return 0;
 
-	if ((appctx->ctx.stats.flags & STAT_BOUND) && !(appctx->ctx.stats.type & (1 << STATS_TYPE_FE)))
-		return 0;
-
-	memset(&stats, 0, sizeof(stats));
+	memset(stats, 0, sizeof(*stats) * len);
 
 	stats[ST_F_PXNAME]   = mkf_str(FO_KEY|FN_NAME|FS_SERVICE, px->id);
 	stats[ST_F_SVNAME]   = mkf_str(FO_KEY|FN_NAME|FS_SERVICE, "FRONTEND");
@@ -4094,21 +3953,48 @@ static int stats_dump_fe_stats(struct stream_interface *si, struct proxy *px)
 	stats[ST_F_CONN_RATE_MAX] = mkf_u32(FN_MAX, px->fe_counters.cps_max);
 	stats[ST_F_CONN_TOT]      = mkf_u64(FN_COUNTER, px->fe_counters.cum_conn);
 
+	return 1;
+}
+
+/* Dumps a frontend's line to the trash for the current proxy <px> and uses
+ * the state from stream interface <si>. The caller is responsible for clearing
+ * the trash if needed. Returns non-zero if it emits anything, zero otherwise.
+ */
+static int stats_dump_fe_stats(struct stream_interface *si, struct proxy *px)
+{
+	struct appctx *appctx = __objt_appctx(si->end);
+
+	if (!(px->cap & PR_CAP_FE))
+		return 0;
+
+	if ((appctx->ctx.stats.flags & STAT_BOUND) && !(appctx->ctx.stats.type & (1 << STATS_TYPE_FE)))
+		return 0;
+
+	if (!stats_fill_fe_stats(px, stats, ST_F_TOTAL_FIELDS))
+		return 0;
+
 	return stats_dump_one_line(stats, 0, px, appctx);
 }
 
-/* Dumps a line for listener <l> and proxy <px> to the trash and uses the state
- * from stream interface <si>, and stats flags <flags>. The caller is responsible
- * for clearing the trash if needed. Returns non-zero if it emits anything, zero
- * otherwise.
+/* Fill <stats> with the listener statistics. <stats> is
+ * preallocated array of length <len>. The length of the array
+ * must be at least ST_F_TOTAL_FIELDS. If this length is less
+ * then this value, the function returns 0, otherwise, it
+ * returns 1. <flags> can take the value ST_SHLGNDS.
  */
-static int stats_dump_li_stats(struct stream_interface *si, struct proxy *px, struct listener *l, int flags)
+int stats_fill_li_stats(struct proxy *px, struct listener *l, int flags,
+                        struct field *stats, int len)
 {
-	struct appctx *appctx = __objt_appctx(si->end);
 	struct chunk *out = get_trash_chunk();
 
+	if (len < ST_F_TOTAL_FIELDS)
+		return 0;
+
+	if (!l->counters)
+		return 0;
+
 	chunk_reset(out);
-	memset(&stats, 0, sizeof(stats));
+	memset(stats, 0, sizeof(*stats) * len);
 
 	stats[ST_F_PXNAME]   = mkf_str(FO_KEY|FN_NAME|FS_SERVICE, px->id);
 	stats[ST_F_SVNAME]   = mkf_str(FO_KEY|FN_NAME|FS_SERVICE, l->name);
@@ -4154,6 +4040,21 @@ static int stats_dump_li_stats(struct stream_interface *si, struct proxy *px, st
 		}
 	}
 
+	return 1;
+}
+
+/* Dumps a line for listener <l> and proxy <px> to the trash and uses the state
+ * from stream interface <si>, and stats flags <flags>. The caller is responsible
+ * for clearing the trash if needed. Returns non-zero if it emits anything, zero
+ * otherwise.
+ */
+static int stats_dump_li_stats(struct stream_interface *si, struct proxy *px, struct listener *l, int flags)
+{
+	struct appctx *appctx = __objt_appctx(si->end);
+
+	if (!stats_fill_li_stats(px, l, flags, stats, ST_F_TOTAL_FIELDS))
+		return 0;
+
 	return stats_dump_one_line(stats, flags, px, appctx);
 }
 
@@ -4187,19 +4088,26 @@ static const char *srv_hlt_st[SRV_STATS_STATE_COUNT] = {
 	[SRV_STATS_STATE_NO_CHECK]		= "no check"
 };
 
-/* Dumps a line for server <sv> and proxy <px> to the trash and uses the state
- * from stream interface <si>, stats flags <flags>, and server state <state>.
- * The caller is responsible for clearing the trash if needed. Returns non-zero
- * if it emits anything, zero otherwise.
+/* Fill <stats> with the server statistics. <stats> is
+ * preallocated array of length <len>. The length of the array
+ * must be at least ST_F_TOTAL_FIELDS. If this length is less
+ * then this value, the function returns 0, otherwise, it
+ * returns 1. <flags> can take the value ST_SHLGNDS.
  */
-static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, int flags, struct server *sv)
+int stats_fill_sv_stats(struct proxy *px, struct server *sv, int flags,
+                        struct field *stats, int len)
 {
-	struct appctx *appctx = __objt_appctx(si->end);
 	struct server *via, *ref;
 	char str[INET6_ADDRSTRLEN];
 	struct chunk *out = get_trash_chunk();
 	enum srv_stats_state state;
 	char *fld_status;
+
+	if (len < ST_F_TOTAL_FIELDS)
+		return 0;
+
+	memset(stats, 0, sizeof(*stats) * len);
+
 	/* we have "via" which is the tracked server as described in the configuration,
 	 * and "ref" which is the checked server and the end of the chain.
 	 */
@@ -4250,7 +4158,6 @@ static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, in
 	}
 
 	chunk_reset(out);
-	memset(&stats, 0, sizeof(stats));
 
 	stats[ST_F_PXNAME]   = mkf_str(FO_KEY|FN_NAME|FS_SERVICE, px->id);
 	stats[ST_F_SVNAME]   = mkf_str(FO_KEY|FN_NAME|FS_SERVICE, sv->id);
@@ -4413,24 +4320,36 @@ static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, in
 			stats[ST_F_COOKIE] = mkf_str(FO_CONFIG|FN_NAME|FS_SERVICE, sv->cookie);
 	}
 
-	return stats_dump_one_line(stats, flags, px, appctx);
+	return 1;
 }
 
-/* Dumps a line for backend <px> to the trash for and uses the state from stream
- * interface <si> and stats flags <flags>. The caller is responsible for clearing
- * the trash if needed. Returns non-zero if it emits anything, zero otherwise.
+/* Dumps a line for server <sv> and proxy <px> to the trash and uses the state
+ * from stream interface <si>, stats flags <flags>, and server state <state>.
+ * The caller is responsible for clearing the trash if needed. Returns non-zero
+ * if it emits anything, zero otherwise.
  */
-static int stats_dump_be_stats(struct stream_interface *si, struct proxy *px, int flags)
+static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, int flags, struct server *sv)
 {
 	struct appctx *appctx = __objt_appctx(si->end);
 
-	if (!(px->cap & PR_CAP_BE))
+	if (!stats_fill_sv_stats(px, sv, flags, stats, ST_F_TOTAL_FIELDS))
 		return 0;
 
-	if ((appctx->ctx.stats.flags & STAT_BOUND) && !(appctx->ctx.stats.type & (1 << STATS_TYPE_BE)))
+	return stats_dump_one_line(stats, flags, px, appctx);
+}
+
+/* Fill <stats> with the backend statistics. <stats> is
+ * preallocated array of length <len>. The length of the array
+ * must be at least ST_F_TOTAL_FIELDS. If this length is less
+ * then this value, the function returns 0, otherwise, it
+ * returns 1. <flags> can take the value ST_SHLGNDS.
+ */
+int stats_fill_be_stats(struct proxy *px, int flags, struct field *stats, int len)
+{
+	if (len < ST_F_TOTAL_FIELDS)
 		return 0;
 
-	memset(&stats, 0, sizeof(stats));
+	memset(stats, 0, sizeof(*stats) * len);
 
 	stats[ST_F_PXNAME]   = mkf_str(FO_KEY|FN_NAME|FS_SERVICE, px->id);
 	stats[ST_F_SVNAME]   = mkf_str(FO_KEY|FN_NAME|FS_SERVICE, "BACKEND");
@@ -4498,6 +4417,26 @@ static int stats_dump_be_stats(struct stream_interface *si, struct proxy *px, in
 	stats[ST_F_CTIME]        = mkf_u32(FN_AVG, swrate_avg(px->be_counters.c_time, TIME_STATS_SAMPLES));
 	stats[ST_F_RTIME]        = mkf_u32(FN_AVG, swrate_avg(px->be_counters.d_time, TIME_STATS_SAMPLES));
 	stats[ST_F_TTIME]        = mkf_u32(FN_AVG, swrate_avg(px->be_counters.t_time, TIME_STATS_SAMPLES));
+
+	return 1;
+}
+
+/* Dumps a line for backend <px> to the trash for and uses the state from stream
+ * interface <si> and stats flags <flags>. The caller is responsible for clearing
+ * the trash if needed. Returns non-zero if it emits anything, zero otherwise.
+ */
+static int stats_dump_be_stats(struct stream_interface *si, struct proxy *px, int flags)
+{
+	struct appctx *appctx = __objt_appctx(si->end);
+
+	if (!(px->cap & PR_CAP_BE))
+		return 0;
+
+	if ((appctx->ctx.stats.flags & STAT_BOUND) && !(appctx->ctx.stats.type & (1 << STATS_TYPE_BE)))
+		return 0;
+
+	if (!stats_fill_be_stats(px, flags, stats, ST_F_TOTAL_FIELDS))
+		return 0;
 
 	return stats_dump_one_line(stats, flags, px, appctx);
 }
@@ -7093,12 +7032,12 @@ static int stats_dump_errors_to_buffer(struct stream_interface *si)
 		}
 
 		/* OK, ptr >= 0, so we have to dump the current line */
-		while (appctx->ctx.errors.ptr < es->len && appctx->ctx.errors.ptr < sizeof(es->buf)) {
+		while (es->buf && appctx->ctx.errors.ptr < es->len && appctx->ctx.errors.ptr < global.tune.bufsize) {
 			int newptr;
 			int newline;
 
 			newline = appctx->ctx.errors.bol;
-			newptr = dump_text_line(&trash, es->buf, sizeof(es->buf), es->len, &newline, appctx->ctx.errors.ptr);
+			newptr = dump_text_line(&trash, es->buf, global.tune.bufsize, es->len, &newline, appctx->ctx.errors.ptr);
 			if (newptr == appctx->ctx.errors.ptr)
 				return 0;
 

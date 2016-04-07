@@ -137,7 +137,7 @@ void dns_resolve_recv(struct dgram_conn *dgram)
 		return;
 
 	/* no need to go further if we can't retrieve the nameserver */
-	if ((nameserver = (struct dns_nameserver *)dgram->owner) == NULL)
+	if ((nameserver = dgram->owner) == NULL)
 		return;
 
 	resolvers = nameserver->resolvers;
@@ -259,7 +259,7 @@ void dns_resolve_send(struct dgram_conn *dgram)
 	fd_stop_send(fd);
 
 	/* no need to go further if we can't retrieve the nameserver */
-	if ((nameserver = (struct dns_nameserver *)dgram->owner) == NULL)
+	if ((nameserver = dgram->owner) == NULL)
 		return;
 
 	resolvers = nameserver->resolvers;
@@ -909,7 +909,7 @@ int dns_init_resolvers(void)
 		curr_resolvers->t = t;
 
 		list_for_each_entry(curnameserver, &curr_resolvers->nameserver_list, list) {
-			if ((dgram = calloc(1, sizeof(struct dgram_conn))) == NULL) {
+			if ((dgram = calloc(1, sizeof(*dgram))) == NULL) {
 				Alert("Starting [%s/%s] nameserver: out of memory.\n", curr_resolvers->id,
 						curnameserver->id);
 				return 0;
@@ -1164,6 +1164,7 @@ struct task *dns_process_resolve(struct task *t)
 {
 	struct dns_resolvers *resolvers = t->context;
 	struct dns_resolution *resolution, *res_back;
+	int res_preferred_afinet, res_preferred_afinet6;
 
 	/* timeout occurs inevitably for the first element of the FIFO queue */
 	if (LIST_ISEMPTY(&resolvers->curr_resolution)) {
@@ -1188,21 +1189,32 @@ struct task *dns_process_resolve(struct task *t)
 
 			/* notify the result to the requester */
 			resolution->requester_error_cb(resolution, DNS_RESP_TIMEOUT);
+			goto out;
 		}
 
 		resolution->try -= 1;
 
-		/* check current resolution status */
-		if (resolution->step == RSLV_STEP_RUNNING) {
-			/* resend the DNS query */
-			dns_send_query(resolution);
+		res_preferred_afinet = resolution->opts->family_prio == AF_INET && resolution->query_type == DNS_RTYPE_A;
+		res_preferred_afinet6 = resolution->opts->family_prio == AF_INET6 && resolution->query_type == DNS_RTYPE_AAAA;
 
-			/* check if we have more than one resolution in the list */
-			if (dns_check_resolution_queue(resolvers) > 1) {
-				/* move the rsolution to the end of the list */
-				LIST_DEL(&resolution->list);
-				LIST_ADDQ(&resolvers->curr_resolution, &resolution->list);
-			}
+		/* let's change the query type if needed */
+		if (res_preferred_afinet6) {
+			/* fallback from AAAA to A */
+			resolution->query_type = DNS_RTYPE_A;
+		}
+		else if (res_preferred_afinet) {
+			/* fallback from A to AAAA */
+			resolution->query_type = DNS_RTYPE_AAAA;
+		}
+
+		/* resend the DNS query */
+		dns_send_query(resolution);
+
+		/* check if we have more than one resolution in the list */
+		if (dns_check_resolution_queue(resolvers) > 1) {
+			/* move the rsolution to the end of the list */
+			LIST_DEL(&resolution->list);
+			LIST_ADDQ(&resolvers->curr_resolution, &resolution->list);
 		}
 	}
 

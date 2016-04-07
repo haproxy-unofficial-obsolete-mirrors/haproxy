@@ -270,6 +270,19 @@ Core class
   :param string filename: the filename that reference the map entries.
   :param string key: the key which will be deleted.
 
+.. js:function:: core.get_info()
+
+  **context**: body, init, task, action, sample-fetch, converter
+
+  Returns HAProxy core informations. We can found information like the uptime,
+  the pid, memory pool usage, tasks number, ...
+
+  These information are also returned by the management sockat via the command
+  "show info". See the management socket documentation fpor more information
+  about the content of these variables.
+
+  :returns: an array of values.
+
 .. js:function:: core.now()
 
   **context**: body, init, task, action
@@ -291,6 +304,14 @@ Core class
   The `core.msleep()` stops the Lua execution between specified milliseconds.
 
   :param integer milliseconds: the required milliseconds.
+
+.. js:attribute:: core.proxies
+
+  **context**: body, init, task, action, sample-fetch, converter
+
+  proxies is an array containing the list of all proxies declared in the
+  configuration file. Each entry of the proxies array is an object of type
+  :ref:`proxy_class`
 
 .. js:function:: core.register_action(name, actions, func)
 
@@ -560,6 +581,253 @@ Core class
 
   Give back the hand at the HAProxy scheduler. It is used when the LUA
   processing consumes a lot of processing time.
+
+.. _proxy_class:
+
+Proxy class
+============
+
+.. js:class:: Proxy
+
+  This class provides a way for manipulating proxy and retrieving information
+  like statistics.
+
+.. js:attribute:: Proxy.servers
+
+  Contain an array with the attached servers. Each server entry is an object of
+  type :ref:`server_class`.
+
+.. js:attribute:: Proxy.listeners
+
+  Contain an array with the attached listeners. Each listeners entry is an
+  object of type :ref:`listener_class`.
+
+.. js:function:: Proxy.pause(px)
+
+  Pause the proxy. See the management socket documentation for more information.
+
+  :param class_proxy px: A :ref:`proxy_class` which indicates the manipulated
+    proxy.
+
+.. js:function:: Proxy.resume(px)
+
+  Resume the proxy. See the management socket documentation for more
+  information.
+
+  :param class_proxy px: A :ref:`proxy_class` which indicates the manipulated
+    proxy.
+
+.. js:function:: Proxy.stop(px)
+
+  Stop the proxy. See the management socket documentation for more information.
+
+  :param class_proxy px: A :ref:`proxy_class` which indicates the manipulated
+    proxy.
+
+.. js:function:: Proxy.shut_bcksess(px)
+
+  Kill the session attached to a backup server. See the management socket
+  documentation for more information.
+
+  :param class_proxy px: A :ref:`proxy_class` which indicates the manipulated
+    proxy.
+
+.. js:function:: Proxy.get_cap(px)
+
+  Returns a string describing the capabilities of the proxy.
+
+  :param class_proxy px: A :ref:`proxy_class` which indicates the manipulated
+    proxy.
+  :returns: a string "frontend", "backend", "proxy" or "ruleset".
+
+.. js:function:: Proxy.get_mode(px)
+
+  Returns a string describing the mode of the current proxy.
+
+  :param class_proxy px: A :ref:`proxy_class` which indicates the manipulated
+    proxy.
+  :returns: a string "tcp", "http", "health" or "unknown"
+
+.. js:function:: Proxy.get_stats(px)
+
+  Returns an array containg the proxy statistics. The statistics returned are
+  not the same if the proxy is frontend or a backend.
+
+  :param class_proxy px: A :ref:`proxy_class` which indicates the manipulated
+    proxy.
+  :returns: a key/value array containing stats
+
+.. _server_class:
+
+Server class
+============
+
+.. js:function:: Server.is_draining(sv)
+
+  Return true if the server is currently draining stiky connections.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+  :returns: a boolean
+
+.. js:function:: Server.set_weight(sv, weight)
+
+  Dynamically change the weight of the serveur. See the management socket
+  documentation for more information about the format of the string.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+  :param string weight: A string describing the server weight.
+
+.. js:function:: Server.get_weight(sv)
+
+  This function returns an integer representing the serveur weight.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+  :returns: an integer.
+
+.. js:function:: Server.set_addr(sv, addr)
+
+  Dynamically change the address of the serveur. See the management socket
+  documentation for more information about the format of the string.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+  :param string weight: A string describing the server address.
+
+.. js:function:: Server.get_addr(sv)
+
+  Returns a string describing the address of the serveur.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+  :returns: A string
+
+.. js:function:: Server.get_stats(sv)
+
+  Returns server statistics.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+  :returns: a key/value array containing stats
+
+.. js:function:: Server.shut_sess(sv)
+
+  Shutdown all the sessions attached to the server. See the management socket
+  documentation for more information about this function.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+
+.. js:function:: Server.set_drain(sv)
+
+  Drain sticky sessions. See the management socket documentation for more
+  information about this function.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+
+.. js:function:: Server.set_maint(sv)
+
+  Set maintenance mode. See the management socket documentation for more
+  information about this function.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+
+.. js:function:: Server.set_ready(sv)
+
+  Set normal mode. See the management socket documentation for more information
+  about this function.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+
+.. js:function:: Server.check_enable(sv)
+
+  Enable health checks. See the management socket documentation for more
+  information about this function.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+
+.. js:function:: Server.check_disable(sv)
+
+  Disable health checks. See the management socket documentation for more
+  information about this function.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+
+.. js:function:: Server.check_force_up(sv)
+
+  Force health-check up. See the management socket documentation for more
+  information about this function.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+
+.. js:function:: Server.check_force_nolb(sv)
+
+  Force health-check nolb mode. See the management socket documentation for more
+  information about this function.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+
+.. js:function:: Server.check_force_down(sv)
+
+  Force health-check down. See the management socket documentation for more
+  information about this function.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+
+.. js:function:: Server.agent_enable(sv)
+
+  Enable agent check. See the management socket documentation for more
+  information about this function.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+
+.. js:function:: Server.agent_disable(sv)
+
+  Disable agent check. See the management socket documentation for more
+  information about this function.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+
+.. js:function:: Server.agent_force_up(sv)
+
+  Force agent check up. See the management socket documentation for more
+  information about this function.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+
+.. js:function:: Server.agent_force_down(sv)
+
+  Force agent check down. See the management socket documentation for more
+  information about this function.
+
+  :param class_server sv: A :ref:`server_class` which indicates the manipulated
+    server.
+
+.. _listener_class:
+
+Listener class
+==============
+
+.. js:function:: Listener.get_stats(ls)
+
+  Returns server statistics.
+
+  :param class_listener ls: A :ref:`listener_class` which indicates the
+    manipulated listener.
+  :returns: a key/value array containing stats
 
 .. _concat_class:
 

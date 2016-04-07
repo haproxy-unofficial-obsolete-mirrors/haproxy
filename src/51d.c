@@ -54,7 +54,7 @@ static int _51d_property_name_list(char **args, int section_type, struct proxy *
 	}
 
 	while (*(args[cur_arg])) {
-		name = calloc(1, sizeof(struct _51d_property_names));
+		name = calloc(1, sizeof(*name));
 		name->name = strdup(args[cur_arg]);
 		LIST_ADDQ(&global._51degrees.property_names, &name->list);
 		++cur_arg;
@@ -158,7 +158,7 @@ static void *_51d_malloc(int size)
  */
 static void _51d_insert_cache_entry(struct sample *smp, struct lru64 *lru, void* domain)
 {
-	struct chunk *cache_entry = _51d_malloc(sizeof(struct chunk));
+	struct chunk *cache_entry = _51d_malloc(sizeof(*cache_entry));
 
 	if (!cache_entry)
 		return;
@@ -179,7 +179,7 @@ static void _51d_insert_cache_entry(struct sample *smp, struct lru64 *lru, void*
  */
 static void _51d_retrieve_cache_entry(struct sample *smp, struct lru64 *lru)
 {
-	struct chunk *cache_entry = (struct chunk*)lru->data;
+	struct chunk *cache_entry = lru->data;
 	smp->data.u.str.str = cache_entry->str;
 	smp->data.u.str.len = cache_entry->len;
 }
@@ -493,7 +493,7 @@ void _51d_init_http_headers()
 {
 	int index = 0;
 	global._51degrees.header_count = fiftyoneDegreesGetHttpHeaderCount();
-	global._51degrees.device_offsets.firstOffset = (fiftyoneDegreesDeviceOffset*)malloc(
+	global._51degrees.device_offsets.firstOffset = malloc(
 		global._51degrees.header_count * sizeof(fiftyoneDegreesDeviceOffset));
 	global._51degrees.header_names = malloc(global._51degrees.header_count * sizeof(struct chunk));
 	global._51degrees.header_offsets = malloc(global._51degrees.header_count * sizeof(int32_t));

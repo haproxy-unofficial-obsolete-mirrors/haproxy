@@ -474,7 +474,7 @@ static int ssl_tlsext_ticket_key_cb(SSL *s, unsigned char key_name[16], unsigned
 	int head;
 	int i;
 
-	conn = (struct connection *)SSL_get_app_data(s);
+	conn = SSL_get_app_data(s);
 	keys = objt_listener(conn->target)->bind_conf->keys_ref->tlskeys;
 	head = objt_listener(conn->target)->bind_conf->keys_ref->tls_ticket_enc_index;
 
@@ -615,7 +615,7 @@ int ssl_sock_ocsp_stapling_cbk(SSL *ssl, void *arg)
 	int key_type;
 	int index;
 
-	ocsp_arg = (struct ocsp_cbk_arg *)arg;
+	ocsp_arg = arg;
 
 	ssl_pkey = SSL_get_privatekey(ssl);
 	if (!ssl_pkey)
@@ -742,7 +742,7 @@ static int ssl_sock_load_ocsp(SSL_CTX *ctx, const char *cert_path)
 	if (!i || (i > OCSP_MAX_CERTID_ASN1_LENGTH))
 		goto out;
 
-	ocsp = calloc(1, sizeof(struct certificate_ocsp));
+	ocsp = calloc(1, sizeof(*ocsp));
 	if (!ocsp)
 		goto out;
 
@@ -754,7 +754,7 @@ static int ssl_sock_load_ocsp(SSL_CTX *ctx, const char *cert_path)
 		ocsp = NULL;
 
 	if (!ctx->tlsext_status_cb) {
-		struct ocsp_cbk_arg *cb_arg = calloc(1, sizeof(struct ocsp_cbk_arg));
+		struct ocsp_cbk_arg *cb_arg = calloc(1, sizeof(*cb_arg));
 
 		cb_arg->is_single = 1;
 		cb_arg->s_ocsp = iocsp;
@@ -767,7 +767,7 @@ static int ssl_sock_load_ocsp(SSL_CTX *ctx, const char *cert_path)
 		 * If the ctx has a status CB, then we have previously set an OCSP staple for this ctx
 		 * Update that cb_arg with the new cert's staple
 		 */
-		struct ocsp_cbk_arg *cb_arg = (struct ocsp_cbk_arg *) ctx->tlsext_status_arg;
+		struct ocsp_cbk_arg *cb_arg = ctx->tlsext_status_arg;
 		struct certificate_ocsp *tmp_ocsp;
 		int index;
 
@@ -897,7 +897,7 @@ static int ssl_sock_load_sctl_from_file(const char *sctl_path, struct chunk **sc
 	if (ret)
 		goto end;
 
-	*sctl = calloc(1, sizeof(struct chunk));
+	*sctl = calloc(1, sizeof(**sctl));
 	if (!chunk_dup(*sctl, &trash)) {
 		free(*sctl);
 		*sctl = NULL;
@@ -913,7 +913,7 @@ end:
 
 int ssl_sock_sctl_add_cbk(SSL *ssl, unsigned ext_type, const unsigned char **out, size_t *outlen, int *al, void *add_arg)
 {
-	struct chunk *sctl = (struct chunk *)add_arg;
+	struct chunk *sctl = add_arg;
 
 	*out = (unsigned char *)sctl->str;
 	*outlen = sctl->len;
@@ -958,7 +958,7 @@ out:
 
 void ssl_sock_infocbk(const SSL *ssl, int where, int ret)
 {
-	struct connection *conn = (struct connection *)SSL_get_app_data(ssl);
+	struct connection *conn = SSL_get_app_data(ssl);
 	BIO *write_bio;
 	(void)ret; /* shut gcc stupid warning */
 
@@ -996,7 +996,7 @@ int ssl_sock_bind_verifycbk(int ok, X509_STORE_CTX *x_store)
 	int err, depth;
 
 	ssl = X509_STORE_CTX_get_ex_data(x_store, SSL_get_ex_data_X509_STORE_CTX_idx());
-	conn = (struct connection *)SSL_get_app_data(ssl);
+	conn = SSL_get_app_data(ssl);
 
 	conn->xprt_st |= SSL_SOCK_ST_FL_VERIFY_DONE;
 
@@ -1042,7 +1042,7 @@ void ssl_sock_msgcbk(int write_p, int version, int content_type, const void *buf
 	/* test heartbeat received (write_p is set to 0
 	   for a received record) */
 	if ((content_type == TLS1_RT_HEARTBEAT) && (write_p == 0)) {
-		struct connection *conn = (struct connection *)SSL_get_app_data(ssl);
+		struct connection *conn = SSL_get_app_data(ssl);
 		const unsigned char *p = buf;
 		unsigned int payload;
 
@@ -1345,7 +1345,7 @@ static int ssl_sock_switchctx_cbk(SSL *ssl, int *al, struct bind_conf *s)
 	servername = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
 	if (!servername) {
 		if (s->generate_certs) {
-			struct connection *conn = (struct connection *)SSL_get_app_data(ssl);
+			struct connection *conn = SSL_get_app_data(ssl);
 			unsigned int key;
 			SSL_CTX *ctx;
 
@@ -1796,18 +1796,21 @@ static int ssl_sock_load_crt_file_into_ckch(const char *path, struct cert_key_an
 	if (BIO_read_filename(in, path) <= 0)
 		goto end;
 
-	/* Read Certificate */
-	ckch->cert = PEM_read_bio_X509_AUX(in, NULL, NULL, NULL);
-	if (ckch->cert == NULL) {
-		memprintf(err, "%sunable to load certificate from file '%s'.\n",
-				err && *err ? *err : "", path);
-		goto end;
-	}
-
 	/* Read Private Key */
 	ckch->key = PEM_read_bio_PrivateKey(in, NULL, NULL, NULL);
 	if (ckch->key == NULL) {
 		memprintf(err, "%sunable to load private key from file '%s'.\n",
+				err && *err ? *err : "", path);
+		goto end;
+	}
+
+	/* Seek back to beginning of file */
+	BIO_reset(in);
+
+	/* Read Certificate */
+	ckch->cert = PEM_read_bio_X509_AUX(in, NULL, NULL, NULL);
+	if (ckch->cert == NULL) {
+		memprintf(err, "%sunable to load certificate from file '%s'.\n",
 				err && *err ? *err : "", path);
 		goto end;
 	}
@@ -2848,7 +2851,7 @@ static int ssl_sock_srv_verifycbk(int ok, X509_STORE_CTX *ctx)
 		return ok;
 
 	ssl = X509_STORE_CTX_get_ex_data(ctx, SSL_get_ex_data_X509_STORE_CTX_idx());
-	conn = (struct connection *)SSL_get_app_data(ssl);
+	conn = SSL_get_app_data(ssl);
 
 	servername = objt_server(conn->target)->ssl_ctx.verify_host;
 
@@ -5369,7 +5372,7 @@ static int bind_parse_tls_ticket_keys(char **args, int cur_arg, struct proxy *px
 		return 0;
 	}
 
-	keys_ref = malloc(sizeof(struct tls_keys_ref));
+	keys_ref = malloc(sizeof(*keys_ref));
 	keys_ref->tlskeys = malloc(TLS_TICKETS_NO * sizeof(struct tls_sess_key));
 
 	if ((f = fopen(args[cur_arg + 1], "r")) == NULL) {
@@ -5406,8 +5409,8 @@ static int bind_parse_tls_ticket_keys(char **args, int cur_arg, struct proxy *px
 	fclose(f);
 
 	/* Use penultimate key for encryption, handle when TLS_TICKETS_NO = 1 */
-	i-=2;
-	keys_ref->tls_ticket_enc_index = i < 0 ? 0 : i;
+	i -= 2;
+	keys_ref->tls_ticket_enc_index = i < 0 ? 0 : i % TLS_TICKETS_NO;
 	keys_ref->unique_id = -1;
 	conf->keys_ref = keys_ref;
 

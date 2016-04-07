@@ -264,49 +264,6 @@ const char *hlua_get_top_error_string(lua_State *L)
 	return lua_tostring(L, -1);
 }
 
-/* The three following functions are useful for adding entries
- * in a table. These functions takes a string and respectively an
- * integer, a string or a function and add it to the table in the
- * top of the stack.
- *
- * These functions throws an error if no more stack size is
- * available.
- */
-__LJMP static inline void hlua_class_const_int(lua_State *L, const char *name,
-                                               int value)
-{
-	if (!lua_checkstack(L, 2))
-	WILL_LJMP(luaL_error(L, "full stack"));
-	lua_pushstring(L, name);
-	lua_pushinteger(L, value);
-	lua_rawset(L, -3);
-}
-__LJMP static inline void hlua_class_const_str(lua_State *L, const char *name,
-                                        const char *value)
-{
-	if (!lua_checkstack(L, 2))
-		WILL_LJMP(luaL_error(L, "full stack"));
-	lua_pushstring(L, name);
-	lua_pushstring(L, value);
-	lua_rawset(L, -3);
-}
-__LJMP static inline void hlua_class_function(lua_State *L, const char *name,
-                                       int (*function)(lua_State *L))
-{
-	if (!lua_checkstack(L, 2))
-		WILL_LJMP(luaL_error(L, "full stack"));
-	lua_pushstring(L, name);
-	lua_pushcclosure(L, function, 0);
-	lua_rawset(L, -3);
-}
-
-__LJMP static int hlua_dump_object(struct lua_State *L)
-{
-	const char *name = (const char *)lua_tostring(L, lua_upvalueindex(1));
-	lua_pushfstring(L, "HAProxy class %s", name);
-	return 1;
-}
-
 /* This function check the number of arguments available in the
  * stack. If the number of arguments available is not the same
  * then <nb> an error is throwed.
@@ -1417,7 +1374,7 @@ static int hlua_set_map(lua_State *L)
  */
 __LJMP static struct map_descriptor *hlua_checkmap(lua_State *L, int ud)
 {
-	return (struct map_descriptor *)MAY_LJMP(hlua_checkudata(L, ud, class_map_ref));
+	return MAY_LJMP(hlua_checkudata(L, ud, class_map_ref));
 }
 
 /* This function is the map constructor. It don't need
@@ -1559,7 +1516,7 @@ __LJMP static int hlua_map_slookup(struct lua_State *L)
 
 __LJMP static struct hlua_socket *hlua_checksocket(lua_State *L, int ud)
 {
-	return (struct hlua_socket *)MAY_LJMP(hlua_checkudata(L, ud, class_socket_ref));
+	return MAY_LJMP(hlua_checkudata(L, ud, class_socket_ref));
 }
 
 /* This function is the handler called for each I/O on the established
@@ -2482,7 +2439,7 @@ static int hlua_check_proto(struct stream *stream, int dir)
  */
 __LJMP static struct channel *hlua_checkchannel(lua_State *L, int ud)
 {
-	return (struct channel *)MAY_LJMP(hlua_checkudata(L, ud, class_channel_ref));
+	return MAY_LJMP(hlua_checkudata(L, ud, class_channel_ref));
 }
 
 /* Pushes the channel onto the top of the stack. If the stask does not have a
@@ -2928,7 +2885,7 @@ __LJMP static int hlua_channel_get_out_len(lua_State *L)
  */
 __LJMP static struct hlua_smp *hlua_checkfetches(lua_State *L, int ud)
 {
-	return (struct hlua_smp *)MAY_LJMP(hlua_checkudata(L, ud, class_fetches_ref));
+	return MAY_LJMP(hlua_checkudata(L, ud, class_fetches_ref));
 }
 
 /* This function creates and push in the stack a fetch object according
@@ -2977,7 +2934,7 @@ __LJMP static int hlua_run_sample_fetch(lua_State *L)
 	struct sample smp;
 
 	/* Get closure arguments. */
-	f = (struct sample_fetch *)lua_touserdata(L, lua_upvalueindex(1));
+	f = lua_touserdata(L, lua_upvalueindex(1));
 
 	/* Get traditionnal arguments. */
 	hsmp = MAY_LJMP(hlua_checkfetches(L, 1));
@@ -3041,7 +2998,7 @@ __LJMP static int hlua_run_sample_fetch(lua_State *L)
  */
 __LJMP static struct hlua_smp *hlua_checkconverters(lua_State *L, int ud)
 {
-	return (struct hlua_smp *)MAY_LJMP(hlua_checkudata(L, ud, class_converters_ref));
+	return MAY_LJMP(hlua_checkudata(L, ud, class_converters_ref));
 }
 
 /* This function creates and push in the stack a Converters object
@@ -3090,7 +3047,7 @@ __LJMP static int hlua_run_sample_conv(lua_State *L)
 	struct sample smp;
 
 	/* Get closure arguments. */
-	conv = (struct sample_conv *)lua_touserdata(L, lua_upvalueindex(1));
+	conv = lua_touserdata(L, lua_upvalueindex(1));
 
 	/* Get traditionnal arguments. */
 	hsmp = MAY_LJMP(hlua_checkconverters(L, 1));
@@ -3162,7 +3119,7 @@ __LJMP static int hlua_run_sample_conv(lua_State *L)
  */
 __LJMP static struct hlua_appctx *hlua_checkapplet_tcp(lua_State *L, int ud)
 {
-	return (struct hlua_appctx *)MAY_LJMP(hlua_checkudata(L, ud, class_applet_tcp_ref));
+	return MAY_LJMP(hlua_checkudata(L, ud, class_applet_tcp_ref));
 }
 
 /* This function creates and push in the stack an Applet object
@@ -3474,7 +3431,7 @@ __LJMP static int hlua_applet_tcp_send(lua_State *L)
  */
 __LJMP static struct hlua_appctx *hlua_checkapplet_http(lua_State *L, int ud)
 {
-	return (struct hlua_appctx *)MAY_LJMP(hlua_checkudata(L, ud, class_applet_http_ref));
+	return MAY_LJMP(hlua_checkudata(L, ud, class_applet_http_ref));
 }
 
 /* This function creates and push in the stack an Applet object
@@ -4142,7 +4099,7 @@ __LJMP static int hlua_applet_http_start_response(lua_State *L)
  */
 __LJMP static struct hlua_txn *hlua_checkhttp(lua_State *L, int ud)
 {
-	return (struct hlua_txn *)MAY_LJMP(hlua_checkudata(L, ud, class_http_ref));
+	return MAY_LJMP(hlua_checkudata(L, ud, class_http_ref));
 }
 
 /* This function creates and push in the stack a HTTP object
@@ -4546,7 +4503,7 @@ static int hlua_http_res_set_status(lua_State *L)
  */
 __LJMP static struct hlua_txn *hlua_checktxn(lua_State *L, int ud)
 {
-	return (struct hlua_txn *)MAY_LJMP(hlua_checkudata(L, ud, class_txn_ref));
+	return MAY_LJMP(hlua_checkudata(L, ud, class_txn_ref));
 }
 
 __LJMP static int hlua_set_var(lua_State *L)
@@ -5157,8 +5114,9 @@ static int hlua_register_task(lua_State *L)
  */
 static int hlua_sample_conv_wrapper(const struct arg *arg_p, struct sample *smp, void *private)
 {
-	struct hlua_function *fcn = (struct hlua_function *)private;
+	struct hlua_function *fcn = private;
 	struct stream *stream = smp->strm;
+	const char *error;
 
 	if (!stream)
 		return 0;
@@ -5178,7 +5136,11 @@ static int hlua_sample_conv_wrapper(const struct arg *arg_p, struct sample *smp,
 
 		/* The following Lua calls can fail. */
 		if (!SET_SAFE_LJMP(stream->hlua.T)) {
-			SEND_ERR(stream->be, "Lua converter '%s': critical error.\n", fcn->name);
+			if (lua_type(stream->hlua.T, -1) == LUA_TSTRING)
+				error = lua_tostring(stream->hlua.T, -1);
+			else
+				error = "critical error";
+			SEND_ERR(stream->be, "Lua converter '%s': %s.\n", fcn->name, error);
 			return 0;
 		}
 
@@ -5260,8 +5222,9 @@ static int hlua_sample_conv_wrapper(const struct arg *arg_p, struct sample *smp,
 static int hlua_sample_fetch_wrapper(const struct arg *arg_p, struct sample *smp,
                                      const char *kw, void *private)
 {
-	struct hlua_function *fcn = (struct hlua_function *)private;
+	struct hlua_function *fcn = private;
 	struct stream *stream = smp->strm;
+	const char *error;
 
 	if (!stream)
 		return 0;
@@ -5281,7 +5244,11 @@ static int hlua_sample_fetch_wrapper(const struct arg *arg_p, struct sample *smp
 
 		/* The following Lua calls can fail. */
 		if (!SET_SAFE_LJMP(stream->hlua.T)) {
-			SEND_ERR(smp->px, "Lua sample-fetch '%s': critical error.\n", fcn->name);
+			if (lua_type(stream->hlua.T, -1) == LUA_TSTRING)
+				error = lua_tostring(stream->hlua.T, -1);
+			else
+				error = "critical error";
+			SEND_ERR(smp->px, "Lua sample-fetch '%s': %s.\n", fcn->name, error);
 			return 0;
 		}
 
@@ -5493,6 +5460,7 @@ static enum act_return hlua_action(struct act_rule *rule, struct proxy *px,
 	char **arg;
 	unsigned int analyzer;
 	int dir;
+	const char *error;
 
 	switch (rule->from) {
 	case ACT_F_TCP_REQ_CNT: analyzer = AN_REQ_INSPECT_FE     ; dir = SMP_OPT_DIR_REQ; break;
@@ -5520,8 +5488,12 @@ static enum act_return hlua_action(struct act_rule *rule, struct proxy *px,
 
 		/* The following Lua calls can fail. */
 		if (!SET_SAFE_LJMP(s->hlua.T)) {
-			SEND_ERR(px, "Lua function '%s': critical error.\n",
-			         rule->arg.hlua_rule->fcn.name);
+			if (lua_type(s->hlua.T, -1) == LUA_TSTRING)
+				error = lua_tostring(s->hlua.T, -1);
+			else
+				error = "critical error";
+			SEND_ERR(px, "Lua function '%s': %s.\n",
+			         rule->arg.hlua_rule->fcn.name, error);
 			return ACT_RET_CONT;
 		}
 
@@ -5638,6 +5610,7 @@ static int hlua_applet_tcp_init(struct appctx *ctx, struct proxy *px, struct str
 	struct hlua *hlua = &ctx->ctx.hlua_apptcp.hlua;
 	struct task *task;
 	char **arg;
+	const char *error;
 
 	HLUA_INIT(hlua);
 	ctx->ctx.hlua_apptcp.flags = 0;
@@ -5670,8 +5643,12 @@ static int hlua_applet_tcp_init(struct appctx *ctx, struct proxy *px, struct str
 
 	/* The following Lua calls can fail. */
 	if (!SET_SAFE_LJMP(hlua->T)) {
-		SEND_ERR(px, "Lua applet tcp '%s': critical error.\n",
-		         ctx->rule->arg.hlua_rule->fcn.name);
+		if (lua_type(hlua->T, -1) == LUA_TSTRING)
+			error = lua_tostring(hlua->T, -1);
+		else
+			error = "critical error";
+		SEND_ERR(px, "Lua applet tcp '%s': %s.\n",
+		         ctx->rule->arg.hlua_rule->fcn.name, error);
 		RESET_SAFE_LJMP(hlua->T);
 		return 0;
 	}
@@ -5803,6 +5780,7 @@ static int hlua_applet_http_init(struct appctx *ctx, struct proxy *px, struct st
 	struct hdr_ctx hdr;
 	struct task *task;
 	struct sample smp; /* just used for a valid call to smp_prefetch_http. */
+	const char *error;
 
 	/* Wait for a full HTTP request. */
 	if (!smp_prefetch_http(px, strm, 0, NULL, &smp, 0)) {
@@ -5857,8 +5835,12 @@ static int hlua_applet_http_init(struct appctx *ctx, struct proxy *px, struct st
 
 	/* The following Lua calls can fail. */
 	if (!SET_SAFE_LJMP(hlua->T)) {
-		SEND_ERR(px, "Lua applet http '%s': critical error.\n",
-		         ctx->rule->arg.hlua_rule->fcn.name);
+		if (lua_type(hlua->T, -1) == LUA_TSTRING)
+			error = lua_tostring(hlua->T, -1);
+		else
+			error = "critical error";
+		SEND_ERR(px, "Lua applet http '%s': %s.\n",
+		         ctx->rule->arg.hlua_rule->fcn.name, error);
 		return 0;
 	}
 
@@ -6071,7 +6053,7 @@ static void hlua_applet_http_release(struct appctx *ctx)
 static enum act_parse_ret action_register_lua(const char **args, int *cur_arg, struct proxy *px,
                                               struct act_rule *rule, char **err)
 {
-	struct hlua_function *fcn = (struct hlua_function *)rule->kw->private;
+	struct hlua_function *fcn = rule->kw->private;
 
 	/* Memory for the rule. */
 	rule->arg.hlua_rule = calloc(1, sizeof(*rule->arg.hlua_rule));
@@ -6094,7 +6076,7 @@ static enum act_parse_ret action_register_lua(const char **args, int *cur_arg, s
 static enum act_parse_ret action_register_service_http(const char **args, int *cur_arg, struct proxy *px,
                                                        struct act_rule *rule, char **err)
 {
-	struct hlua_function *fcn = (struct hlua_function *)rule->kw->private;
+	struct hlua_function *fcn = rule->kw->private;
 
 	/* HTTP applets are forbidden in tcp-request rules.
 	 * HTTP applet request requires everything initilized by
@@ -6214,7 +6196,7 @@ __LJMP static int hlua_register_action(lua_State *L)
 static enum act_parse_ret action_register_service_tcp(const char **args, int *cur_arg, struct proxy *px,
                                                       struct act_rule *rule, char **err)
 {
-	struct hlua_function *fcn = (struct hlua_function *)rule->kw->private;
+	struct hlua_function *fcn = rule->kw->private;
 
 	/* Memory for the rule. */
 	rule->arg.hlua_rule = calloc(1, sizeof(*rule->arg.hlua_rule));
@@ -6460,6 +6442,19 @@ int hlua_post_init()
 	struct hlua_init_function *init;
 	const char *msg;
 	enum hlua_exec ret;
+	const char *error;
+
+	/* Call post initialisation function in safe environement. */
+	if (!SET_SAFE_LJMP(gL.T)) {
+		if (lua_type(gL.T, -1) == LUA_TSTRING)
+			error = lua_tostring(gL.T, -1);
+		else
+			error = "critical error";
+		fprintf(stderr, "Lua post-init: %s.\n", error);
+		exit(1);
+	}
+	hlua_fcn_post_init(gL.T);
+	RESET_SAFE_LJMP(gL.T);
 
 	list_for_each_entry(init, &hlua_init_functions, l) {
 		lua_rawgeti(gL.T, LUA_REGISTRYINDEX, init->function_ref);
@@ -6533,6 +6528,7 @@ void hlua_init(void)
 	struct sample_fetch *sf;
 	struct sample_conv *sc;
 	char *p;
+	const char *error_msg;
 #ifdef USE_OPENSSL
 	struct srv_kw *kw;
 	int tmp_error;
@@ -6573,7 +6569,11 @@ void hlua_init(void)
 
 	/* Set safe environment for the initialisation. */
 	if (!SET_SAFE_LJMP(gL.T)) {
-		fprintf(stderr, "Lua init: critical error.\n");
+		if (lua_type(gL.T, -1) == LUA_TSTRING)
+			error_msg = lua_tostring(gL.T, -1);
+		else
+			error_msg = "critical error";
+		fprintf(stderr, "Lua init: %s.\n", error_msg);
 		exit(1);
 	}
 
@@ -6635,12 +6635,6 @@ void hlua_init(void)
 	/* Create and fill the metatable. */
 	lua_newtable(gL.T);
 
-	/* Create the __tostring identifier */
-	lua_pushstring(gL.T, "__tostring");
-	lua_pushstring(gL.T, CLASS_MAP);
-	lua_pushcclosure(gL.T, hlua_dump_object, 1);
-	lua_rawset(gL.T, -3);
-
 	/* Create and fille the __index entry. */
 	lua_pushstring(gL.T, "__index");
 	lua_newtable(gL.T);
@@ -6651,11 +6645,12 @@ void hlua_init(void)
 
 	lua_rawset(gL.T, -3);
 
-	/* Register previous table in the registry with reference and named entry. */
+	/* Register previous table in the registry with reference and named entry.
+	 * The function hlua_register_metatable() pops the stack, so we
+	 * previously create a copy of the table.
+	 */
 	lua_pushvalue(gL.T, -1); /* Copy the -1 entry and push it on the stack. */
-	lua_pushvalue(gL.T, -1); /* Copy the -1 entry and push it on the stack. */
-	lua_setfield(gL.T, LUA_REGISTRYINDEX, CLASS_MAP); /* register class session. */
-	class_map_ref = luaL_ref(gL.T, LUA_REGISTRYINDEX); /* reference class session. */
+	class_map_ref = hlua_register_metatable(gL.T, CLASS_MAP);
 
 	/* Assign the metatable to the mai Map object. */
 	lua_setmetatable(gL.T, -2);
@@ -6671,12 +6666,6 @@ void hlua_init(void)
 
 	/* Create and fill the metatable. */
 	lua_newtable(gL.T);
-
-	/* Create the __tostring identifier */
-	lua_pushstring(gL.T, "__tostring");
-	lua_pushstring(gL.T, CLASS_CHANNEL);
-	lua_pushcclosure(gL.T, hlua_dump_object, 1);
-	lua_rawset(gL.T, -3);
 
 	/* Create and fille the __index entry. */
 	lua_pushstring(gL.T, "__index");
@@ -6696,9 +6685,7 @@ void hlua_init(void)
 	lua_rawset(gL.T, -3);
 
 	/* Register previous table in the registry with reference and named entry. */
-	lua_pushvalue(gL.T, -1); /* Copy the -1 entry and push it on the stack. */
-	lua_setfield(gL.T, LUA_REGISTRYINDEX, CLASS_CHANNEL); /* register class session. */
-	class_channel_ref = luaL_ref(gL.T, LUA_REGISTRYINDEX); /* reference class session. */
+	class_channel_ref = hlua_register_metatable(gL.T, CLASS_CHANNEL);
 
 	/*
 	 *
@@ -6708,12 +6695,6 @@ void hlua_init(void)
 
 	/* Create and fill the metatable. */
 	lua_newtable(gL.T);
-
-	/* Create the __tostring identifier */
-	lua_pushstring(gL.T, "__tostring");
-	lua_pushstring(gL.T, CLASS_FETCHES);
-	lua_pushcclosure(gL.T, hlua_dump_object, 1);
-	lua_rawset(gL.T, -3);
 
 	/* Create and fille the __index entry. */
 	lua_pushstring(gL.T, "__index");
@@ -6752,9 +6733,7 @@ void hlua_init(void)
 	lua_rawset(gL.T, -3);
 
 	/* Register previous table in the registry with reference and named entry. */
-	lua_pushvalue(gL.T, -1); /* Copy the -1 entry and push it on the stack. */
-	lua_setfield(gL.T, LUA_REGISTRYINDEX, CLASS_FETCHES); /* register class session. */
-	class_fetches_ref = luaL_ref(gL.T, LUA_REGISTRYINDEX); /* reference class session. */
+	class_fetches_ref = hlua_register_metatable(gL.T, CLASS_FETCHES);
 
 	/*
 	 *
@@ -6764,12 +6743,6 @@ void hlua_init(void)
 
 	/* Create and fill the metatable. */
 	lua_newtable(gL.T);
-
-	/* Create the __tostring identifier */
-	lua_pushstring(gL.T, "__tostring");
-	lua_pushstring(gL.T, CLASS_CONVERTERS);
-	lua_pushcclosure(gL.T, hlua_dump_object, 1);
-	lua_rawset(gL.T, -3);
 
 	/* Create and fill the __index entry. */
 	lua_pushstring(gL.T, "__index");
@@ -6805,9 +6778,7 @@ void hlua_init(void)
 	lua_rawset(gL.T, -3);
 
 	/* Register previous table in the registry with reference and named entry. */
-	lua_pushvalue(gL.T, -1); /* Copy the -1 entry and push it on the stack. */
-	lua_setfield(gL.T, LUA_REGISTRYINDEX, CLASS_CONVERTERS); /* register class session. */
-	class_converters_ref = luaL_ref(gL.T, LUA_REGISTRYINDEX); /* reference class session. */
+	class_converters_ref = hlua_register_metatable(gL.T, CLASS_CONVERTERS);
 
 	/*
 	 *
@@ -6817,12 +6788,6 @@ void hlua_init(void)
 
 	/* Create and fill the metatable. */
 	lua_newtable(gL.T);
-
-	/* Create the __tostring identifier */
-	lua_pushstring(gL.T, "__tostring");
-	lua_pushstring(gL.T, CLASS_HTTP);
-	lua_pushcclosure(gL.T, hlua_dump_object, 1);
-	lua_rawset(gL.T, -3);
 
 	/* Create and fille the __index entry. */
 	lua_pushstring(gL.T, "__index");
@@ -6851,9 +6816,7 @@ void hlua_init(void)
 	lua_rawset(gL.T, -3);
 
 	/* Register previous table in the registry with reference and named entry. */
-	lua_pushvalue(gL.T, -1); /* Copy the -1 entry and push it on the stack. */
-	lua_setfield(gL.T, LUA_REGISTRYINDEX, CLASS_HTTP); /* register class session. */
-	class_http_ref = luaL_ref(gL.T, LUA_REGISTRYINDEX); /* reference class session. */
+	class_http_ref = hlua_register_metatable(gL.T, CLASS_HTTP);
 
 	/*
 	 *
@@ -6863,12 +6826,6 @@ void hlua_init(void)
 
 	/* Create and fill the metatable. */
 	lua_newtable(gL.T);
-
-	/* Create the __tostring identifier */
-	lua_pushstring(gL.T, "__tostring");
-	lua_pushstring(gL.T, CLASS_APPLET_TCP);
-	lua_pushcclosure(gL.T, hlua_dump_object, 1);
-	lua_rawset(gL.T, -3);
 
 	/* Create and fille the __index entry. */
 	lua_pushstring(gL.T, "__index");
@@ -6884,9 +6841,7 @@ void hlua_init(void)
 	lua_settable(gL.T, -3);
 
 	/* Register previous table in the registry with reference and named entry. */
-	lua_pushvalue(gL.T, -1); /* Copy the -1 entry and push it on the stack. */
-	lua_setfield(gL.T, LUA_REGISTRYINDEX, CLASS_APPLET_TCP); /* register class session. */
-	class_applet_tcp_ref = luaL_ref(gL.T, LUA_REGISTRYINDEX); /* reference class session. */
+	class_applet_tcp_ref = hlua_register_metatable(gL.T, CLASS_APPLET_TCP);
 
 	/*
 	 *
@@ -6896,12 +6851,6 @@ void hlua_init(void)
 
 	/* Create and fill the metatable. */
 	lua_newtable(gL.T);
-
-	/* Create the __tostring identifier */
-	lua_pushstring(gL.T, "__tostring");
-	lua_pushstring(gL.T, CLASS_APPLET_HTTP);
-	lua_pushcclosure(gL.T, hlua_dump_object, 1);
-	lua_rawset(gL.T, -3);
 
 	/* Create and fille the __index entry. */
 	lua_pushstring(gL.T, "__index");
@@ -6920,9 +6869,7 @@ void hlua_init(void)
 	lua_settable(gL.T, -3);
 
 	/* Register previous table in the registry with reference and named entry. */
-	lua_pushvalue(gL.T, -1); /* Copy the -1 entry and push it on the stack. */
-	lua_setfield(gL.T, LUA_REGISTRYINDEX, CLASS_APPLET_HTTP); /* register class session. */
-	class_applet_http_ref = luaL_ref(gL.T, LUA_REGISTRYINDEX); /* reference class session. */
+	class_applet_http_ref = hlua_register_metatable(gL.T, CLASS_APPLET_HTTP);
 
 	/*
 	 *
@@ -6932,12 +6879,6 @@ void hlua_init(void)
 
 	/* Create and fill the metatable. */
 	lua_newtable(gL.T);
-
-	/* Create the __tostring identifier */
-	lua_pushstring(gL.T, "__tostring");
-	lua_pushstring(gL.T, CLASS_TXN);
-	lua_pushcclosure(gL.T, hlua_dump_object, 1);
-	lua_rawset(gL.T, -3);
 
 	/* Create and fille the __index entry. */
 	lua_pushstring(gL.T, "__index");
@@ -6962,9 +6903,7 @@ void hlua_init(void)
 	lua_rawset(gL.T, -3);
 
 	/* Register previous table in the registry with reference and named entry. */
-	lua_pushvalue(gL.T, -1); /* Copy the -1 entry and push it on the stack. */
-	lua_setfield(gL.T, LUA_REGISTRYINDEX, CLASS_TXN); /* register class session. */
-	class_txn_ref = luaL_ref(gL.T, LUA_REGISTRYINDEX); /* reference class session. */
+	class_txn_ref = hlua_register_metatable(gL.T, CLASS_TXN);
 
 	/*
 	 *
@@ -6974,12 +6913,6 @@ void hlua_init(void)
 
 	/* Create and fill the metatable. */
 	lua_newtable(gL.T);
-
-	/* Create the __tostring identifier */
-	lua_pushstring(gL.T, "__tostring");
-	lua_pushstring(gL.T, CLASS_SOCKET);
-	lua_pushcclosure(gL.T, hlua_dump_object, 1);
-	lua_rawset(gL.T, -3);
 
 	/* Create and fille the __index entry. */
 	lua_pushstring(gL.T, "__index");
@@ -7005,9 +6938,7 @@ void hlua_init(void)
 	lua_rawset(gL.T, -3); /* Push the last 2 entries in the table at index -3 */
 
 	/* Register previous table in the registry with reference and named entry. */
-	lua_pushvalue(gL.T, -1); /* Copy the -1 entry and push it on the stack. */
-	lua_setfield(gL.T, LUA_REGISTRYINDEX, CLASS_SOCKET); /* register class socket. */
-	class_socket_ref = luaL_ref(gL.T, LUA_REGISTRYINDEX); /* reference class socket. */
+	class_socket_ref = hlua_register_metatable(gL.T, CLASS_SOCKET);
 
 	/* Proxy and server configuration initialisation. */
 	memset(&socket_proxy, 0, sizeof(socket_proxy));

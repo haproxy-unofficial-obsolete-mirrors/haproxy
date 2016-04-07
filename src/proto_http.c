@@ -275,8 +275,8 @@ fd_set http_encode_map[(sizeof(fd_set) > (256/8)) ? 1 : ((256/8) / sizeof(fd_set
 
 static int http_apply_redirect_rule(struct redirect_rule *rule, struct stream *s, struct http_txn *txn);
 
-static int http_msg_forward_body(struct stream *s, struct http_msg *msg);
-static int http_msg_forward_chunked_body(struct stream *s, struct http_msg *msg);
+static inline int http_msg_forward_body(struct stream *s, struct http_msg *msg);
+static inline int http_msg_forward_chunked_body(struct stream *s, struct http_msg *msg);
 
 /* This function returns a reason associated with the HTTP status.
  * This function never fails, a message is always returned.
@@ -1589,7 +1589,9 @@ get_http_auth(struct stream *s)
 	if (!p || len <= 0)
 		return 0;
 
-	chunk_initlen(&auth_method, h, 0, len);
+	if (chunk_initlen(&auth_method, h, 0, len) != 1)
+		return 0;
+
 	chunk_initlen(&txn->auth.method_data, p + 1, 0, ctx.vlen - len - 1);
 
 	if (!strncasecmp("Basic", auth_method.str, auth_method.len)) {
@@ -4256,6 +4258,12 @@ int http_process_req_common(struct stream *s, struct channel *req, int an_bit, s
 	 * if the client closes first.
 	 */
 	channel_dont_connect(req);
+
+	/* Allow cookie logging
+	 */
+	if (s->be->cookie_name || sess->fe->capture_name)
+		manage_client_side_cookies(s, req);
+
 	req->analysers &= AN_FLT_END; /* remove switching rules etc... */
 	req->analysers |= AN_REQ_HTTP_TARPIT;
 	req->analyse_exp = tick_add_ifset(now_ms,  s->be->timeout.tarpit);
@@ -4270,6 +4278,12 @@ int http_process_req_common(struct stream *s, struct channel *req, int an_bit, s
 	goto done_without_exp;
 
  deny:	/* this request was blocked (denied) */
+
+	/* Allow cookie logging
+	 */
+	if (s->be->cookie_name || sess->fe->capture_name)
+		manage_client_side_cookies(s, req);
+
 	txn->flags |= TX_CLDENY;
 	txn->status = http_err_codes[txn->rule_deny_status];
 	s->logs.tv_request = now;
@@ -4412,13 +4426,12 @@ int http_process_request(struct stream *s, struct channel *req, int an_bit)
 	 * the fields will stay coherent and the URI will not move.
 	 * This should only be performed in the backend.
 	 */
-	if ((s->be->cookie_name || sess->fe->capture_name)
-	    && !(txn->flags & (TX_CLDENY|TX_CLTARPIT)))
+	if (s->be->cookie_name || sess->fe->capture_name)
 		manage_client_side_cookies(s, req);
 
 	/* add unique-id if "header-unique-id" is specified */
 
-	if (!LIST_ISEMPTY(&sess->fe->format_unique_id)) {
+	if (!LIST_ISEMPTY(&sess->fe->format_unique_id) && !s->unique_id) {
 		if ((s->unique_id = pool_alloc2(pool2_uniqueid)) == NULL)
 			goto return_bad_req;
 		s->unique_id[0] = '\0';
@@ -8382,14 +8395,19 @@ void http_capture_bad_message(struct error_snapshot *es, struct stream *s,
 	struct channel *chn = msg->chn;
 	int len1, len2;
 
-	es->len = MIN(chn->buf->i, sizeof(es->buf));
+	es->len = MIN(chn->buf->i, global.tune.bufsize);
 	len1 = chn->buf->data + chn->buf->size - chn->buf->p;
 	len1 = MIN(len1, es->len);
 	len2 = es->len - len1; /* remaining data if buffer wraps */
 
-	memcpy(es->buf, chn->buf->p, len1);
-	if (len2)
-		memcpy(es->buf + len1, chn->buf->data, len2);
+	if (!es->buf)
+		es->buf = malloc(global.tune.bufsize);
+
+	if (es->buf) {
+		memcpy(es->buf, chn->buf->p, len1);
+		if (len2)
+			memcpy(es->buf + len1, chn->buf->data, len2);
+	}
 
 	if (msg->err_pos >= 0)
 		es->pos = msg->err_pos;
@@ -8537,10 +8555,13 @@ unsigned int http_get_fhdr(const struct http_msg *msg, const char *hname, int hl
 	}
 	if (-occ > found)
 		return 0;
+
 	/* OK now we have the last occurrence in [hist_ptr-1], and we need to
-	 * find occurrence -occ, so we have to check [hist_ptr+occ].
+	 * find occurrence -occ. 0 <= hist_ptr < MAX_HDR_HISTORY, and we have
+	 * -10 <= occ <= -1. So we have to check [hist_ptr%MAX_HDR_HISTORY+occ]
+	 * to remain in the 0..9 range.
 	 */
-	hist_ptr += occ;
+	hist_ptr += occ + MAX_HDR_HISTORY;
 	if (hist_ptr >= MAX_HDR_HISTORY)
 		hist_ptr -= MAX_HDR_HISTORY;
 	*vptr = ptr_hist[hist_ptr];
@@ -8777,7 +8798,7 @@ struct act_rule *parse_http_req_cond(const char **args, const char *file, int li
 	int cur_arg;
 	char *error;
 
-	rule = (struct act_rule*)calloc(1, sizeof(struct act_rule));
+	rule = calloc(1, sizeof(*rule));
 	if (!rule) {
 		Alert("parsing [%s:%d]: out of memory.\n", file, linenum);
 		goto out_err;
@@ -9715,7 +9736,7 @@ struct redirect_rule *http_parse_redirect_rule(const char *file, int linenum, st
 		return NULL;
 	}
 
-	rule = (struct redirect_rule *)calloc(1, sizeof(*rule));
+	rule = calloc(1, sizeof(*rule));
 	rule->cond = cond;
 	LIST_INIT(&rule->rdr_fmt);
 
@@ -10042,6 +10063,26 @@ smp_fetch_stcode(const struct arg *args, struct sample *smp, const char *kw, voi
 	smp->data.type = SMP_T_SINT;
 	smp->data.u.sint = __strl2ui(ptr, len);
 	smp->flags = SMP_F_VOL_1ST;
+	return 1;
+}
+
+static int
+smp_fetch_uniqueid(const struct arg *args, struct sample *smp, const char *kw, void *private)
+{
+	if (LIST_ISEMPTY(&smp->sess->fe->format_unique_id))
+		return 0;
+
+	if (!smp->strm->unique_id) {
+		if ((smp->strm->unique_id = pool_alloc2(pool2_uniqueid)) == NULL)
+			return 0;
+		smp->strm->unique_id[0] = '\0';
+	}
+	smp->data.u.str.len = build_logline(smp->strm, smp->strm->unique_id,
+	                                    UNIQUEID_LEN, &smp->sess->fe->format_unique_id);
+
+	smp->data.type = SMP_T_STR;
+	smp->data.u.str.str = smp->strm->unique_id;
+	smp->flags = SMP_F_CONST;
 	return 1;
 }
 
@@ -12393,7 +12434,7 @@ enum act_parse_ret parse_http_req_capture(const char **args, int *orig_arg, stru
 			return ACT_RET_PRS_ERR;
 		}
 
-		hdr = calloc(sizeof(struct cap_hdr), 1);
+		hdr = calloc(1, sizeof(*hdr));
 		hdr->next = px->req_cap;
 		hdr->name = NULL; /* not a header capture */
 		hdr->namelen = 0;
@@ -12776,6 +12817,7 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {ILH, {
 	{ "shdr_val",        smp_fetch_hdr_val,        ARG2(0,STR,SINT), val_hdr, SMP_T_SINT, SMP_USE_HRSHV },
 
 	{ "status",          smp_fetch_stcode,         0,                NULL,    SMP_T_SINT, SMP_USE_HRSHP },
+	{ "uniqueid",        smp_fetch_uniqueid,       0,                NULL,    SMP_T_STR,  SMP_SRC_L4SRV },
 	{ "url",             smp_fetch_url,            0,                NULL,    SMP_T_STR,  SMP_USE_HRQHV },
 	{ "url32",           smp_fetch_url32,          0,                NULL,    SMP_T_SINT, SMP_USE_HRQHV },
 	{ "url32+src",       smp_fetch_url32_src,      0,                NULL,    SMP_T_BIN,  SMP_USE_HRQHV },
