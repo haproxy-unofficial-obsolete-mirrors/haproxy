@@ -86,7 +86,7 @@ enum {
 	STAT_CLI_O_CLR,      /* clear tables */
 	STAT_CLI_O_SET,      /* set entries in tables */
 	STAT_CLI_O_STAT,     /* dump stats */
-	STAT_CLI_O_PATS,     /* list all pattern reference avalaible */
+	STAT_CLI_O_PATS,     /* list all pattern reference available */
 	STAT_CLI_O_PAT,      /* list all entries of a pattern */
 	STAT_CLI_O_MLOOK,    /* lookup a map entry */
 	STAT_CLI_O_POOLS,    /* dump memory pools */
@@ -303,7 +303,7 @@ static int stats_tlskeys_list(struct stream_interface *si);
 #endif
 static void cli_release_handler(struct appctx *appctx);
 
-static void dump_servers_state(struct proxy *backend, struct chunk *buf);
+static int dump_servers_state(struct stream_interface *si, struct chunk *buf);
 
 /*
  * cli_io_handler()
@@ -313,7 +313,7 @@ static void dump_servers_state(struct proxy *backend, struct chunk *buf);
  *     -> stats_dump_backend_to_buffer()  // "show backend"
  *     -> stats_dump_servers_state_to_buffer() // "show servers state [<backend name>]"
  *     -> stats_dump_stat_to_buffer()     // "show stat"
- *        -> stats_dump_resolvers_to_buffer() // "show stat resolver <id>"
+ *        -> stats_dump_resolvers_to_buffer() // "show stat resolvers <id>"
  *        -> stats_dump_csv_header()
  *        -> stats_dump_proxy_to_buffer()
  *           -> stats_dump_fe_stats()
@@ -350,6 +350,8 @@ static const char stats_sock_usage_msg[] =
 	"  show info      : report information about the running process\n"
 	"  show pools     : report information about the memory pools usage\n"
 	"  show stat      : report counters for each proxy and server\n"
+	"  show stat resolvers [id]: dumps counters from all resolvers section and\n"
+	"                            associated name servers\n"
 	"  show errors    : report last request and response errors for each proxy\n"
 	"  show sess [id] : report the list of current sessions or dump this session\n"
 	"  show table [id]: report table usage stats or dump this table's contents\n"
@@ -364,12 +366,12 @@ static const char stats_sock_usage_msg[] =
 	"  disable        : put a server or frontend in maintenance mode\n"
 	"  enable         : re-enable a server or frontend which is in maintenance mode\n"
 	"  shutdown       : kill a session or a frontend (eg:to release listening ports)\n"
-	"  show acl [id]  : report avalaible acls or dump an acl's contents\n"
+	"  show acl [id]  : report available acls or dump an acl's contents\n"
 	"  get acl        : reports the patterns matching a sample for an ACL\n"
 	"  add acl        : add acl entry\n"
 	"  del acl        : delete acl entry\n"
 	"  clear acl <id> : clear the content of this acl\n"
-	"  show map [id]  : report avalaible maps or dump a map's contents\n"
+	"  show map [id]  : report available maps or dump a map's contents\n"
 	"  get map        : reports the keys and values matching a sample for a map\n"
 	"  set map        : modify map entry\n"
 	"  add map        : add map entry\n"
@@ -1304,6 +1306,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 	appctx->ctx.stats.flags = 0;
 	if (strcmp(args[0], "show") == 0) {
 		if (strcmp(args[1], "backend") == 0) {
+			appctx->ctx.be.px = NULL;
 			appctx->st2 = STAT_ST_INIT;
 			appctx->st0 = STAT_CLI_O_BACKEND;
 		}
@@ -1379,18 +1382,21 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			appctx->st0 = STAT_CLI_O_INFO; // stats_dump_info_to_buffer
 		}
 		else if (strcmp(args[1], "servers") == 0 && strcmp(args[2], "state") == 0) {
-			appctx->ctx.server_state.backend = NULL;
+			appctx->ctx.server_state.iid = 0;
+			appctx->ctx.server_state.px = NULL;
+			appctx->ctx.server_state.sv = NULL;
 
 			/* check if a backend name has been provided */
 			if (*args[3]) {
 				/* read server state from local file */
-				appctx->ctx.server_state.backend = proxy_be_by_name(args[3]);
+				appctx->ctx.server_state.px = proxy_be_by_name(args[3]);
 
-				if (appctx->ctx.server_state.backend == NULL) {
+				if (!appctx->ctx.server_state.px) {
 					appctx->ctx.cli.msg = "Can't find backend.\n";
 					appctx->st0 = STAT_CLI_PRINT;
 					return 1;
 				}
+				appctx->ctx.server_state.iid = appctx->ctx.server_state.px->uuid;
 			}
 			appctx->st2 = STAT_ST_INIT;
 			appctx->st0 = STAT_CLI_O_SERVERS_STATE; // stats_dump_servers_state_to_buffer
@@ -1454,7 +1460,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			else
 				appctx->ctx.map.display_flags = PAT_REF_ACL;
 
-			/* no parameter: display all map avalaible */
+			/* no parameter: display all map available */
 			if (!*args[2]) {
 				appctx->st2 = STAT_ST_INIT;
 				appctx->st0 = STAT_CLI_O_PATS;
@@ -3057,20 +3063,21 @@ static int stats_dump_info_to_buffer(struct stream_interface *si)
  * By default, we only export to the last known server state file format.
  * These information can be used at next startup to recover same level of server state.
  */
-static void dump_servers_state(struct proxy *backend, struct chunk *buf)
+static int dump_servers_state(struct stream_interface *si, struct chunk *buf)
 {
+	struct appctx *appctx = __objt_appctx(si->end);
 	struct server *srv;
 	char srv_addr[INET6_ADDRSTRLEN + 1];
 	time_t srv_time_since_last_change;
 	int bk_f_forced_id, srv_f_forced_id;
 
+
 	/* we don't want to report any state if the backend is not enabled on this process */
-	if (backend->bind_proc && !(backend->bind_proc & (1UL << (relative_pid - 1))))
-		return;
+	if (appctx->ctx.server_state.px->bind_proc && !(appctx->ctx.server_state.px->bind_proc & (1UL << (relative_pid - 1))))
+		return 1;
 
-	srv = backend->srv;
-
-	while (srv) {
+	for (; appctx->ctx.server_state.sv != NULL; appctx->ctx.server_state.sv = srv->next) {
+		srv = appctx->ctx.server_state.sv;
 		srv_addr[0] = '\0';
 		srv_time_since_last_change = 0;
 		bk_f_forced_id = 0;
@@ -3087,7 +3094,7 @@ static void dump_servers_state(struct proxy *backend, struct chunk *buf)
 				break;
 		}
 		srv_time_since_last_change = now.tv_sec - srv->last_change;
-		bk_f_forced_id = backend->options & PR_O_FORCED_ID ? 1 : 0;
+		bk_f_forced_id = appctx->ctx.server_state.px->options & PR_O_FORCED_ID ? 1 : 0;
 		srv_f_forced_id = srv->flags & SRV_F_FORCED_ID ? 1 : 0;
 
 		chunk_appendf(buf,
@@ -3097,26 +3104,40 @@ static void dump_servers_state(struct proxy *backend, struct chunk *buf)
 				"%d %d %d %d %d "
 				"%d %d"
 				"\n",
-				backend->uuid, backend->id,
+				appctx->ctx.server_state.px->uuid, appctx->ctx.server_state.px->id,
 				srv->puid, srv->id, srv_addr,
 				srv->state, srv->admin, srv->uweight, srv->iweight, (long int)srv_time_since_last_change,
 				srv->check.status, srv->check.result, srv->check.health, srv->check.state, srv->agent.state,
 				bk_f_forced_id, srv_f_forced_id);
-
-		srv = srv->next;
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si_applet_cant_put(si);
+			return 0;
+		}
 	}
+	return 1;
 }
 
 /* Parses backend list and simply report backend names */
 static int stats_dump_backend_to_buffer(struct stream_interface *si)
 {
+	struct appctx *appctx = __objt_appctx(si->end);
 	extern struct proxy *proxy;
 	struct proxy *curproxy;
 
 	chunk_reset(&trash);
-	chunk_printf(&trash, "# name\n");
 
-	for (curproxy = proxy; curproxy != NULL; curproxy = curproxy->next) {
+	if (!appctx->ctx.be.px) {
+		chunk_printf(&trash, "# name\n");
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si_applet_cant_put(si);
+			return 0;
+		}
+		appctx->ctx.be.px = proxy;
+	}
+
+	for (; appctx->ctx.be.px != NULL; appctx->ctx.be.px = curproxy->next) {
+		curproxy = appctx->ctx.be.px;
+
 		/* looking for backends only */
 		if (!(curproxy->cap & PR_CAP_BE))
 			continue;
@@ -3126,11 +3147,10 @@ static int stats_dump_backend_to_buffer(struct stream_interface *si)
 			continue;
 
 		chunk_appendf(&trash, "%s\n", curproxy->id);
-	}
-
-	if (bi_putchk(si_ic(si), &trash) == -1) {
-		si_applet_cant_put(si);
-		return 0;
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si_applet_cant_put(si);
+			return 0;
+		}
 	}
 
 	return 1;
@@ -3147,24 +3167,32 @@ static int stats_dump_servers_state_to_buffer(struct stream_interface *si)
 
 	chunk_reset(&trash);
 
-	chunk_printf(&trash, "%d\n# %s\n", SRV_STATE_FILE_VERSION, SRV_STATE_FILE_FIELD_NAMES);
-
-	if (appctx->ctx.server_state.backend) {
-		dump_servers_state(appctx->ctx.server_state.backend, &trash);
-	}
-	else {
-		for (curproxy = proxy; curproxy != NULL; curproxy = curproxy->next) {
-			/* servers are only in backends */
-			if (!(curproxy->cap & PR_CAP_BE))
-				continue;
-
-			dump_servers_state(curproxy, &trash);
+	if (!appctx->ctx.server_state.px) {
+		chunk_printf(&trash, "%d\n# %s\n", SRV_STATE_FILE_VERSION, SRV_STATE_FILE_FIELD_NAMES);
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si_applet_cant_put(si);
+			return 0;
 		}
+		appctx->ctx.server_state.px = proxy;
 	}
 
-	if (bi_putchk(si_ic(si), &trash) == -1) {
-		si_applet_cant_put(si);
-		return 0;
+	for (; appctx->ctx.server_state.px != NULL; appctx->ctx.server_state.px = curproxy->next) {
+		curproxy = appctx->ctx.server_state.px;
+		if (!appctx->ctx.server_state.sv)
+			appctx->ctx.server_state.sv = appctx->ctx.server_state.px->srv;
+		/* servers are only in backends */
+		if (curproxy->cap & PR_CAP_BE) {
+			if (!dump_servers_state(si, &trash))
+				return 0;
+
+			if (bi_putchk(si_ic(si), &trash) == -1) {
+				si_applet_cant_put(si);
+				return 0;
+			}
+		}
+		/* only the selected proxy is dumped */
+		if (appctx->ctx.server_state.iid)
+			break;
 	}
 
 	return 1;
@@ -6091,8 +6119,8 @@ static int stats_tlskeys_list(struct stream_interface *si) {
 
 		/* Now, we start the browsing of the references lists.
 		 * Note that the following call to LIST_ELEM return bad pointer. The only
-		 * avalaible field of this pointer is <list>. It is used with the function
-		 * tlskeys_list_get_next() for retruning the first avalaible entry
+		 * available field of this pointer is <list>. It is used with the function
+		 * tlskeys_list_get_next() for retruning the first available entry
 		 */
 		appctx->ctx.tlskeys.ref = LIST_ELEM(&tlskeys_reference, struct tls_keys_ref *, list);
 		appctx->ctx.tlskeys.ref = tlskeys_list_get_next(appctx->ctx.tlskeys.ref, &tlskeys_reference);
@@ -6149,8 +6177,8 @@ static int stats_pats_list(struct stream_interface *si)
 
 		/* Now, we start the browsing of the references lists.
 		 * Note that the following call to LIST_ELEM return bad pointer. The only
-		 * avalaible field of this pointer is <list>. It is used with the function
-		 * pat_list_get_next() for retruning the first avalaible entry
+		 * available field of this pointer is <list>. It is used with the function
+		 * pat_list_get_next() for retruning the first available entry
 		 */
 		appctx->ctx.map.ref = LIST_ELEM(&pattern_reference, struct pat_ref *, list);
 		appctx->ctx.map.ref = pat_list_get_next(appctx->ctx.map.ref, &pattern_reference,

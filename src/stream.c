@@ -1589,8 +1589,11 @@ struct task *process_stream(struct task *t)
 		      (CF_SHUTR|CF_READ_ACTIVITY|CF_READ_TIMEOUT|CF_SHUTW|
 		       CF_WRITE_ACTIVITY|CF_WRITE_TIMEOUT|CF_ANA_TIMEOUT)) &&
 		    !((si_f->flags | si_b->flags) & (SI_FL_EXP|SI_FL_ERR)) &&
-		    ((t->state & TASK_WOKEN_ANY) == TASK_WOKEN_TIMER))
+		    ((t->state & TASK_WOKEN_ANY) == TASK_WOKEN_TIMER)) {
+			si_f->flags &= ~SI_FL_DONT_WAKE;
+			si_b->flags &= ~SI_FL_DONT_WAKE;
 			goto update_exp_and_leave;
+		}
 	}
 
 	/* below we may emit error messages so we have to ensure that we have
@@ -1600,6 +1603,8 @@ struct task *process_stream(struct task *t)
 		/* No buffer available, we've been subscribed to the list of
 		 * buffer waiters, let's wait for our turn.
 		 */
+		si_f->flags &= ~SI_FL_DONT_WAKE;
+		si_b->flags &= ~SI_FL_DONT_WAKE;
 		goto update_exp_and_leave;
 	}
 
@@ -2151,7 +2156,7 @@ struct task *process_stream(struct task *t)
 		 * to the consumer (which might possibly not be connected yet).
 		 */
 		if (!(req->flags & (CF_SHUTR|CF_SHUTW_NOW)))
-			channel_forward(req, CHN_INFINITE_FORWARD);
+			channel_forward_forever(req);
 
 		/* Just in order to support fetching HTTP contents after start
 		 * of forwarding when the HTTP forwarding analyser is not used,
@@ -2313,7 +2318,7 @@ struct task *process_stream(struct task *t)
 		 * to the consumer.
 		 */
 		if (!(res->flags & (CF_SHUTR|CF_SHUTW_NOW)))
-			channel_forward(res, CHN_INFINITE_FORWARD);
+			channel_forward_forever(res);
 
 		/* Just in order to support fetching HTTP contents after start
 		 * of forwarding when the HTTP forwarding analyser is not used,
@@ -2473,6 +2478,7 @@ struct task *process_stream(struct task *t)
 		}
 
 	update_exp_and_leave:
+		/* Note: please ensure that if you branch here you disable SI_FL_DONT_WAKE */
 		t->expire = tick_first(tick_first(req->rex, req->wex),
 				       tick_first(res->rex, res->wex));
 		if (req->analysers)
