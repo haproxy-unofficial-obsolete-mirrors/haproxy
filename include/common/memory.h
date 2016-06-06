@@ -28,7 +28,21 @@
 #include <common/config.h>
 #include <common/mini-clist.h>
 
+#ifndef DEBUG_DONT_SHARE_POOLS
 #define MEM_F_SHARED	0x1
+#else
+#define MEM_F_SHARED	0
+#endif
+#define MEM_F_EXACT	0x2
+
+/* reserve an extra void* at the end of a pool for linking */
+#ifdef DEBUG_MEMORY_POOLS
+#define POOL_EXTRA (sizeof(void *))
+#define POOL_LINK(pool, item) (void **)(((char *)item) + (pool->size))
+#else
+#define POOL_EXTRA (0)
+#define POOL_LINK(pool, item) ((void **)(item))
+#endif
 
 struct pool_head {
 	void **free_list;
@@ -40,11 +54,12 @@ struct pool_head {
 	unsigned int size;	/* chunk size */
 	unsigned int flags;	/* MEM_F_* */
 	unsigned int users;	/* number of pools sharing this zone */
+	unsigned int failed;	/* failed allocations */
 	char name[12];		/* name of the pool */
 };
 
-/* poison each newly allocated area with this byte if not null */
-extern char mem_poison_byte;
+/* poison each newly allocated area with this byte if >= 0 */
+extern int mem_poison_byte;
 
 /*
  * This function destroys a pull by freeing it completely.
@@ -81,6 +96,9 @@ struct pool_head *create_pool(char *name, unsigned int size, unsigned int flags)
  */
 void dump_pools_to_trash();
 void dump_pools(void);
+int pool_total_failures();
+unsigned long pool_total_allocated();
+unsigned long pool_total_used();
 
 /*
  * This function frees whatever can be freed in pool <pool>.
@@ -109,8 +127,12 @@ static inline void *pool_get_first(struct pool_head *pool)
 	void *p;
 
 	if ((p = pool->free_list) != NULL) {
-		pool->free_list = *(void **)pool->free_list;
+		pool->free_list = *POOL_LINK(pool, p);
 		pool->used++;
+#ifdef DEBUG_MEMORY_POOLS
+		/* keep track of where the element was allocated from */
+		*POOL_LINK(pool, p) = (void *)pool;
+#endif
 	}
 	return p;
 }
@@ -141,8 +163,16 @@ static inline void *pool_alloc2(struct pool_head *pool)
 	void *p;
 
 	p = pool_alloc_dirty(pool);
-	if (p && mem_poison_byte)
+#ifdef DEBUG_MEMORY_POOLS
+	if (p) {
+		/* keep track of where the element was allocated from */
+		*POOL_LINK(pool, p) = (void *)pool;
+	}
+#endif
+	if (p && mem_poison_byte >= 0) {
 		memset(p, mem_poison_byte, pool->size);
+	}
+
 	return p;
 }
 
@@ -158,7 +188,12 @@ static inline void *pool_alloc2(struct pool_head *pool)
 static inline void pool_free2(struct pool_head *pool, void *ptr)
 {
         if (likely(ptr != NULL)) {
-                *(void **)ptr= (void *)pool->free_list;
+#ifdef DEBUG_MEMORY_POOLS
+		/* we'll get late corruption if we refill to the wrong pool or double-free */
+		if (*POOL_LINK(pool, ptr) != (void *)pool)
+			*(int *)0 = 0;
+#endif
+		*POOL_LINK(pool, ptr) = (void *)pool->free_list;
                 pool->free_list = (void *)ptr;
                 pool->used--;
 	}

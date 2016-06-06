@@ -1,6 +1,6 @@
 Summary: HA-Proxy is a TCP/HTTP reverse proxy for high availability environments
 Name: haproxy
-Version: 1.6-dev2
+Version: 1.7-dev3
 Release: 1
 License: GPL
 Group: System Environment/Daemons
@@ -44,7 +44,6 @@ risking the system's stability.
 %{__install} -d %{buildroot}%{_mandir}/man1/
 
 %{__install} -s %{name} %{buildroot}%{_sbindir}/
-%{__install} -c -m 644 examples/%{name}.cfg %{buildroot}%{_sysconfdir}/%{name}/
 %{__install} -c -m 755 examples/%{name}.init %{buildroot}%{_sysconfdir}/rc.d/init.d/%{name}
 %{__install} -c -m 755 doc/%{name}.1 %{buildroot}%{_mandir}/man1/
  
@@ -67,15 +66,47 @@ fi
 
 %files
 %defattr(-,root,root)
-%doc CHANGELOG README examples/*.cfg doc/haproxy-en.txt doc/haproxy-fr.txt doc/architecture.txt doc/configuration.txt doc/proxy-protocol.txt
+%doc CHANGELOG README doc/architecture.txt doc/configuration.txt doc/intro.txt doc/management.txt doc/proxy-protocol.txt
 %doc %{_mandir}/man1/%{name}.1*
 
 %attr(0755,root,root) %{_sbindir}/%{name}
 %dir %{_sysconfdir}/%{name}
-%attr(0644,root,root) %config(noreplace) %{_sysconfdir}/%{name}/%{name}.cfg
 %attr(0755,root,root) %config %{_sysconfdir}/rc.d/init.d/%{name}
 
 %changelog
+* Tue May 10 2016 Willy Tarreau <w@1wt.eu>
+- updated to 1.7-dev3
+
+* Mon Mar 14 2016 Willy Tarreau <w@1wt.eu>
+- updated to 1.7-dev2
+
+* Sun Dec 20 2015 Willy Tarreau <w@1wt.eu>
+- updated to 1.7-dev1
+
+* Tue Oct 13 2015 Willy Tarreau <w@1wt.eu>
+- updated to 1.7-dev0
+
+* Tue Oct 13 2015 Willy Tarreau <w@1wt.eu>
+- updated to 1.6.0
+
+* Tue Oct  6 2015 Willy Tarreau <w@1wt.eu>
+- updated to 1.6-dev7
+
+* Mon Sep 28 2015 Willy Tarreau <w@1wt.eu>
+- updated to 1.6-dev6
+
+* Mon Sep 14 2015 Willy Tarreau <w@1wt.eu>
+- updated to 1.6-dev5
+
+* Sun Aug 30 2015 Willy Tarreau <w@1wt.eu>
+- updated to 1.6-dev4
+
+* Sun Aug 30 2015 Willy Tarreau <w@1wt.eu>
+- updated to 1.6-dev4
+
+* Wed Jul 22 2015 Willy Tarreau <w@1wt.eu>
+- updated to 1.6-dev3
+
 * Wed Jun 17 2015 Willy Tarreau <w@1wt.eu>
 - updated to 1.6-dev2
 

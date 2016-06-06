@@ -25,6 +25,7 @@
 #include <stdlib.h>
 
 #include <common/config.h>
+#include <types/server.h>
 #include <types/stream.h>
 #include <types/stream_interface.h>
 #include <proto/applet.h>
@@ -46,8 +47,11 @@ extern struct data_cb si_conn_cb;
 extern struct data_cb si_idle_conn_cb;
 
 struct appctx *stream_int_register_handler(struct stream_interface *si, struct applet *app);
-void stream_int_unregister_handler(struct stream_interface *si);
-void si_applet_done(struct stream_interface *si);
+void si_applet_wake_cb(struct stream_interface *si);
+void stream_int_update(struct stream_interface *si);
+void stream_int_update_conn(struct stream_interface *si);
+void stream_int_update_applet(struct stream_interface *si);
+void stream_int_notify(struct stream_interface *si);
 
 /* returns the channel which receives data from this stream interface (input channel) */
 static inline struct channel *si_ic(struct stream_interface *si)
@@ -130,6 +134,19 @@ static inline void si_set_state(struct stream_interface *si, int state)
 	si->state = si->prev_state = state;
 }
 
+/* only detaches the endpoint from the SI, which means that it's set to
+ * NULL and that ->ops is mapped to si_embedded_ops. The previous endpoint
+ * is returned.
+ */
+static inline enum obj_type *si_detach_endpoint(struct stream_interface *si)
+{
+	enum obj_type *prev = si->end;
+
+	si->end = NULL;
+	si->ops = &si_embedded_ops;
+	return prev;
+}
+
 /* Release the endpoint if it's a connection or an applet, then nullify it.
  * Note: released connections are closed then freed.
  */
@@ -142,33 +159,30 @@ static inline void si_release_endpoint(struct stream_interface *si)
 		return;
 
 	if ((conn = objt_conn(si->end))) {
+		LIST_DEL(&conn->list);
 		conn_force_close(conn);
 		conn_free(conn);
 	}
 	else if ((appctx = objt_appctx(si->end))) {
-		if (appctx->applet->release)
+		if (appctx->applet->release && si->state < SI_ST_DIS)
 			appctx->applet->release(appctx);
 		appctx_free(appctx); /* we share the connection pool */
 	}
-	si->end = NULL;
-	si->ops = &si_embedded_ops;
+	si_detach_endpoint(si);
 }
 
-static inline void si_detach(struct stream_interface *si)
-{
-	si_release_endpoint(si);
-}
-
-/* Turn a possibly existing connection endpoint of stream interface <si> to
- * idle mode, which means that the connection will be polled for incoming events
- * and might be killed by the underlying I/O handler.
+/* Turn an existing connection endpoint of stream interface <si> to idle mode,
+ * which means that the connection will be polled for incoming events and might
+ * be killed by the underlying I/O handler. If <pool> is not null, the
+ * connection will also be added at the head of this list. This connection
+ * remains assigned to the stream interface it is currently attached to.
  */
-static inline void si_idle_conn(struct stream_interface *si)
+static inline void si_idle_conn(struct stream_interface *si, struct list *pool)
 {
-	struct connection *conn = objt_conn(si->end);
+	struct connection *conn = __objt_conn(si->end);
 
-	if (!conn)
-		return;
+	if (pool)
+		LIST_ADD(pool, &conn->list);
 
 	conn_attach(conn, si, &si_idle_conn_cb);
 	conn_data_want_recv(conn);
@@ -211,28 +225,13 @@ static inline struct appctx *si_appctx(struct stream_interface *si)
 	return objt_appctx(si->end);
 }
 
-/* Call the applet's main function when an appctx is attached to the stream
- * interface. Returns zero if no call was made, or non-zero if a call was made.
- */
-static inline int si_applet_call(struct stream_interface *si)
-{
-	struct appctx *appctx;
-
-	appctx = si_appctx(si);
-	if (appctx) {
-		appctx->applet->fct(appctx);
-		return 1;
-	}
-	return 0;
-}
-
 /* call the applet's release function if any. Needs to be called upon close() */
 static inline void si_applet_release(struct stream_interface *si)
 {
 	struct appctx *appctx;
 
 	appctx = si_appctx(si);
-	if (appctx && appctx->applet->release)
+	if (appctx && appctx->applet->release && si->state < SI_ST_DIS)
 		appctx->applet->release(appctx);
 }
 
@@ -277,32 +276,15 @@ static inline void si_applet_stop_get(struct stream_interface *si)
 }
 
 /* Try to allocate a new connection and assign it to the interface. If
- * a connection was previously allocated and the <reuse> flag is set,
- * it is returned unmodified. Otherwise it is reset.
+ * an endpoint was previously allocated, it is released first. The newly
+ * allocated connection is initialized, assigned to the stream interface,
+ * and returned.
  */
-/* Returns the stream interface's existing connection if one such already
- * exists, or tries to allocate and initialize a new one which is then
- * assigned to the stream interface.
- */
-static inline struct connection *si_alloc_conn(struct stream_interface *si, int reuse)
+static inline struct connection *si_alloc_conn(struct stream_interface *si)
 {
 	struct connection *conn;
 
-	/* If we find a connection, we return it, otherwise it's an applet
-	 * and we start by releasing it.
-	 */
-	if (si->end) {
-		conn = objt_conn(si->end);
-		if (conn) {
-			if (!reuse) {
-				conn_force_close(conn);
-				conn_init(conn);
-			}
-			return conn;
-		}
-		/* it was an applet then */
-		si_release_endpoint(si);
-	}
+	si_release_endpoint(si);
 
 	conn = conn_new();
 	if (conn)
@@ -340,10 +322,12 @@ static inline void si_shutw(struct stream_interface *si)
 	si->ops->shutw(si);
 }
 
-/* Calls the data state update on the stream interfaace */
+/* Updates the stream interface and timers, then updates the data layer below */
 static inline void si_update(struct stream_interface *si)
 {
-	si->ops->update(si);
+	stream_int_update(si);
+	if (si->ops->update)
+		si->ops->update(si);
 }
 
 /* Calls chk_rcv on the connection using the data layer */
@@ -378,11 +362,12 @@ static inline int si_connect(struct stream_interface *si)
 		/* we're in the process of establishing a connection */
 		si->state = SI_ST_CON;
 	}
-	else if (!channel_is_empty(si_oc(si))) {
-		/* reuse the existing connection, we'll have to send a
-		 * request there.
-		 */
-		conn_data_want_send(conn);
+	else {
+		/* reuse the existing connection */
+		if (!channel_is_empty(si_oc(si))) {
+			/* we'll have to send a request there. */
+			conn_data_want_send(conn);
+		}
 
 		/* the connection is established */
 		si->state = SI_ST_EST;

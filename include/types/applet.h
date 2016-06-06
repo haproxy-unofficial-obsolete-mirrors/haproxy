@@ -24,6 +24,8 @@
 
 #include <types/hlua.h>
 #include <types/obj_type.h>
+#include <types/proxy.h>
+#include <types/stream.h>
 #include <common/chunk.h>
 #include <common/config.h>
 
@@ -34,8 +36,11 @@ struct applet {
 	enum obj_type obj_type;            /* object type = OBJ_TYPE_APPLET */
 	/* 3 unused bytes here */
 	char *name;                        /* applet's name to report in logs */
+	int (*init)(struct appctx *, struct proxy *px, struct stream *strm);   /* callback to init ressources, may be NULL.
+	                                     expect 1 if ok, 0 if an error occurs, -1 if miss data. */
 	void (*fct)(struct appctx *);      /* internal I/O handler, may never be NULL */
 	void (*release)(struct appctx *);  /* callback to release resources, may be NULL */
+	unsigned int timeout;              /* execution timeout. */
 };
 
 /* Context of a running applet. */
@@ -48,6 +53,7 @@ struct appctx {
 	unsigned int st2;          /* output state for stats, unused by peers  */
 	struct applet *applet;     /* applet this context refers to */
 	void *owner;               /* pointer to upper layer's entity (eg: stream interface) */
+	struct act_rule *rule;     /* rule associated with the applet. */
 
 	union {
 		struct {
@@ -95,7 +101,6 @@ struct appctx {
 			unsigned int display_flags;
 			struct pat_ref *ref;
 			struct pat_ref_elt *elt;
-			struct map_descriptor *desc;
 			struct pattern_expr *expr;
 			struct chunk chunk;
 		} map;
@@ -111,8 +116,31 @@ struct appctx {
 			struct list wake_on_write;
 		} hlua;
 		struct {
+			struct hlua hlua;
+			int flags;
+			struct task *task;
+		} hlua_apptcp;
+		struct {
+			struct hlua hlua;
+			int left_bytes; /* The max amount of bytes that we can read. */
+			int flags;
+			int status;
+			struct task *task;
+		} hlua_apphttp;
+		struct {
 			struct dns_resolvers *ptr;
 		} resolvers;
+		struct {
+			int iid;		/* if >= 0, ID of the proxy to filter on */
+			struct proxy *px;	/* current proxy being dumped, NULL = not started yet. */
+			struct server *sv;	/* current server being dumped, NULL = not started yet. */
+		} server_state;
+		struct {
+			struct proxy *px;	/* current proxy being dumped, NULL = not started yet. */
+		} be;				/* used by "show backends" command */
+		struct {
+			char **var;
+		} env;
 	} ctx;					/* used by stats I/O handlers to dump the stats */
 };
 

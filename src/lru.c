@@ -39,15 +39,6 @@ struct lru64 *lru64_lookup(unsigned long long key, struct lru64_head *lru,
 	struct eb64_node *node;
 	struct lru64 *elem;
 
-	if (!lru->spare) {
-		if (!lru->cache_size)
-			return NULL;
-		lru->spare = malloc(sizeof(*lru->spare));
-		if (!lru->spare)
-			return NULL;
-		lru->spare->domain = NULL;
-	}
-
 	node = __eb64_lookup(&lru->keys, key);
 	elem = container_of(node, typeof(*elem), node);
 	if (elem) {
@@ -206,6 +197,31 @@ int lru64_destroy(struct lru64_head *lru)
 
 	free(lru);
 	return 0;
+}
+
+/* kill the <nb> least used entries from the <lru> cache */
+void lru64_kill_oldest(struct lru64_head *lru, unsigned long int nb)
+{
+	struct lru64 *elem, *next;
+
+	for (elem = container_of(lru->list.p, typeof(*elem), lru);
+	     nb && (&elem->lru != &lru->list);
+	     elem = next) {
+		next = container_of(elem->lru.p, typeof(*next), lru);
+		if (!elem->domain)
+			continue; /* locked entry */
+
+		LIST_DEL(&elem->lru);
+		eb64_delete(&elem->node);
+		if (elem->data && elem->free)
+			elem->free(elem->data);
+		if (!lru->spare)
+			lru->spare = elem;
+		else
+			free(elem);
+		lru->cache_usage--;
+		nb--;
+	}
 }
 
 /* The code below is just for validation and performance testing. It's an

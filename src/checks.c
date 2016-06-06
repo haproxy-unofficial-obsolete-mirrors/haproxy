@@ -938,6 +938,7 @@ static void event_srv_chk_r(struct connection *conn)
 		const char *hs = NULL; /* health status      */
 		const char *as = NULL; /* admin status */
 		const char *ps = NULL; /* performance status */
+		const char *cs = NULL; /* maxconn */
 		const char *err = NULL; /* first error to report */
 		const char *wrn = NULL; /* first warning to report */
 		char *cmd, *p;
@@ -1039,9 +1040,13 @@ static void event_srv_chk_r(struct connection *conn)
 			else if (strcasecmp(cmd, "maint") == 0) {
 				as = cmd;
 			}
-			/* else try to parse a weight here and keep the last one */
+			/* try to parse a weight here and keep the last one */
 			else if (isdigit((unsigned char)*cmd) && strchr(cmd, '%') != NULL) {
 				ps = cmd;
+			}
+			/* try to parse a maxconn here */
+			else if (strncasecmp(cmd, "maxconn:", strlen("maxconn:")) == 0) {
+				cs = cmd;
 			}
 			else {
 				/* keep a copy of the first error */
@@ -1075,6 +1080,16 @@ static void event_srv_chk_r(struct connection *conn)
 			const char *msg;
 
 			msg = server_parse_weight_change_request(s, ps);
+			if (!wrn || !*wrn)
+				wrn = msg;
+		}
+
+		if (cs) {
+			const char *msg;
+
+			cs += strlen("maxconn:");
+
+			msg = server_parse_maxconn_change_request(s, cs);
 			if (!wrn || !*wrn)
 				wrn = msg;
 		}
@@ -1457,6 +1472,10 @@ static int connect_conn_chk(struct task *t)
 			bo_putstr(check->bo, "\r\n");
 			*check->bo->p = '\0'; /* to make gdb output easier to read */
 		}
+	}
+
+	if ((check->type & PR_O2_LB_AGENT_CHK) && check->send_string_len) {
+		bo_putblk(check->bo, check->send_string, check->send_string_len);
 	}
 
 	/* prepare a new connection */
@@ -2155,7 +2174,7 @@ static struct task *process_chk(struct task *t)
 			 * if there has not been any name resolution for a longer period than
 			 * hold.valid, let's trigger a new one.
 			 */
-			if (tick_is_expired(tick_add(resolution->last_resolution, resolution->resolvers->hold.valid), now_ms)) {
+			if (!resolution->last_resolution || tick_is_expired(tick_add(resolution->last_resolution, resolution->resolvers->hold.valid), now_ms)) {
 				trigger_resolution(s);
 			}
 		}
@@ -2214,14 +2233,19 @@ int trigger_resolution(struct server *s)
 	resolution->query_id = query_id;
 	resolution->qid.key = query_id;
 	resolution->step = RSLV_STEP_RUNNING;
-	resolution->query_type = DNS_RTYPE_ANY;
-	resolution->try = 0;
+	resolution->opts = &s->dns_opts;
+	if (resolution->opts->family_prio == AF_INET) {
+		resolution->query_type = DNS_RTYPE_A;
+	} else {
+		resolution->query_type = DNS_RTYPE_AAAA;
+	}
+	resolution->try = resolvers->resolve_retries;
 	resolution->try_cname = 0;
 	resolution->nb_responses = 0;
-	resolution->resolver_family_priority = s->resolver_family_priority;
 	eb32_insert(&resolvers->query_ids, &resolution->qid);
 
 	dns_send_query(resolution);
+	resolution->try -= 1;
 
 	/* update wakeup date if this resolution is the only one in the FIFO list */
 	if (dns_check_resolution_queue(resolvers) == 1) {
@@ -2294,6 +2318,9 @@ int start_checks() {
 				t->process = server_warmup;
 				t->context = s;
 				t->expire = TICK_ETERNITY;
+				/* server can be in this state only because of */
+				if (s->state == SRV_ST_STARTING)
+					task_schedule(s->warmup, tick_add(now_ms, MS_TO_TICKS(MAX(1000, (now.tv_sec - s->last_change)) / 20)));
 			}
 
 			if (s->check.state & CHK_ST_CONFIGURED) {
@@ -3096,9 +3123,7 @@ static int init_email_alert_checks(struct server *s)
 
 		LIST_INIT(&q->email_alerts);
 
-		check->inter = DEF_CHKINTR; /* XXX: Would like to Skip to the next alert, if any, ASAP.
-					     * But need enough time so that timeouts don't occur
-					     * during tcp check procssing. For now just us an arbitrary default. */
+		check->inter = p->email_alert.mailers.m->timeout.mail;
 		check->rise = DEF_AGENT_RISETIME;
 		check->fall = DEF_AGENT_FALLTIME;
 		err_str = init_check(check, PR_O2_TCPCHK_CHK);
@@ -3237,14 +3262,14 @@ static int enqueue_one_email_alert(struct email_alertq *q, const char *msg)
 		struct tm tm;
 		char datestr[48];
 		const char * const strs[18] = {
-			"From: ", p->email_alert.from, "\n",
-			"To: ", p->email_alert.to, "\n",
-			"Date: ", datestr, "\n",
-			"Subject: [HAproxy Alert] ", msg, "\n",
-			"\n",
-			msg, "\n",
-			".\r\n",
+			"From: ", p->email_alert.from, "\r\n",
+			"To: ", p->email_alert.to, "\r\n",
+			"Date: ", datestr, "\r\n",
+			"Subject: [HAproxy Alert] ", msg, "\r\n",
 			"\r\n",
+			msg, "\r\n",
+			"\r\n",
+			".\r\n",
 			NULL
 		};
 
@@ -3330,7 +3355,7 @@ void send_email_alert(struct server *s, int level, const char *format, ...)
 	va_end(argp);
 
 	if (len < 0) {
-		Alert("Email alert [%s] could format message\n", p->id);
+		Alert("Email alert [%s] could not format message\n", p->id);
 		return;
 	}
 

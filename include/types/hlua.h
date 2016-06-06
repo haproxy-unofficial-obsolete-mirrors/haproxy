@@ -9,14 +9,19 @@
 #include <types/proxy.h>
 #include <types/server.h>
 
-#define CLASS_CORE     "Core"
-#define CLASS_TXN      "TXN"
-#define CLASS_FETCHES  "Fetches"
-#define CLASS_CONVERTERS "Converters"
-#define CLASS_SOCKET   "Socket"
-#define CLASS_CHANNEL  "Channel"
-#define CLASS_HTTP     "HTTP"
-#define CLASS_MAP      "Map"
+#define CLASS_CORE         "Core"
+#define CLASS_TXN          "TXN"
+#define CLASS_FETCHES      "Fetches"
+#define CLASS_CONVERTERS   "Converters"
+#define CLASS_SOCKET       "Socket"
+#define CLASS_CHANNEL      "Channel"
+#define CLASS_HTTP         "HTTP"
+#define CLASS_MAP          "Map"
+#define CLASS_APPLET_TCP   "AppletTCP"
+#define CLASS_APPLET_HTTP  "AppletHTTP"
+#define CLASS_PROXY        "Proxy"
+#define CLASS_SERVER       "Server"
+#define CLASS_LISTENER     "Listener"
 
 struct stream;
 
@@ -24,6 +29,13 @@ struct stream;
 #define HLUA_CTRLYIELD 0x00000002
 #define HLUA_WAKERESWR 0x00000004
 #define HLUA_WAKEREQWR 0x00000008
+#define HLUA_EXIT      0x00000010
+#define HLUA_MUST_GC   0x00000020
+
+#define HLUA_F_AS_STRING    0x01
+#define HLUA_F_MAY_USE_HTTP 0x02
+
+#define HLUA_CONCAT_BLOCSZ 2048
 
 enum hlua_exec {
 	HLUA_E_OK = 0,
@@ -43,7 +55,9 @@ struct hlua {
 	int nargs; /* The number of arguments in the stack at the start of execution. */
 	unsigned int flags; /* The current execution flags. */
 	int wake_time; /* The lua wants to be waked at this time, or before. */
-	int expire; /* Lua execution must be stopped over this time. */
+	unsigned int max_time; /* The max amount of execution time for an Lua process, in ms. */
+	unsigned int start_time; /* The ms time when the Lua starts the last execution. */
+	unsigned int run_time; /* Lua total execution time in ms. */
 	struct task *task; /* The task associated with the lua stack execution.
 	                      We must wake this task to continue the task execution */
 	struct list com; /* The list head of the signals attached to this task. */
@@ -94,13 +108,22 @@ struct hlua_rule {
 struct hlua_txn {
 	struct stream *s;
 	struct proxy *p;
+	int dir;                /* SMP_OPT_DIR_{REQ,RES} */
+};
+
+/* This struct contains the applet context. */
+struct hlua_appctx {
+	struct appctx *appctx;
+	luaL_Buffer b; /* buffer used to prepare strings. */
+	struct hlua_txn htxn;
 };
 
 /* This struc is used with sample fetches and sample converters. */
 struct hlua_smp {
 	struct stream *s;
 	struct proxy *p;
-	int stringsafe;
+	unsigned int flags;     /* LUA_F_OPT_* */
+	int dir;                /* SMP_OPT_DIR_{REQ,RES} */
 };
 
 /* This struct contains data used with sleep functions. */
@@ -118,11 +141,17 @@ struct hlua_socket {
 	luaL_Buffer b; /* buffer used to prepare strings. */
 };
 
+struct hlua_concat {
+	int size;
+	int len;
+};
+
 #else /* USE_LUA */
 
 /* Empty struct for compilation compatibility */
 struct hlua { };
 struct hlua_socket { };
+struct hlua_rule { };
 
 #endif /* USE_LUA */
 

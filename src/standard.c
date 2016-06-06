@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
@@ -24,9 +25,16 @@
 #include <common/chunk.h>
 #include <common/config.h>
 #include <common/standard.h>
+#include <common/tools.h>
 #include <types/global.h>
 #include <proto/dns.h>
 #include <eb32tree.h>
+
+/* This macro returns false if the test __x is false. Many
+ * of the following parsing function must be abort the processing
+ * if it returns 0, so this macro is useful for writing light code.
+ */
+#define RET0_UNLESS(__x) do { if (!(__x)) return 0; } while (0)
 
 /* enough to store NB_ITOA_STR integers of :
  *   2^64-1 = 18446744073709551615 or
@@ -408,6 +416,35 @@ char *ultoa_r(unsigned long n, char *buffer, int size)
 
 /*
  * This function simply returns a locally allocated string containing
+ * the ascii representation for number 'n' in decimal.
+ */
+char *lltoa_r(long long int in, char *buffer, int size)
+{
+	char *pos;
+	int neg = 0;
+	unsigned long long int n;
+
+	pos = buffer + size - 1;
+	*pos-- = '\0';
+
+	if (in < 0) {
+		neg = 1;
+		n = -in;
+	}
+	else
+		n = in;
+
+	do {
+		*pos-- = '0' + n % 10;
+		n /= 10;
+	} while (n && pos >= buffer);
+	if (neg && pos > buffer)
+		*pos-- = '-';
+	return pos + 1;
+}
+
+/*
+ * This function simply returns a locally allocated string containing
  * the ascii representation for signed number 'n' in decimal.
  */
 char *sltoa_r(long n, char *buffer, int size)
@@ -591,6 +628,33 @@ const char *invalid_domainchar(const char *name) {
 struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, int resolve)
 {
 	struct hostent *he;
+	/* max IPv6 length, including brackets and terminating NULL */
+	char tmpip[48];
+
+	/* check IPv6 with square brackets */
+	if (str[0] == '[') {
+		size_t iplength = strlen(str);
+
+		if (iplength < 4) {
+			/* minimal size is 4 when using brackets "[::]" */
+			goto fail;
+		}
+		else if (iplength >= sizeof(tmpip)) {
+			/* IPv6 literal can not be larger than tmpip */
+			goto fail;
+		}
+		else {
+			if (str[iplength - 1] != ']') {
+				/* if address started with bracket, it should end with bracket */
+				goto fail;
+			}
+			else {
+				memcpy(tmpip, str + 1, iplength - 2);
+				tmpip[iplength - 2] = '\0';
+				str = tmpip;
+			}
+		}
+	}
 
 	/* Any IPv6 address */
 	if (str[0] == ':' && str[1] == ':' && !str[2]) {
@@ -636,7 +700,7 @@ struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, i
 		memset(&hints, 0, sizeof(hints));
 		hints.ai_family = sa->ss_family ? sa->ss_family : AF_UNSPEC;
 		hints.ai_socktype = SOCK_DGRAM;
-		hints.ai_flags = AI_PASSIVE;
+		hints.ai_flags = 0;
 		hints.ai_protocol = 0;
 
 		if (getaddrinfo(str, NULL, &hints, &result) == 0) {
@@ -718,18 +782,27 @@ struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, i
  *                  the first byte of the address.
  *    - "fd@"    => an integer must follow, and is a file descriptor number.
  *
- * Also note that in order to avoid any ambiguity with IPv6 addresses, the ':'
- * is mandatory after the IP address even when no port is specified. NULL is
- * returned if the address cannot be parsed. The <low> and <high> ports are
- * always initialized if non-null, even for non-IP families.
+ * IPv6 addresses can be declared with or without square brackets. When using
+ * square brackets for IPv6 addresses, the port separator (colon) is optional.
+ * If not using square brackets, and in order to avoid any ambiguity with
+ * IPv6 addresses, the last colon ':' is mandatory even when no port is specified.
+ * NULL is returned if the address cannot be parsed. The <low> and <high> ports
+ * are always initialized if non-null, even for non-IP families.
  *
  * If <pfx> is non-null, it is used as a string prefix before any path-based
  * address (typically the path to a unix socket).
  *
+ * if <fqdn> is non-null, it will be filled with :
+ *   - a pointer to the FQDN of the server name to resolve if there's one, and
+ *     that the caller will have to free(),
+ *   - NULL if there was an explicit address that doesn't require resolution.
+ *
+ * Hostnames are only resolved if <resolve> is non-null.
+ *
  * When a file descriptor is passed, its value is put into the s_addr part of
  * the address when cast to sockaddr_in and the address family is AF_UNSPEC.
  */
-struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high, char **err, const char *pfx)
+struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high, char **err, const char *pfx, char **fqdn, int resolve)
 {
 	static struct sockaddr_storage ss;
 	struct sockaddr_storage *ret = NULL;
@@ -739,10 +812,17 @@ struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high, char
 	int abstract = 0;
 
 	portl = porth = porta = 0;
+	if (fqdn)
+		*fqdn = NULL;
 
 	str2 = back = env_expand(strdup(str));
 	if (str2 == NULL) {
 		memprintf(err, "out of memory in '%s'\n", __FUNCTION__);
+		goto out;
+	}
+
+	if (!*str2) {
+		memprintf(err, "'%s' resolves to an empty address (environment variable missing?)\n", str);
 		goto out;
 	}
 
@@ -811,15 +891,37 @@ struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high, char
 		memcpy(((struct sockaddr_un *)&ss)->sun_path + prefix_path_len + abstract, str2, adr_len + 1 - abstract);
 	}
 	else { /* IPv4 and IPv6 */
-		port1 = strrchr(str2, ':');
-		if (port1)
-			*port1++ = '\0';
-		else
-			port1 = "";
+		int use_fqdn = 0;
+		char *end = str2 + strlen(str2);
+		char *chr;
 
-		if (str2ip(str2, &ss) == NULL) {
-			memprintf(err, "invalid address: '%s' in '%s'\n", str2, str);
-			goto out;
+		/* search for : or ] whatever comes first */
+		for (chr = end-1; chr > str2; chr--) {
+			if (*chr == ']' || *chr == ':')
+				break;
+		}
+
+		if (*chr == ':') {
+			/* Found a colon before a closing-bracket, must be a port separator.
+			 * This guarantee backward compatibility.
+			 */
+			*chr++ = '\0';
+			port1 = chr;
+		}
+		else {
+			/* Either no colon and no closing-bracket
+			 * or directly ending with a closing-bracket.
+			 * However, no port.
+			 */
+			port1 = "";
+		}
+
+		if (str2ip2(str2, &ss, 0) == NULL) {
+			use_fqdn = 1;
+			if (!resolve || str2ip2(str2, &ss, 1) == NULL) {
+				memprintf(err, "invalid address: '%s' in '%s'\n", str2, str);
+				goto out;
+			}
 		}
 
 		if (isdigit((int)(unsigned char)*port1)) {	/* single port or range */
@@ -845,6 +947,13 @@ struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high, char
 			goto out;
 		}
 		set_host_port(&ss, porta);
+
+		if (use_fqdn && fqdn) {
+			if (str2 != back)
+				memmove(back, str2, strlen(str2) + 1);
+			*fqdn = back;
+			back = NULL;
+		}
 	}
 
 	ret = &ss;
@@ -891,6 +1000,37 @@ int cidr2dotted(int cidr, struct in_addr *mask) {
 
 	mask->s_addr = cidr ? htonl(~0UL << (32 - cidr)) : 0;
 	return 1;
+}
+
+/* Convert mask from bit length form to in_addr form.
+ * This function never fails.
+ */
+void len2mask4(int len, struct in_addr *addr)
+{
+	if (len >= 32) {
+		addr->s_addr = 0xffffffff;
+		return;
+	}
+	if (len <= 0) {
+		addr->s_addr = 0x00000000;
+		return;
+	}
+	addr->s_addr = 0xffffffff << (32 - len);
+	addr->s_addr = htonl(addr->s_addr);
+}
+
+/* Convert mask from bit length form to in6_addr form.
+ * This function never fails.
+ */
+void len2mask6(int len, struct in6_addr *addr)
+{
+	len2mask4(len, (struct in_addr *)&addr->s6_addr[0]); /* msb */
+	len -= 32;
+	len2mask4(len, (struct in_addr *)&addr->s6_addr[4]);
+	len -= 32;
+	len2mask4(len, (struct in_addr *)&addr->s6_addr[8]);
+	len -= 32;
+	len2mask4(len, (struct in_addr *)&addr->s6_addr[12]); /* lsb */
 }
 
 /*
@@ -1330,6 +1470,38 @@ char *encode_chunk(char *start, char *stop,
 	return start;
 }
 
+/*
+ * Tries to prefix characters tagged in the <map> with the <escape>
+ * character. <chunk> contains the input to be escaped. The result will be
+ * stored between <start> (included) and <stop> (excluded). The function
+ * will always try to terminate the resulting string with a '\0' before
+ * <stop>, and will return its position if the conversion completes.
+ */
+char *escape_chunk(char *start, char *stop,
+		   const char escape, const fd_set *map,
+		   const struct chunk *chunk)
+{
+	char *str = chunk->str;
+	char *end = chunk->str + chunk->len;
+
+	if (start < stop) {
+		stop--; /* reserve one byte for the final '\0' */
+		while (start < stop && str < end) {
+			if (!FD_ISSET((unsigned char)(*str), map))
+				*start++ = *str;
+			else {
+				if (start + 2 >= stop)
+					break;
+				*start++ = escape;
+				*start++ = *str;
+			}
+			str++;
+		}
+		*start = '\0';
+	}
+	return start;
+}
+
 /* Check a string for using it in a CSV output format. If the string contains
  * one of the following four char <">, <,>, CR or LF, the string is
  * encapsulated between <"> and the <"> are escaped by a <""> sequence.
@@ -1337,61 +1509,63 @@ char *encode_chunk(char *start, char *stop,
  * the input string is null-terminated.
  *
  * If <quote> is 0, the result is returned escaped but without double quote.
- * Is it useful if the escaped string is used between double quotes in the
+ * It is useful if the escaped string is used between double quotes in the
  * format.
  *
- *    printf("..., \"%s\", ...\r\n", csv_enc(str, 0));
+ *    printf("..., \"%s\", ...\r\n", csv_enc(str, 0, &trash));
  *
- * If the <quote> is 1, the converter put the quotes only if any character is
- * escaped. If the <quote> is 2, the converter put always the quotes.
+ * If <quote> is 1, the converter puts the quotes only if any reserved character
+ * is present. If <quote> is 2, the converter always puts the quotes.
  *
- * <output> is a struct chunk used for storing the output string if any
- * change will be done.
+ * <output> is a struct chunk used for storing the output string.
  *
- * The function returns the converted string on this output. If an error
- * occurs, the function return an empty string. This type of output is useful
+ * The function returns the converted string on its output. If an error
+ * occurs, the function returns an empty string. This type of output is useful
  * for using the function directly as printf() argument.
  *
  * If the output buffer is too short to contain the input string, the result
  * is truncated.
+ *
+ * This function appends the encoding to the existing output chunk, and it
+ * guarantees that it starts immediately at the first available character of
+ * the chunk. Please use csv_enc() instead if you want to replace the output
+ * chunk.
  */
-const char *csv_enc(const char *str, int quote, struct chunk *output)
+const char *csv_enc_append(const char *str, int quote, struct chunk *output)
 {
 	char *end = output->str + output->size;
-	char *out = output->str + 1; /* +1 for reserving space for a first <"> */
+	char *out = output->str + output->len;
+	char *ptr = out;
 
-	while (*str && out < end - 2) { /* -2 for reserving space for <"> and \0. */
-		*out = *str;
+	if (quote == 1) {
+		/* automatic quoting: first verify if we'll have to quote the string */
+		if (!strpbrk(str, "\n\r,\""))
+			quote = 0;
+	}
+
+	if (quote)
+		*ptr++ = '"';
+
+	while (*str && ptr < end - 2) { /* -2 for reserving space for <"> and \0. */
+		*ptr = *str;
 		if (*str == '"') {
-			if (quote == 1)
-				quote = 2;
-			out++;
-			if (out >= end - 2) {
-				out--;
+			ptr++;
+			if (ptr >= end - 2) {
+				ptr--;
 				break;
 			}
-			*out = '"';
+			*ptr = '"';
 		}
-		if (quote == 1 && ( *str == '\r' || *str == '\n' || *str == ',') )
-			quote = 2;
-		out++;
+		ptr++;
 		str++;
 	}
 
-	if (quote == 1)
-		quote = 0;
+	if (quote)
+		*ptr++ = '"';
 
-	if (!quote) {
-		*out = '\0';
-		return output->str + 1;
-	}
-
-	/* else quote == 2 */
-	*output->str = '"';
-	*out = '"';
-	out++;
-	*out = '\0';
-	return output->str;
+	*ptr = '\0';
+	output->len = ptr - output->str;
+	return out;
 }
 
 /* Decode an URL-encoded string in-place. The resulting string might
@@ -1452,6 +1626,81 @@ unsigned int strl2uic(const char *s, int len)
 unsigned int read_uint(const char **s, const char *end)
 {
 	return __read_uint(s, end);
+}
+
+/* This function reads an unsigned integer from the string pointed to by <s> and
+ * returns it. The <s> pointer is adjusted to point to the first unread char. The
+ * function automatically stops at <end>. If the number overflows, the 2^64-1
+ * value is returned.
+ */
+unsigned long long int read_uint64(const char **s, const char *end)
+{
+	const char *ptr = *s;
+	unsigned long long int i = 0, tmp;
+	unsigned int j;
+
+	while (ptr < end) {
+
+		/* read next char */
+		j = *ptr - '0';
+		if (j > 9)
+			goto read_uint64_end;
+
+		/* add char to the number and check overflow. */
+		tmp = i * 10;
+		if (tmp / 10 != i) {
+			i = ULLONG_MAX;
+			goto read_uint64_eat;
+		}
+		if (ULLONG_MAX - tmp < j) {
+			i = ULLONG_MAX;
+			goto read_uint64_eat;
+		}
+		i = tmp + j;
+		ptr++;
+	}
+read_uint64_eat:
+	/* eat each numeric char */
+	while (ptr < end) {
+		if ((unsigned int)(*ptr - '0') > 9)
+			break;
+		ptr++;
+	}
+read_uint64_end:
+	*s = ptr;
+	return i;
+}
+
+/* This function reads an integer from the string pointed to by <s> and returns
+ * it. The <s> pointer is adjusted to point to the first unread char. The function
+ * automatically stops at <end>. Il the number is bigger than 2^63-2, the 2^63-1
+ * value is returned. If the number is lowest than -2^63-1, the -2^63 value is
+ * returned.
+ */
+long long int read_int64(const char **s, const char *end)
+{
+	unsigned long long int i = 0;
+	int neg = 0;
+
+	/* Look for minus char. */
+	if (**s == '-') {
+		neg = 1;
+		(*s)++;
+	}
+	else if (**s == '+')
+		(*s)++;
+
+	/* convert as positive number. */
+	i = read_uint64(s, end);
+
+	if (neg) {
+		if (i > 0x8000000000000000ULL)
+			return LLONG_MIN;
+		return -i;
+	}
+	if (i > 0x7fffffffffffffffULL)
+		return LLONG_MAX;
+	return i;
 }
 
 /* This one is 7 times faster than strtol() on athlon with checks.
@@ -1803,8 +2052,10 @@ int parse_binary(const char *source, char **binstr, int *binstrlen, char **err)
 
 bad_input:
 	memprintf(err, "an hex digit is expected (found '%c')", p[i-1]);
-	if (alloc)
-		free(binstr);
+	if (alloc) {
+		free(*binstr);
+		*binstr = NULL;
+	}
 	return 0;
 }
 
@@ -1817,7 +2068,7 @@ char *my_strndup(const char *src, int n)
 	while (len < n && src[len])
 		len++;
 
-	ret = (char *)malloc(len + 1);
+	ret = malloc(len + 1);
 	if (!ret)
 		return ret;
 	memcpy(ret, src, len);
@@ -2301,6 +2552,70 @@ char *date2str_log(char *dst, struct tm *tm, struct timeval *date, size_t size)
 	return dst;
 }
 
+/* Base year used to compute leap years */
+#define TM_YEAR_BASE 1900
+
+/* Return the difference in seconds between two times (leap seconds are ignored).
+ * Retrieved from glibc 2.18 source code.
+ */
+static int my_tm_diff(const struct tm *a, const struct tm *b)
+{
+	/* Compute intervening leap days correctly even if year is negative.
+	 * Take care to avoid int overflow in leap day calculations,
+	 * but it's OK to assume that A and B are close to each other.
+	 */
+	int a4 = (a->tm_year >> 2) + (TM_YEAR_BASE >> 2) - ! (a->tm_year & 3);
+	int b4 = (b->tm_year >> 2) + (TM_YEAR_BASE >> 2) - ! (b->tm_year & 3);
+	int a100 = a4 / 25 - (a4 % 25 < 0);
+	int b100 = b4 / 25 - (b4 % 25 < 0);
+	int a400 = a100 >> 2;
+	int b400 = b100 >> 2;
+	int intervening_leap_days = (a4 - b4) - (a100 - b100) + (a400 - b400);
+	int years = a->tm_year - b->tm_year;
+	int days = (365 * years + intervening_leap_days
+	         + (a->tm_yday - b->tm_yday));
+	return (60 * (60 * (24 * days + (a->tm_hour - b->tm_hour))
+	       + (a->tm_min - b->tm_min))
+	       + (a->tm_sec - b->tm_sec));
+}
+
+/* Return the GMT offset for a specific local time.
+ * Both t and tm must represent the same time.
+ * The string returned has the same format as returned by strftime(... "%z", tm).
+ * Offsets are kept in an internal cache for better performances.
+ */
+const char *get_gmt_offset(time_t t, struct tm *tm)
+{
+	/* Cache offsets from GMT (depending on whether DST is active or not) */
+	static char gmt_offsets[2][5+1] = { "", "" };
+
+	char *gmt_offset;
+	struct tm tm_gmt;
+	int diff;
+	int isdst = tm->tm_isdst;
+
+	/* Pretend DST not active if its status is unknown */
+	if (isdst < 0)
+		isdst = 0;
+
+	/* Fetch the offset and initialize it if needed */
+	gmt_offset = gmt_offsets[isdst & 0x01];
+	if (unlikely(!*gmt_offset)) {
+		get_gmtime(t, &tm_gmt);
+		diff = my_tm_diff(tm, &tm_gmt);
+		if (diff < 0) {
+			diff = -diff;
+			*gmt_offset = '-';
+		} else {
+			*gmt_offset = '+';
+		}
+		diff /= 60; /* Convert to minutes */
+		snprintf(gmt_offset+1, 4+1, "%02d%02d", diff/60, diff%60);
+	}
+
+    return gmt_offset;
+}
+
 /* gmt2str_log: write a date in the format :
  * "%02d/%s/%04d:%02d:%02d:%02d +0000" without using snprintf
  * return a pointer to the last char written (\0) or
@@ -2336,13 +2651,17 @@ char *gmt2str_log(char *dst, struct tm *tm, size_t size)
 
 /* localdate2str_log: write a date in the format :
  * "%02d/%s/%04d:%02d:%02d:%02d +0000(local timezone)" without using snprintf
- * * return a pointer to the last char written (\0) or
- * * NULL if there isn't enough space.
+ * Both t and tm must represent the same time.
+ * return a pointer to the last char written (\0) or
+ * NULL if there isn't enough space.
  */
-char *localdate2str_log(char *dst, struct tm *tm, size_t size)
+char *localdate2str_log(char *dst, time_t t, struct tm *tm, size_t size)
 {
+	const char *gmt_offset;
 	if (size < 27) /* the size is fixed: 26 chars + \0 */
 		return NULL;
+
+	gmt_offset = get_gmt_offset(t, tm);
 
 	dst = utoa_pad((unsigned int)tm->tm_mday, dst, 3); // day
 	*dst++ = '/';
@@ -2357,11 +2676,374 @@ char *localdate2str_log(char *dst, struct tm *tm, size_t size)
 	*dst++ = ':';
 	dst = utoa_pad((unsigned int)tm->tm_sec, dst, 3); // secondes
 	*dst++ = ' ';
-	memcpy(dst, localtimezone, 5); // timezone
+	memcpy(dst, gmt_offset, 5); // Offset from local time to GMT
 	dst += 5;
 	*dst = '\0';
 
 	return dst;
+}
+
+/* This function check a char. It returns true and updates
+ * <date> and <len> pointer to the new position if the
+ * character is found.
+ */
+static inline int parse_expect_char(const char **date, int *len, char c)
+{
+	if (*len < 1 || **date != c)
+		return 0;
+	(*len)--;
+	(*date)++;
+	return 1;
+}
+
+/* This function expects a string <str> of len <l>. It return true and updates.
+ * <date> and <len> if the string matches, otherwise, it returns false.
+ */
+static inline int parse_strcmp(const char **date, int *len, char *str, int l)
+{
+	if (*len < l || strncmp(*date, str, l) != 0)
+		return 0;
+	(*len) -= l;
+	(*date) += l;
+	return 1;
+}
+
+/* This macro converts 3 chars name in integer. */
+#define STR2I3(__a, __b, __c) ((__a) * 65536 + (__b) * 256 + (__c))
+
+/* day-name     = %x4D.6F.6E ; "Mon", case-sensitive
+ *              / %x54.75.65 ; "Tue", case-sensitive
+ *              / %x57.65.64 ; "Wed", case-sensitive
+ *              / %x54.68.75 ; "Thu", case-sensitive
+ *              / %x46.72.69 ; "Fri", case-sensitive
+ *              / %x53.61.74 ; "Sat", case-sensitive
+ *              / %x53.75.6E ; "Sun", case-sensitive
+ *
+ * This array must be alphabetically sorted
+ */
+static inline int parse_http_dayname(const char **date, int *len, struct tm *tm)
+{
+	if (*len < 3)
+		return 0;
+	switch (STR2I3((*date)[0], (*date)[1], (*date)[2])) {
+	case STR2I3('M','o','n'): tm->tm_wday = 1;  break;
+	case STR2I3('T','u','e'): tm->tm_wday = 2;  break;
+	case STR2I3('W','e','d'): tm->tm_wday = 3;  break;
+	case STR2I3('T','h','u'): tm->tm_wday = 4;  break;
+	case STR2I3('F','r','i'): tm->tm_wday = 5;  break;
+	case STR2I3('S','a','t'): tm->tm_wday = 6;  break;
+	case STR2I3('S','u','n'): tm->tm_wday = 7;  break;
+	default: return 0;
+	}
+	*len -= 3;
+	*date  += 3;
+	return 1;
+}
+
+/* month        = %x4A.61.6E ; "Jan", case-sensitive
+ *              / %x46.65.62 ; "Feb", case-sensitive
+ *              / %x4D.61.72 ; "Mar", case-sensitive
+ *              / %x41.70.72 ; "Apr", case-sensitive
+ *              / %x4D.61.79 ; "May", case-sensitive
+ *              / %x4A.75.6E ; "Jun", case-sensitive
+ *              / %x4A.75.6C ; "Jul", case-sensitive
+ *              / %x41.75.67 ; "Aug", case-sensitive
+ *              / %x53.65.70 ; "Sep", case-sensitive
+ *              / %x4F.63.74 ; "Oct", case-sensitive
+ *              / %x4E.6F.76 ; "Nov", case-sensitive
+ *              / %x44.65.63 ; "Dec", case-sensitive
+ *
+ * This array must be alphabetically sorted
+ */
+static inline int parse_http_monthname(const char **date, int *len, struct tm *tm)
+{
+	if (*len < 3)
+		return 0;
+	switch (STR2I3((*date)[0], (*date)[1], (*date)[2])) {
+	case STR2I3('J','a','n'): tm->tm_mon = 0;  break;
+	case STR2I3('F','e','b'): tm->tm_mon = 1;  break;
+	case STR2I3('M','a','r'): tm->tm_mon = 2;  break;
+	case STR2I3('A','p','r'): tm->tm_mon = 3;  break;
+	case STR2I3('M','a','y'): tm->tm_mon = 4;  break;
+	case STR2I3('J','u','n'): tm->tm_mon = 5;  break;
+	case STR2I3('J','u','l'): tm->tm_mon = 6;  break;
+	case STR2I3('A','u','g'): tm->tm_mon = 7;  break;
+	case STR2I3('S','e','p'): tm->tm_mon = 8;  break;
+	case STR2I3('O','c','t'): tm->tm_mon = 9;  break;
+	case STR2I3('N','o','v'): tm->tm_mon = 10; break;
+	case STR2I3('D','e','c'): tm->tm_mon = 11; break;
+	default: return 0;
+	}
+	*len -= 3;
+	*date  += 3;
+	return 1;
+}
+
+/* day-name-l   = %x4D.6F.6E.64.61.79    ; "Monday", case-sensitive
+ *        / %x54.75.65.73.64.61.79       ; "Tuesday", case-sensitive
+ *        / %x57.65.64.6E.65.73.64.61.79 ; "Wednesday", case-sensitive
+ *        / %x54.68.75.72.73.64.61.79    ; "Thursday", case-sensitive
+ *        / %x46.72.69.64.61.79          ; "Friday", case-sensitive
+ *        / %x53.61.74.75.72.64.61.79    ; "Saturday", case-sensitive
+ *        / %x53.75.6E.64.61.79          ; "Sunday", case-sensitive
+ *
+ * This array must be alphabetically sorted
+ */
+static inline int parse_http_ldayname(const char **date, int *len, struct tm *tm)
+{
+	if (*len < 6) /* Minimum length. */
+		return 0;
+	switch (STR2I3((*date)[0], (*date)[1], (*date)[2])) {
+	case STR2I3('M','o','n'):
+		RET0_UNLESS(parse_strcmp(date, len, "Monday", 6));
+		tm->tm_wday = 1;
+		return 1;
+	case STR2I3('T','u','e'):
+		RET0_UNLESS(parse_strcmp(date, len, "Tuesday", 7));
+		tm->tm_wday = 2;
+		return 1;
+	case STR2I3('W','e','d'):
+		RET0_UNLESS(parse_strcmp(date, len, "Wednesday", 9));
+		tm->tm_wday = 3;
+		return 1;
+	case STR2I3('T','h','u'):
+		RET0_UNLESS(parse_strcmp(date, len, "Thursday", 8));
+		tm->tm_wday = 4;
+		return 1;
+	case STR2I3('F','r','i'):
+		RET0_UNLESS(parse_strcmp(date, len, "Friday", 6));
+		tm->tm_wday = 5;
+		return 1;
+	case STR2I3('S','a','t'):
+		RET0_UNLESS(parse_strcmp(date, len, "Saturday", 8));
+		tm->tm_wday = 6;
+		return 1;
+	case STR2I3('S','u','n'):
+		RET0_UNLESS(parse_strcmp(date, len, "Sunday", 6));
+		tm->tm_wday = 7;
+		return 1;
+	}
+	return 0;
+}
+
+/* This function parses exactly 1 digit and returns the numeric value in "digit". */
+static inline int parse_digit(const char **date, int *len, int *digit)
+{
+	if (*len < 1 || **date < '0' || **date > '9')
+		return 0;
+	*digit = (**date - '0');
+	(*date)++;
+	(*len)--;
+	return 1;
+}
+
+/* This function parses exactly 2 digits and returns the numeric value in "digit". */
+static inline int parse_2digit(const char **date, int *len, int *digit)
+{
+	int value;
+
+	RET0_UNLESS(parse_digit(date, len, &value));
+	(*digit) = value * 10;
+	RET0_UNLESS(parse_digit(date, len, &value));
+	(*digit) += value;
+
+	return 1;
+}
+
+/* This function parses exactly 4 digits and returns the numeric value in "digit". */
+static inline int parse_4digit(const char **date, int *len, int *digit)
+{
+	int value;
+
+	RET0_UNLESS(parse_digit(date, len, &value));
+	(*digit) = value * 1000;
+
+	RET0_UNLESS(parse_digit(date, len, &value));
+	(*digit) += value * 100;
+
+	RET0_UNLESS(parse_digit(date, len, &value));
+	(*digit) += value * 10;
+
+	RET0_UNLESS(parse_digit(date, len, &value));
+	(*digit) += value;
+
+	return 1;
+}
+
+/* time-of-day  = hour ":" minute ":" second
+ *              ; 00:00:00 - 23:59:60 (leap second)
+ *
+ * hour         = 2DIGIT
+ * minute       = 2DIGIT
+ * second       = 2DIGIT
+ */
+static inline int parse_http_time(const char **date, int *len, struct tm *tm)
+{
+	RET0_UNLESS(parse_2digit(date, len, &tm->tm_hour)); /* hour 2DIGIT */
+	RET0_UNLESS(parse_expect_char(date, len, ':'));     /* expect ":"  */
+	RET0_UNLESS(parse_2digit(date, len, &tm->tm_min));  /* min 2DIGIT  */
+	RET0_UNLESS(parse_expect_char(date, len, ':'));     /* expect ":"  */
+	RET0_UNLESS(parse_2digit(date, len, &tm->tm_sec));  /* sec 2DIGIT  */
+	return 1;
+}
+
+/* From RFC7231
+ * https://tools.ietf.org/html/rfc7231#section-7.1.1.1
+ *
+ * IMF-fixdate  = day-name "," SP date1 SP time-of-day SP GMT
+ * ; fixed length/zone/capitalization subset of the format
+ * ; see Section 3.3 of [RFC5322]
+ *
+ *
+ * date1        = day SP month SP year
+ *              ; e.g., 02 Jun 1982
+ *
+ * day          = 2DIGIT
+ * year         = 4DIGIT
+ *
+ * GMT          = %x47.4D.54 ; "GMT", case-sensitive
+ *
+ * time-of-day  = hour ":" minute ":" second
+ *              ; 00:00:00 - 23:59:60 (leap second)
+ *
+ * hour         = 2DIGIT
+ * minute       = 2DIGIT
+ * second       = 2DIGIT
+ *
+ * DIGIT        = decimal 0-9
+ */
+int parse_imf_date(const char *date, int len, struct tm *tm)
+{
+	RET0_UNLESS(parse_http_dayname(&date, &len, tm));     /* day-name */
+	RET0_UNLESS(parse_expect_char(&date, &len, ','));     /* expect "," */
+	RET0_UNLESS(parse_expect_char(&date, &len, ' '));     /* expect SP */
+	RET0_UNLESS(parse_2digit(&date, &len, &tm->tm_mday)); /* day 2DIGIT */
+	RET0_UNLESS(parse_expect_char(&date, &len, ' '));     /* expect SP */
+	RET0_UNLESS(parse_http_monthname(&date, &len, tm));   /* Month */
+	RET0_UNLESS(parse_expect_char(&date, &len, ' '));     /* expect SP */
+	RET0_UNLESS(parse_4digit(&date, &len, &tm->tm_year)); /* year = 4DIGIT */
+	tm->tm_year -= 1900;
+	RET0_UNLESS(parse_expect_char(&date, &len, ' '));     /* expect SP */
+	RET0_UNLESS(parse_http_time(&date, &len, tm));        /* Parse time. */
+	RET0_UNLESS(parse_expect_char(&date, &len, ' '));     /* expect SP */
+	RET0_UNLESS(parse_strcmp(&date, &len, "GMT", 3));     /* GMT = %x47.4D.54 ; "GMT", case-sensitive */
+	tm->tm_isdst = -1;
+	tm->tm_gmtoff = 0;
+	return 1;
+}
+
+/* From RFC7231
+ * https://tools.ietf.org/html/rfc7231#section-7.1.1.1
+ *
+ * rfc850-date  = day-name-l "," SP date2 SP time-of-day SP GMT
+ * date2        = day "-" month "-" 2DIGIT
+ *              ; e.g., 02-Jun-82
+ *
+ * day          = 2DIGIT
+ */
+int parse_rfc850_date(const char *date, int len, struct tm *tm)
+{
+	int year;
+
+	RET0_UNLESS(parse_http_ldayname(&date, &len, tm));    /* Read the day name */
+	RET0_UNLESS(parse_expect_char(&date, &len, ','));     /* expect "," */
+	RET0_UNLESS(parse_expect_char(&date, &len, ' '));     /* expect SP */
+	RET0_UNLESS(parse_2digit(&date, &len, &tm->tm_mday)); /* day 2DIGIT */
+	RET0_UNLESS(parse_expect_char(&date, &len, '-'));     /* expect "-" */
+	RET0_UNLESS(parse_http_monthname(&date, &len, tm));   /* Month */
+	RET0_UNLESS(parse_expect_char(&date, &len, '-'));     /* expect "-" */
+
+	/* year = 2DIGIT
+	 *
+	 * Recipients of a timestamp value in rfc850-(*date) format, which uses a
+	 * two-digit year, MUST interpret a timestamp that appears to be more
+	 * than 50 years in the future as representing the most recent year in
+	 * the past that had the same last two digits.
+	 */
+	RET0_UNLESS(parse_2digit(&date, &len, &tm->tm_year));
+
+	/* expect SP */
+	if (!parse_expect_char(&date, &len, ' ')) {
+		/* Maybe we have the date with 4 digits. */
+		RET0_UNLESS(parse_2digit(&date, &len, &year));
+		tm->tm_year = (tm->tm_year * 100 + year) - 1900;
+		/* expect SP */
+		RET0_UNLESS(parse_expect_char(&date, &len, ' '));
+	} else {
+		/* I fix 60 as pivot: >60: +1900, <60: +2000. Note that the
+		 * tm_year is the number of year since 1900, so for +1900, we
+		 * do nothing, and for +2000, we add 100.
+		 */
+		if (tm->tm_year <= 60)
+			tm->tm_year += 100;
+	}
+
+	RET0_UNLESS(parse_http_time(&date, &len, tm));    /* Parse time. */
+	RET0_UNLESS(parse_expect_char(&date, &len, ' ')); /* expect SP */
+	RET0_UNLESS(parse_strcmp(&date, &len, "GMT", 3)); /* GMT = %x47.4D.54 ; "GMT", case-sensitive */
+	tm->tm_isdst = -1;
+	tm->tm_gmtoff = 0;
+
+	return 1;
+}
+
+/* From RFC7231
+ * https://tools.ietf.org/html/rfc7231#section-7.1.1.1
+ *
+ * asctime-date = day-name SP date3 SP time-of-day SP year
+ * date3        = month SP ( 2DIGIT / ( SP 1DIGIT ))
+ *              ; e.g., Jun  2
+ *
+ * HTTP-date is case sensitive.  A sender MUST NOT generate additional
+ * whitespace in an HTTP-date beyond that specifically included as SP in
+ * the grammar.
+ */
+int parse_asctime_date(const char *date, int len, struct tm *tm)
+{
+	RET0_UNLESS(parse_http_dayname(&date, &len, tm));   /* day-name */
+	RET0_UNLESS(parse_expect_char(&date, &len, ' '));   /* expect SP */
+	RET0_UNLESS(parse_http_monthname(&date, &len, tm)); /* expect month */
+	RET0_UNLESS(parse_expect_char(&date, &len, ' '));   /* expect SP */
+
+	/* expect SP and 1DIGIT or 2DIGIT */
+	if (parse_expect_char(&date, &len, ' '))
+		RET0_UNLESS(parse_digit(&date, &len, &tm->tm_mday));
+	else
+		RET0_UNLESS(parse_2digit(&date, &len, &tm->tm_mday));
+
+	RET0_UNLESS(parse_expect_char(&date, &len, ' '));     /* expect SP */
+	RET0_UNLESS(parse_http_time(&date, &len, tm));        /* Parse time. */
+	RET0_UNLESS(parse_expect_char(&date, &len, ' '));     /* expect SP */
+	RET0_UNLESS(parse_4digit(&date, &len, &tm->tm_year)); /* year = 4DIGIT */
+	tm->tm_year -= 1900;
+	tm->tm_isdst = -1;
+	tm->tm_gmtoff = 0;
+	return 1;
+}
+
+/* From RFC7231
+ * https://tools.ietf.org/html/rfc7231#section-7.1.1.1
+ *
+ * HTTP-date    = IMF-fixdate / obs-date
+ * obs-date     = rfc850-date / asctime-date
+ *
+ * parses an HTTP date in the RFC format and is accepted
+ * alternatives. <date> is the strinf containing the date,
+ * len is the len of the string. <tm> is filled with the
+ * parsed time. We must considers this time as GMT.
+ */
+int parse_http_date(const char *date, int len, struct tm *tm)
+{
+	if (parse_imf_date(date, len, tm))
+		return 1;
+
+	if (parse_rfc850_date(date, len, tm))
+		return 1;
+
+	if (parse_asctime_date(date, len, tm))
+		return 1;
+
+	return 0;
 }
 
 /* Dynamically allocates a string of the proper length to hold the formatted
@@ -2755,6 +3437,38 @@ unsigned char utf8_next(const char *s, int len, unsigned int *c)
 		code |= UTF8_CODE_INVRANGE;
 
 	return code | ((p-(unsigned char *)s)&0x0f);
+}
+
+/* append a copy of string <str> (in a wordlist) at the end of the list <li>
+ * On failure : return 0 and <err> filled with an error message.
+ * The caller is responsible for freeing the <err> and <str> copy
+ * memory area using free()
+ */
+int list_append_word(struct list *li, const char *str, char **err)
+{
+	struct wordlist *wl;
+
+	wl = calloc(1, sizeof(*wl));
+	if (!wl) {
+		memprintf(err, "out of memory");
+		goto fail_wl;
+	}
+
+	wl->s = strdup(str);
+	if (!wl->s) {
+		memprintf(err, "out of memory");
+		goto fail_wl_s;
+	}
+
+	LIST_ADDQ(li, &wl->list);
+
+	return 1;
+
+fail_wl_s:
+	free(wl->s);
+fail_wl:
+	free(wl);
+	return 0;
 }
 
 /*

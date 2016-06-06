@@ -102,7 +102,11 @@ void dns_reset_resolution(struct dns_resolution *resolution)
 	resolution->qid.key = 0;
 
 	/* default values */
-	resolution->query_type = DNS_RTYPE_ANY;
+	if (resolution->opts->family_prio == AF_INET) {
+		resolution->query_type = DNS_RTYPE_A;
+	} else {
+		resolution->query_type = DNS_RTYPE_AAAA;
+	}
 
 	/* the second resolution in the queue becomes the first one */
 	LIST_DEL(&resolution->list);
@@ -133,7 +137,7 @@ void dns_resolve_recv(struct dgram_conn *dgram)
 		return;
 
 	/* no need to go further if we can't retrieve the nameserver */
-	if ((nameserver = (struct dns_nameserver *)dgram->owner) == NULL)
+	if ((nameserver = dgram->owner) == NULL)
 		return;
 
 	resolvers = nameserver->resolvers;
@@ -165,7 +169,8 @@ void dns_resolve_recv(struct dgram_conn *dgram)
 		query_id = dns_response_get_query_id(buf);
 
 		/* search the query_id in the pending resolution tree */
-		if ((eb = eb32_lookup(&resolvers->query_ids, query_id)) == NULL) {
+		eb = eb32_lookup(&resolvers->query_ids, query_id);
+		if (eb == NULL) {
 			/* unknown query id means an outdated response and can be safely ignored */
 			nameserver->counters.outdated += 1;
 			continue;
@@ -217,8 +222,18 @@ void dns_resolve_recv(struct dgram_conn *dgram)
 			resolution->requester_error_cb(resolution, DNS_RESP_CNAME_ERROR);
 			continue;
 
+		case DNS_RESP_TRUNCATED:
+			nameserver->counters.truncated += 1;
+			resolution->requester_error_cb(resolution, DNS_RESP_TRUNCATED);
+			continue;
+
+		case DNS_RESP_NO_EXPECTED_RECORD:
+			nameserver->counters.other += 1;
+			resolution->requester_error_cb(resolution, DNS_RESP_NO_EXPECTED_RECORD);
+			continue;
 		}
 
+		nameserver->counters.valid += 1;
 		resolution->requester_cb(resolution, nameserver, buf, buflen);
 	}
 }
@@ -244,7 +259,7 @@ void dns_resolve_send(struct dgram_conn *dgram)
 	fd_stop_send(fd);
 
 	/* no need to go further if we can't retrieve the nameserver */
-	if ((nameserver = (struct dns_nameserver *)dgram->owner) == NULL)
+	if ((nameserver = dgram->owner) == NULL)
 		return;
 
 	resolvers = nameserver->resolvers;
@@ -294,7 +309,6 @@ int dns_send_query(struct dns_resolution *resolution)
 	}
 
 	/* update resolution */
-	resolution->try += 1;
 	resolution->nb_responses = 0;
 	resolution->last_sent_packet = now_ms;
 
@@ -328,12 +342,18 @@ void dns_update_resolvers_timeout(struct dns_resolvers *resolvers)
 int dns_validate_dns_response(unsigned char *resp, unsigned char *bufend, char *dn_name, int dn_name_len)
 {
 	unsigned char *reader, *cname, *ptr;
-	int i, len, type, ancount, cnamelen;
+	int i, len, flags, type, ancount, cnamelen, expected_record;
 
 	reader = resp;
 	cname = NULL;
 	cnamelen = 0;
 	len = 0;
+	expected_record = 0; /* flag to report if at least one expected record type is found in the response.
+			      * For now, only records containing an IP address (A and AAAA) are
+			      * considered as expected.
+			      * Later, this function may be updated to let the caller decide what type
+			      * of record is expected to consider the response as valid. (SRV or TXT types)
+			      */
 
 	/* move forward 2 bytes for the query id */
 	reader += 2;
@@ -341,29 +361,33 @@ int dns_validate_dns_response(unsigned char *resp, unsigned char *bufend, char *
 		return DNS_RESP_INVALID;
 
 	/*
-	 * analyzing flags
-	 * 1st byte can be ignored for now
-	 * rcode is at the beginning of the second byte
+	 * flags are stored over 2 bytes
+	 * First byte contains:
+	 *  - response flag (1 bit)
+	 *  - opcode (4 bits)
+	 *  - authoritative (1 bit)
+	 *  - truncated (1 bit)
+	 *  - recursion desired (1 bit)
 	 */
-	reader += 1;
-	if (reader >= bufend)
+	if (reader + 2 >= bufend)
 		return DNS_RESP_INVALID;
 
-	/*
-	 * rcode is 4 latest bits
-	 * ignore response if it contains an error
-	 */
-	if ((*reader & 0x0f) != DNS_RCODE_NO_ERROR) {
-		if ((*reader & 0x0f) == DNS_RCODE_NX_DOMAIN)
+	flags = reader[0] * 256 + reader[1];
+
+	if (flags & DNS_FLAG_TRUNCATED)
+		return DNS_RESP_TRUNCATED;
+
+	if ((flags & DNS_FLAG_REPLYCODE) != DNS_RCODE_NO_ERROR) {
+		if ((flags & DNS_FLAG_REPLYCODE) == DNS_RCODE_NX_DOMAIN)
 			return DNS_RESP_NX_DOMAIN;
-		else if ((*reader & 0x0f) == DNS_RCODE_REFUSED)
+		else if ((flags & DNS_FLAG_REPLYCODE) == DNS_RCODE_REFUSED)
 			return DNS_RESP_REFUSED;
 
 		return DNS_RESP_ERROR;
 	}
 
-	/* move forward 1 byte for rcode */
-	reader += 1;
+	/* move forward 2 bytes for flags */
+	reader += 2;
 	if (reader >= bufend)
 		return DNS_RESP_INVALID;
 
@@ -461,40 +485,42 @@ int dns_validate_dns_response(unsigned char *resp, unsigned char *bufend, char *
 		}
 
 		/* ptr now points to the name */
-		/* if cname is set, it means a CNAME recursion is in progress */
-		if (cname) {
-			/* check if the name can stand in response */
-			if ((reader + cnamelen) > bufend)
-				return DNS_RESP_INVALID;
-			/* compare cname and current name */
-			if (memcmp(ptr, cname, cnamelen) != 0)
-				return DNS_RESP_CNAME_ERROR;
-		}
-		/* compare server hostname to current name */
-		else if (dn_name) {
-			/* check if the name can stand in response */
-			if ((reader + dn_name_len) > bufend)
-				return DNS_RESP_INVALID;
-			if (memcmp(ptr, dn_name, dn_name_len) != 0)
-				return DNS_RESP_WRONG_NAME;
-		}
-
-		if ((*reader & 0xc0) == 0xc0) {
-			/* move forward 2 bytes for information pointer and address pointer */
-			reader += 2;
-		}
-		else {
+		if ((*reader & 0xc0) != 0xc0) {
+			/* if cname is set, it means a CNAME recursion is in progress */
 			if (cname) {
+				/* check if the name can stand in response */
+				if ((reader + cnamelen) > bufend)
+					return DNS_RESP_INVALID;
+				/* compare cname and current name */
+				if (memcmp(ptr, cname, cnamelen) != 0)
+					return DNS_RESP_CNAME_ERROR;
+
 				cname = reader;
 				cnamelen = dns_str_to_dn_label_len((const char *)cname);
 
 				/* move forward cnamelen bytes + NULL byte */
 				reader += (cnamelen + 1);
 			}
+			/* compare server hostname to current name */
+			else if (dn_name) {
+				/* check if the name can stand in response */
+				if ((reader + dn_name_len) > bufend)
+					return DNS_RESP_INVALID;
+				if (memcmp(ptr, dn_name, dn_name_len) != 0)
+					return DNS_RESP_WRONG_NAME;
+
+				reader += (dn_name_len + 1);
+			}
 			else {
 				reader += (len + 1);
 			}
 		}
+		else {
+			/* shortname in progress */
+			/* move forward 2 bytes for information pointer and address pointer */
+			reader += 2;
+		}
+
 		if (reader >= bufend)
 			return DNS_RESP_INVALID;
 
@@ -530,6 +556,7 @@ int dns_validate_dns_response(unsigned char *resp, unsigned char *bufend, char *
 				/* ipv4 is stored on 4 bytes */
 				if (len != 4)
 					return DNS_RESP_INVALID;
+				expected_record = 1;
 				break;
 
 			case DNS_RTYPE_CNAME:
@@ -541,12 +568,16 @@ int dns_validate_dns_response(unsigned char *resp, unsigned char *bufend, char *
 				/* ipv6 is stored on 16 bytes */
 				if (len != 16)
 					return DNS_RESP_INVALID;
+				expected_record = 1;
 				break;
 		} /* switch (record type) */
 
 		/* move forward len for analyzing next record in the response */
 		reader += len;
 	} /* for i 0 to ancount */
+
+	if (expected_record == 0)
+		return DNS_RESP_NO_EXPECTED_RECORD;
 
 	return DNS_RESP_VALID;
 }
@@ -561,18 +592,34 @@ int dns_validate_dns_response(unsigned char *resp, unsigned char *bufend, char *
  * For both cases above, dns_validate_dns_response is required
  * returns one of the DNS_UPD_* code
  */
+#define DNS_MAX_IP_REC 20
 int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
-		char *dn_name, int dn_name_len, void *currentip, short currentip_sin_family,
-		int family_priority, void **newip, short *newip_sin_family)
+                             struct dns_resolution *resol, void *currentip,
+                             short currentip_sin_family,
+                             void **newip, short *newip_sin_family)
 {
+	int family_priority;
+	char *dn_name;
+	int dn_name_len;
 	int i, ancount, cnamelen, type, data_len, currentip_found;
 	unsigned char *reader, *cname, *ptr, *newip4, *newip6;
+	struct {
+		unsigned char *ip;
+		unsigned char type;
+	} rec[DNS_MAX_IP_REC];
+	int currentip_sel;
+	int j;
+	int rec_nb = 0;
+	int score, max_score;
+
+	family_priority = resol->opts->family_prio;
+	dn_name = resol->hostname_dn;
+	dn_name_len = resol->hostname_dn_len;
 
 	cname = *newip = newip4 = newip6 = NULL;
 	cnamelen = currentip_found = 0;
 	*newip_sin_family = AF_UNSPEC;
-	ancount = (((struct dns_header *)resp)->ancount);
-	ancount = *(resp + 7);
+	ancount = *(resp + 7);	/* Assume no more than 256 answers */
 
 	/* bypass DNS response header */
 	reader = resp + sizeof(struct dns_header);
@@ -597,8 +644,11 @@ int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
 		else
 			ptr = reader;
 
-		if (cname && memcmp(ptr, cname, cnamelen))
-			return DNS_UPD_NAME_ERROR;
+		if (cname) {
+			if (memcmp(ptr, cname, cnamelen)) {
+				return DNS_UPD_NAME_ERROR;
+			}
+		}
 		else if (memcmp(ptr, dn_name, dn_name_len))
 			return DNS_UPD_NAME_ERROR;
 
@@ -643,20 +693,12 @@ int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
 		/* analyzing record content */
 		switch (type) {
 			case DNS_RTYPE_A:
-				/* check if current reccord's IP is the same as server one's */
-				if ((currentip_sin_family == AF_INET)
-						&& (*(uint32_t *)reader == *(uint32_t *)currentip)) {
-					currentip_found = 1;
-					newip4 = reader;
-					/* we can stop now if server's family preference is IPv4
-					 * and its current IP is found in the response list */
-					if (family_priority == AF_INET)
-						return DNS_UPD_NO; /* DNS_UPD matrix #1 */
+				/* Store IPv4, only if some room is avalaible. */
+				if (rec_nb < DNS_MAX_IP_REC) {
+					rec[rec_nb].ip = reader;
+					rec[rec_nb].type = AF_INET;
+					rec_nb++;
 				}
-				else if (!newip4) {
-					newip4 = reader;
-				}
-
 				/* move forward data_len for analyzing next record in the response */
 				reader += data_len;
 				break;
@@ -669,19 +711,12 @@ int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
 				break;
 
 			case DNS_RTYPE_AAAA:
-				/* check if current record's IP is the same as server's one */
-				if ((currentip_sin_family == AF_INET6) && (memcmp(reader, currentip, 16) == 0)) {
-					currentip_found = 1;
-					newip6 = reader;
-					/* we can stop now if server's preference is IPv6 or is not
-					 * set (which implies we prioritize IPv6 over IPv4 */
-					if (family_priority == AF_INET6)
-						return DNS_UPD_NO;
+				/* Store IPv6, only if some room is avalaible. */
+				if (rec_nb < DNS_MAX_IP_REC) {
+					rec[rec_nb].ip = reader;
+					rec[rec_nb].type = AF_INET6;
+					rec_nb++;
 				}
-				else if (!newip6) {
-					newip6 = reader;
-				}
-
 				/* move forward data_len for analyzing next record in the response */
 				reader += data_len;
 				break;
@@ -693,9 +728,83 @@ int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
 		} /* switch (record type) */
 	} /* for i 0 to ancount */
 
+	/* Select an IP regarding configuration preference.
+	 * Top priority is the prefered network ip version,
+	 * second priority is the prefered network.
+	 * the last priority is the currently used IP,
+	 *
+	 * For these three priorities, a score is calculated. The
+	 * weight are:
+	 *  4 - prefered netwok ip version.
+	 *  2 - prefered network.
+	 *  1 - current ip.
+	 * The result with the biggest score is returned.
+	 */
+	max_score = -1;
+	for (i = 0; i < rec_nb; i++) {
+
+		score = 0;
+
+		/* Check for prefered ip protocol. */
+		if (rec[i].type == family_priority)
+			score += 4;
+
+		/* Check for prefered network. */
+		for (j = 0; j < resol->opts->pref_net_nb; j++) {
+
+			/* Compare only the same adresses class. */
+			if (resol->opts->pref_net[j].family != rec[i].type)
+				continue;
+
+			if ((rec[i].type == AF_INET &&
+			     in_net_ipv4((struct in_addr *)rec[i].ip,
+			                 &resol->opts->pref_net[j].mask.in4,
+			                 &resol->opts->pref_net[j].addr.in4)) ||
+			    (rec[i].type == AF_INET6 &&
+			     in_net_ipv6((struct in6_addr *)rec[i].ip,
+			                 &resol->opts->pref_net[j].mask.in6,
+			                 &resol->opts->pref_net[j].addr.in6))) {
+				score += 2;
+				break;
+			}
+		}
+
+		/* Check for current ip matching. */
+		if (rec[i].type == currentip_sin_family &&
+		    ((currentip_sin_family == AF_INET &&
+		      *(uint32_t *)rec[i].ip == *(uint32_t *)currentip) ||
+		     (currentip_sin_family == AF_INET6 &&
+		      memcmp(rec[i].ip, currentip, 16) == 0))) {
+			score += 1;
+			currentip_sel = 1;
+		} else
+			currentip_sel = 0;
+
+		/* Keep the address if the score is better than the previous
+		 * score. The maximum score is 7, if this value is reached,
+		 * we break the parsing. Implicitly, this score is reached
+		 * the ip selected is the current ip.
+		 */
+		if (score > max_score) {
+			if (rec[i].type == AF_INET)
+				newip4 = rec[i].ip;
+			else
+				newip6 = rec[i].ip;
+			currentip_found = currentip_sel;
+			if (score == 7)
+				return DNS_UPD_NO;
+			max_score = score;
+		}
+	}
+
 	/* only CNAMEs in the response, no IP found */
 	if (cname && !newip4 && !newip6) {
 		return DNS_UPD_CNAME;
+	}
+
+	/* no IP found in the response */
+	if (!newip4 && !newip6) {
+		return DNS_UPD_NO_IP_FOUND;
 	}
 
 	/* case when the caller looks first for an IPv4 address */
@@ -757,7 +866,7 @@ int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
 /*
  * returns the query id contained in a DNS response
  */
-int dns_response_get_query_id(unsigned char *resp)
+unsigned short dns_response_get_query_id(unsigned char *resp)
 {
 	/* read the query id from the response */
 	return resp[0] * 256 + resp[1];
@@ -799,7 +908,7 @@ int dns_init_resolvers(void)
 		curr_resolvers->t = t;
 
 		list_for_each_entry(curnameserver, &curr_resolvers->nameserver_list, list) {
-			if ((dgram = calloc(1, sizeof(struct dgram_conn))) == NULL) {
+			if ((dgram = calloc(1, sizeof(*dgram))) == NULL) {
 				Alert("Starting [%s/%s] nameserver: out of memory.\n", curr_resolvers->id,
 						curnameserver->id);
 				return 0;
@@ -818,7 +927,7 @@ int dns_init_resolvers(void)
 			}
 
 			/* "connect" the UDP socket to the name server IP */
-			if (connect(fd, (struct sockaddr*)&curnameserver->addr, sizeof(curnameserver->addr)) == -1) {
+			if (connect(fd, (struct sockaddr*)&curnameserver->addr, get_addr_len(&curnameserver->addr)) == -1) {
 				Alert("Starting [%s/%s] nameserver: can't connect socket.\n", curr_resolvers->id,
 						curnameserver->id);
 				close(fd);
@@ -865,7 +974,7 @@ int dns_init_resolvers(void)
 int dns_build_query(int query_id, int query_type, char *hostname_dn, int hostname_dn_len, char *buf, int bufsize)
 {
 	struct dns_header *dns;
-	struct dns_question *qinfo;
+	struct dns_question qinfo;
 	char *ptr, *bufend;
 
 	memset(buf, '\0', bufsize);
@@ -911,9 +1020,9 @@ int dns_build_query(int query_id, int query_type, char *hostname_dn, int hostnam
 		return -1;
 
 	/* set up query info (type and class) */
-	qinfo = (struct dns_question *)ptr;
-	qinfo->qtype = htons(query_type);
-	qinfo->qclass = htons(DNS_RCLASS_IN);
+	qinfo.qtype = htons(query_type);
+	qinfo.qclass = htons(DNS_RCLASS_IN);
+	memcpy(ptr, &qinfo, sizeof(qinfo));
 
 	ptr += sizeof(struct dns_question);
 
@@ -928,7 +1037,7 @@ int dns_build_query(int query_id, int query_type, char *hostname_dn, int hostnam
  * In the second case, memory will be allocated.
  * in case of error, -1 is returned, otherwise, number of bytes copied in dn
  */
-char *dns_str_to_dn_label(char *string, char *dn, int dn_len)
+char *dns_str_to_dn_label(const char *string, char *dn, int dn_len)
 {
 	char *c, *d;
 	int i, offset;
@@ -947,7 +1056,7 @@ char *dns_str_to_dn_label(char *string, char *dn, int dn_len)
 	if (dn_len < i + offset)
 		return NULL;
 
-	i = strlen(string) + offset;
+	i = strlen(string);
 	memcpy(dn + offset, string, i);
 	dn[i + offset] = '\0';
 	/* avoid a '\0' at the beginning of dn string which may prevent the for loop
@@ -1054,6 +1163,7 @@ struct task *dns_process_resolve(struct task *t)
 {
 	struct dns_resolvers *resolvers = t->context;
 	struct dns_resolution *resolution, *res_back;
+	int res_preferred_afinet, res_preferred_afinet6;
 
 	/* timeout occurs inevitably for the first element of the FIFO queue */
 	if (LIST_ISEMPTY(&resolvers->curr_resolution)) {
@@ -1072,25 +1182,38 @@ struct task *dns_process_resolve(struct task *t)
 		 * if current resolution has been tried too many times and finishes in timeout
 		 * we update its status and remove it from the list
 		 */
-		if (resolution->try >= resolvers->resolve_retries) {
+		if (resolution->try <= 0) {
 			/* clean up resolution information and remove from the list */
 			dns_reset_resolution(resolution);
 
 			/* notify the result to the requester */
 			resolution->requester_error_cb(resolution, DNS_RESP_TIMEOUT);
+			goto out;
 		}
 
-		/* check current resolution status */
-		if (resolution->step == RSLV_STEP_RUNNING) {
-			/* resend the DNS query */
-			dns_send_query(resolution);
+		resolution->try -= 1;
 
-			/* check if we have more than one resolution in the list */
-			if (dns_check_resolution_queue(resolvers) > 1) {
-				/* move the rsolution to the end of the list */
-				LIST_DEL(&resolution->list);
-				LIST_ADDQ(&resolvers->curr_resolution, &resolution->list);
-			}
+		res_preferred_afinet = resolution->opts->family_prio == AF_INET && resolution->query_type == DNS_RTYPE_A;
+		res_preferred_afinet6 = resolution->opts->family_prio == AF_INET6 && resolution->query_type == DNS_RTYPE_AAAA;
+
+		/* let's change the query type if needed */
+		if (res_preferred_afinet6) {
+			/* fallback from AAAA to A */
+			resolution->query_type = DNS_RTYPE_A;
+		}
+		else if (res_preferred_afinet) {
+			/* fallback from A to AAAA */
+			resolution->query_type = DNS_RTYPE_AAAA;
+		}
+
+		/* resend the DNS query */
+		dns_send_query(resolution);
+
+		/* check if we have more than one resolution in the list */
+		if (dns_check_resolution_queue(resolvers) > 1) {
+			/* move the rsolution to the end of the list */
+			LIST_DEL(&resolution->list);
+			LIST_ADDQ(&resolvers->curr_resolution, &resolution->list);
 		}
 	}
 

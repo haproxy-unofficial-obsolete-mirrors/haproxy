@@ -28,7 +28,6 @@
 
 #include <common/chunk.h>
 #include <common/mini-clist.h>
-#include <types/proto_http.h>
 
 struct arg;
 
@@ -36,8 +35,7 @@ struct arg;
 enum {
 	SMP_T_ANY = 0,   /* any type */
 	SMP_T_BOOL,      /* boolean */
-	SMP_T_UINT,      /* unsigned 32bits integer type */
-	SMP_T_SINT,      /* signed 32bits integer type */
+	SMP_T_SINT,      /* signed 64bits integer type */
 	SMP_T_ADDR,      /* ipv4 or ipv6, only used for input type compatibility */
 	SMP_T_IPV4,      /* ipv4 type */
 	SMP_T_IPV6,      /* ipv6 type */
@@ -212,6 +210,19 @@ enum {
 struct session;
 struct stream;
 
+/* Known HTTP methods */
+enum http_meth_t {
+	HTTP_METH_OPTIONS,
+	HTTP_METH_GET,
+	HTTP_METH_HEAD,
+	HTTP_METH_POST,
+	HTTP_METH_PUT,
+	HTTP_METH_DELETE,
+	HTTP_METH_TRACE,
+	HTTP_METH_CONNECT,
+	HTTP_METH_OTHER, /* Must be the last entry */
+} __attribute__((packed));
+
 /* a sample context might be used by any sample fetch function in order to
  * store information needed across multiple calls (eg: restart point for a
  * next occurrence). By definition it may store up to 8 pointers, or any
@@ -230,20 +241,26 @@ struct meth {
 	struct chunk str;
 };
 
+union sample_value {
+	long long int   sint;  /* used for signed 64bits integers */
+	struct in_addr  ipv4;  /* used for ipv4 addresses */
+	struct in6_addr ipv6;  /* used for ipv6 addresses */
+	struct chunk    str;   /* used for char strings or buffers */
+	struct meth     meth;  /* used for http method */
+};
+
+/* Used to store sample constant */
+struct sample_data {
+	int type;                 /* SMP_T_* */
+	union sample_value u;     /* sample data */
+};
+
 /* a sample is a typed data extracted from a stream. It has a type, contents,
  * validity constraints, a context for use in iterative calls.
  */
 struct sample {
 	unsigned int flags;       /* SMP_F_* */
-	int type;                 /* SMP_T_* */
-	union {
-		unsigned int    uint;  /* used for unsigned 32bits integers and booleans */
-		int             sint;  /* used for signed 32bits integers */
-		struct in_addr  ipv4;  /* used for ipv4 addresses */
-		struct in6_addr ipv6;  /* used for ipv6 addresses */
-		struct chunk    str;   /* used for char strings or buffers */
-		struct meth     meth;  /* used for http method */
-	} data;                        /* sample data */
+	struct sample_data data;
 	union smp_ctx ctx;
 
 	/* Some sample analyzer (sample-fetch or converters) needs to
@@ -253,21 +270,8 @@ struct sample {
 	 */
 	struct proxy *px;
 	struct session *sess;
-	struct stream *strm;
+	struct stream *strm; /* WARNING! MAY BE NULL! (eg: tcp-request connection) */
 	unsigned int opt; /* fetch options (SMP_OPT_*) */
-};
-
-/* Used to store sample constant */
-struct sample_storage {
-	int type;                 /* SMP_T_* */
-	union {
-		unsigned int    uint;  /* used for unsigned 32bits integers and booleans */
-		int             sint;  /* used for signed 32bits integers */
-		struct in_addr  ipv4;  /* used for ipv4 addresses */
-		struct in6_addr ipv6;  /* used for ipv6 addresses */
-		struct chunk    str;   /* used for char strings or buffers */
-		struct meth     meth;  /* used for http method */
-	} data;                        /* sample data */
 };
 
 /* Descriptor for a sample conversion */
@@ -276,7 +280,7 @@ struct sample_conv {
 	int (*process)(const struct arg *arg_p,
 	               struct sample *smp,
 	               void *private);            /* process function */
-	unsigned int arg_mask;                    /* arguments (ARG*()) */
+	uint64_t arg_mask;                        /* arguments (ARG*()) */
 	int (*val_args)(struct arg *arg_p,
 	                struct sample_conv *smp_conv,
 	                const char *file, int line,
@@ -300,7 +304,7 @@ struct sample_fetch {
 	               struct sample *smp,
 	               const char *kw,            /* fetch processing function */
 	               void *private);            /* private value. */
-	unsigned int arg_mask;                    /* arguments (ARG*()) */
+	uint64_t arg_mask;                        /* arguments (ARG*()) */
 	int (*val_args)(struct arg *arg_p,
 			char **err_msg);          /* argument validation function */
 	unsigned long out_type;                   /* output sample type */

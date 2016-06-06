@@ -41,6 +41,46 @@
 #include <proto/ssl_sock.h>
 #endif
 
+struct log_fmt {
+	char *name;
+	struct {
+		struct chunk sep1; /* first pid separator */
+		struct chunk sep2; /* second pid separator */
+	} pid;
+};
+
+static const struct log_fmt log_formats[LOG_FORMATS] = {
+	[LOG_FORMAT_RFC3164] = {
+		.name = "rfc3164",
+		.pid = {
+			.sep1 = { .str = "[",   .len = 1 },
+			.sep2 = { .str = "]: ", .len = 3 }
+		}
+	},
+	[LOG_FORMAT_RFC5424] = {
+		.name = "rfc5424",
+		.pid = {
+			.sep1 = { .str = " ",   .len = 1 },
+			.sep2 = { .str = " - ", .len = 3 }
+		}
+	}
+};
+
+#define FD_SETS_ARE_BITFIELDS
+#ifdef FD_SETS_ARE_BITFIELDS
+/*
+ * This map is used with all the FD_* macros to check whether a particular bit
+ * is set or not. Each bit represents an ACSII code. FD_SET() sets those bytes
+ * which should be escaped. When FD_ISSET() returns non-zero, it means that the
+ * byte should be escaped. Be careful to always pass bytes from 0 to 255
+ * exclusively to the macros.
+ */
+fd_set rfc5424_escape_map[(sizeof(fd_set) > (256/8)) ? 1 : ((256/8) / sizeof(fd_set))];
+
+#else
+#error "Check if your OS uses bitfields for fd_sets"
+#endif
+
 const char *log_facilities[NB_LOG_FACILITIES] = {
 	"kern", "user", "mail", "daemon",
 	"auth", "syslog", "lpr", "news",
@@ -49,7 +89,6 @@ const char *log_facilities[NB_LOG_FACILITIES] = {
 	"local0", "local1", "local2", "local3",
 	"local4", "local5", "local6", "local7"
 };
-
 
 const char *log_levels[NB_LOG_LEVELS] = {
 	"emerg", "alert", "crit", "err",
@@ -88,6 +127,7 @@ static const struct logformat_type logformat_keywords[] = {
 	{ "Tl", LOG_FMT_DATELOCAL, PR_MODE_TCP, LW_INIT, NULL },   /* date local timezone */
 	{ "Tq", LOG_FMT_TQ, PR_MODE_HTTP, LW_BYTES, NULL },       /* Tq */
 	{ "Tr", LOG_FMT_TR, PR_MODE_HTTP, LW_BYTES, NULL },       /* Tr */
+	{ "Td", LOG_FMT_TD, PR_MODE_TCP, LW_BYTES, NULL },       /* Td = Tt - (Tq + Tw + Tc + Tr) */
 	{ "Ts", LOG_FMT_TS, PR_MODE_TCP, LW_INIT, NULL },   /* timestamp GMT */
 	{ "Tt", LOG_FMT_TT, PR_MODE_TCP, LW_BYTES, NULL },       /* Tt */
 	{ "Tw", LOG_FMT_TW, PR_MODE_TCP, LW_BYTES, NULL },       /* Tw */
@@ -111,6 +151,7 @@ static const struct logformat_type logformat_keywords[] = {
 	{ "hsl", LOG_FMT_HDRRESPONSLIST, PR_MODE_TCP, LW_RSPHDR, NULL },  /* header response list */
 	{ "HM", LOG_FMT_HTTP_METHOD, PR_MODE_HTTP, LW_REQ, NULL },  /* HTTP method */
 	{ "HP", LOG_FMT_HTTP_PATH, PR_MODE_HTTP, LW_REQ, NULL },  /* HTTP path */
+	{ "HQ", LOG_FMT_HTTP_QUERY, PR_MODE_HTTP, LW_REQ, NULL },  /* HTTP query */
 	{ "HU", LOG_FMT_HTTP_URI, PR_MODE_HTTP, LW_REQ, NULL },  /* HTTP full URI */
 	{ "HV", LOG_FMT_HTTP_VERSION, PR_MODE_HTTP, LW_REQ, NULL },  /* HTTP version */
 	{ "lc", LOG_FMT_LOGCNT, PR_MODE_TCP, LW_INIT, NULL }, /* log counter */
@@ -150,10 +191,31 @@ char clf_http_log_format[] = "%{+Q}o %{-Q}ci - - [%T] %r %ST %B \"\" \"\" %cp %m
 char default_tcp_log_format[] = "%ci:%cp [%t] %ft %b/%s %Tw/%Tc/%Tt %B %ts %ac/%fc/%bc/%sc/%rc %sq/%bq";
 char *log_format = NULL;
 
-/* This is a global syslog line, common to all outgoing messages. It begins
- * with the syslog tag and the date that are updated by update_log_hdr().
+/* Default string used for structured-data part in RFC5424 formatted
+ * syslog messages.
+ */
+char default_rfc5424_sd_log_format[] = "- ";
+
+/* This is a global syslog header, common to all outgoing messages in
+ * RFC3164 format. It begins with time-based part and is updated by
+ * update_log_hdr().
+ */
+char *logheader = NULL;
+
+/* This is a global syslog header for messages in RFC5424 format. It is
+ * updated by update_log_hdr_rfc5424().
+ */
+char *logheader_rfc5424 = NULL;
+
+/* This is a global syslog message buffer, common to all outgoing
+ * messages. It contains only the data part.
  */
 char *logline = NULL;
+
+/* A global syslog message buffer, common to all RFC5424 syslog messages.
+ * Currently, it is used for generating the structured-data part.
+ */
+char *logline_rfc5424 = NULL;
 
 struct logformat_var_args {
 	char *name;
@@ -165,6 +227,7 @@ struct logformat_var_args var_args_list[] = {
 	{ "M", LOG_OPT_MANDATORY },
 	{ "Q", LOG_OPT_QUOTE },
 	{ "X", LOG_OPT_HEXA },
+	{ "E", LOG_OPT_ESC },
 	{  0,  0 }
 };
 
@@ -174,22 +237,30 @@ struct logformat_var_args var_args_list[] = {
 static inline const char *fmt_directive(const struct proxy *curproxy)
 {
 	switch (curproxy->conf.args.ctx) {
-	case ARGC_UIF:
-		return "unique-id-format";
+	case ARGC_ACL:
+		return "acl";
+	case ARGC_STK:
+		return "stick";
+	case ARGC_TRK:
+		return "track-sc";
+	case ARGC_LOG:
+		return "log-format";
+	case ARGC_LOGSD:
+		return "log-format-sd";
 	case ARGC_HRQ:
 		return "http-request";
 	case ARGC_HRS:
 		return "http-response";
-	case ARGC_STK:
-		return "stick";
-	case ARGC_TRK:
-		return "track-sc"; break;
+	case ARGC_UIF:
+		return "unique-id-format";
 	case ARGC_RDR:
-		return "redirect"; break;
-	case ARGC_ACL:
-		return "acl"; break;
+		return "redirect";
+	case ARGC_CAP:
+		return "capture";
+	case ARGC_SRV:
+		return "server";
 	default:
-		return "log-format";
+		return "undefined(please report this bug)"; /* must never happen */
 	}
 }
 
@@ -269,7 +340,7 @@ int parse_logformat_var(char *arg, int arg_len, char *var, int var_len, struct p
 		if (strlen(logformat_keywords[j].name) == var_len &&
 		    strncmp(var, logformat_keywords[j].name, var_len) == 0) {
 			if (logformat_keywords[j].mode != PR_MODE_HTTP || curproxy->mode == PR_MODE_HTTP) {
-				node = calloc(1, sizeof(struct logformat_node));
+				node = calloc(1, sizeof(*node));
 				node->type = logformat_keywords[j].type;
 				node->options = *defoptions;
 				if (arg_len) {
@@ -326,15 +397,15 @@ void add_to_logformat_list(char *start, char *end, int type, struct list *list_f
 	char *str;
 
 	if (type == LF_TEXT) { /* type text */
-		struct logformat_node *node = calloc(1, sizeof(struct logformat_node));
-		str = calloc(end - start + 1, 1);
+		struct logformat_node *node = calloc(1, sizeof(*node));
+		str = calloc(1, end - start + 1);
 		strncpy(str, start, end - start);
 		str[end - start] = '\0';
 		node->arg = str;
 		node->type = LOG_FMT_TEXT; // type string
 		LIST_ADDQ(list_format, &node->list);
 	} else if (type == LF_SEPARATOR) {
-		struct logformat_node *node = calloc(1, sizeof(struct logformat_node));
+		struct logformat_node *node = calloc(1, sizeof(*node));
 		node->type = LOG_FMT_SEPARATOR;
 		LIST_ADDQ(list_format, &node->list);
 	}
@@ -365,7 +436,7 @@ void add_sample_to_logformat_list(char *text, char *arg, int arg_len, struct pro
 		return;
 	}
 
-	node = calloc(1, sizeof(struct logformat_node));
+	node = calloc(1, sizeof(*node));
 	node->type = LOG_FMT_EXPR;
 	node->expr = expr;
 	node->options = options;
@@ -606,6 +677,20 @@ void qfprintf(FILE *out, const char *fmt, ...)
 }
 
 /*
+ * returns log format for <fmt> or -1 if not found.
+ */
+int get_log_format(const char *fmt)
+{
+	int format;
+
+	format = LOG_FORMATS - 1;
+	while (format >= 0 && strcmp(log_formats[format].name, fmt))
+		format--;
+
+	return format;
+}
+
+/*
  * returns log level for <lev> or -1 if not found.
  */
 int get_log_level(const char *lev)
@@ -618,7 +703,6 @@ int get_log_level(const char *lev)
 
 	return level;
 }
-
 
 /*
  * returns log facility for <fac> or -1 if not found.
@@ -635,8 +719,103 @@ int get_log_facility(const char *fac)
 }
 
 /*
+ * Encode the string.
+ *
+ * When using the +E log format option, it will try to escape '"\]'
+ * characters with '\' as prefix. The same prefix should not be used as
+ * <escape>.
+ */
+static char *lf_encode_string(char *start, char *stop,
+                              const char escape, const fd_set *map,
+                              const char *string,
+                              struct logformat_node *node)
+{
+	if (node->options & LOG_OPT_ESC) {
+		if (start < stop) {
+			stop--; /* reserve one byte for the final '\0' */
+			while (start < stop && *string != '\0') {
+				if (!FD_ISSET((unsigned char)(*string), map)) {
+					if (!FD_ISSET((unsigned char)(*string), rfc5424_escape_map))
+						*start++ = *string;
+					else {
+						if (start + 2 >= stop)
+							break;
+						*start++ = '\\';
+						*start++ = *string;
+					}
+				}
+				else {
+					if (start + 3 >= stop)
+						break;
+					*start++ = escape;
+					*start++ = hextab[(*string >> 4) & 15];
+					*start++ = hextab[*string & 15];
+				}
+				string++;
+			}
+			*start = '\0';
+		}
+	}
+	else {
+		return encode_string(start, stop, escape, map, string);
+	}
+
+	return start;
+}
+
+/*
+ * Encode the chunk.
+ *
+ * When using the +E log format option, it will try to escape '"\]'
+ * characters with '\' as prefix. The same prefix should not be used as
+ * <escape>.
+ */
+static char *lf_encode_chunk(char *start, char *stop,
+                             const char escape, const fd_set *map,
+                             const struct chunk *chunk,
+                             struct logformat_node *node)
+{
+	char *str, *end;
+
+	if (node->options & LOG_OPT_ESC) {
+		if (start < stop) {
+			str = chunk->str;
+			end = chunk->str + chunk->len;
+
+			stop--; /* reserve one byte for the final '\0' */
+			while (start < stop && str < end) {
+				if (!FD_ISSET((unsigned char)(*str), map)) {
+					if (!FD_ISSET((unsigned char)(*str), rfc5424_escape_map))
+						*start++ = *str;
+					else {
+						if (start + 2 >= stop)
+							break;
+						*start++ = '\\';
+						*start++ = *str;
+					}
+				}
+				else {
+					if (start + 3 >= stop)
+						break;
+					*start++ = escape;
+					*start++ = hextab[(*str >> 4) & 15];
+					*start++ = hextab[*str & 15];
+				}
+				str++;
+			}
+			*start = '\0';
+		}
+	}
+	else {
+		return encode_chunk(start, stop, escape, map, chunk);
+	}
+
+	return start;
+}
+
+/*
  * Write a string in the log string
- * Take cares of quote options
+ * Take cares of quote and escape options
  *
  * Return the adress of the \0 character, or NULL on error
  */
@@ -651,9 +830,21 @@ char *lf_text_len(char *dst, const char *src, size_t len, size_t size, struct lo
 	}
 
 	if (src && len) {
-		if (++len > size)
-			len = size;
-		len = strlcpy2(dst, src, len);
+		if (node->options & LOG_OPT_ESC) {
+			struct chunk chunk;
+			char *ret;
+
+			chunk_initlen(&chunk, (char *)src, 0, len);
+			ret = escape_chunk(dst, dst + size, '\\', rfc5424_escape_map, &chunk);
+			if (ret == NULL || *ret != '\0')
+				return NULL;
+			len = ret - dst;
+		}
+		else {
+			if (++len > size)
+				len = size;
+			len = strlcpy2(dst, src, len);
+		}
 
 		size -= len;
 		dst += len;
@@ -727,28 +918,36 @@ char *lf_port(char *dst, struct sockaddr *sockaddr, size_t size, struct logforma
 	return ret;
 }
 
-/* Re-generate the syslog header at the beginning of logline once a second and
- * return the pointer to the first character after the header.
+/* Re-generate time-based part of the syslog header in RFC3164 format at
+ * the beginning of logheader once a second and return the pointer to the
+ * first character after it.
  */
-static char *update_log_hdr(const char *log_tag)
+static char *update_log_hdr(const time_t time)
 {
 	static long tvsec;
 	static char *dataptr = NULL; /* backup of last end of header, NULL first time */
-	int tag_len;
+	static struct chunk host = { NULL, 0, 0 };
+	static int sep = 0;
 
-	if (unlikely(date.tv_sec != tvsec || dataptr == NULL)) {
+	if (unlikely(time != tvsec || dataptr == NULL)) {
 		/* this string is rebuild only once a second */
 		struct tm tm;
 		int hdr_len;
 
-		tvsec = date.tv_sec;
+		tvsec = time;
 		get_localtime(tvsec, &tm);
 
-		hdr_len = snprintf(logline, global.max_syslog_len,
-				   "<<<<>%s %2d %02d:%02d:%02d %s",
+		if (unlikely(global.log_send_hostname != host.str)) {
+			host.str = global.log_send_hostname;
+			host.len = host.str ? strlen(host.str) : 0;
+			sep = host.len ? 1 : 0;
+		}
+
+		hdr_len = snprintf(logheader, global.max_syslog_len,
+				   "<<<<>%s %2d %02d:%02d:%02d %.*s%*s",
 				   monthname[tm.tm_mon],
 				   tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
-				   global.log_send_hostname ? global.log_send_hostname : "");
+				   host.len, host.str, sep, "");
 		/* WARNING: depending upon implementations, snprintf may return
 		 * either -1 or the number of bytes that would be needed to store
 		 * the total message. In both cases, we must adjust it.
@@ -756,50 +955,89 @@ static char *update_log_hdr(const char *log_tag)
 		if (hdr_len < 0 || hdr_len > global.max_syslog_len)
 			hdr_len = global.max_syslog_len;
 
-		dataptr = logline + hdr_len;
+		dataptr = logheader + hdr_len;
 	}
 
 	dataptr[0] = 0; // ensure we get rid of any previous attempt
 
-	tag_len = snprintf(dataptr, logline + global.max_syslog_len - dataptr, "%s[%d]: ", log_tag, pid);
-	if (tag_len < 0 || tag_len > logline + global.max_syslog_len - dataptr)
-		tag_len = logline + global.max_syslog_len - dataptr;
+	return dataptr;
+}
 
-	return dataptr + tag_len;
+/* Re-generate time-based part of the syslog header in RFC5424 format at
+ * the beginning of logheader_rfc5424 once a second and return the pointer
+ * to the first character after it.
+ */
+static char *update_log_hdr_rfc5424(const time_t time)
+{
+	static long tvsec;
+	static char *dataptr = NULL; /* backup of last end of header, NULL first time */
+	const char *gmt_offset;
+
+	if (unlikely(time != tvsec || dataptr == NULL)) {
+		/* this string is rebuild only once a second */
+		struct tm tm;
+		int hdr_len;
+
+		tvsec = time;
+		get_localtime(tvsec, &tm);
+		gmt_offset = get_gmt_offset(time, &tm);
+
+		hdr_len = snprintf(logheader_rfc5424, global.max_syslog_len,
+				   "<<<<>1 %4d-%02d-%02dT%02d:%02d:%02d%.3s:%.2s %s ",
+				   tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
+				   tm.tm_hour, tm.tm_min, tm.tm_sec,
+				   gmt_offset, gmt_offset+3,
+				   global.log_send_hostname ? global.log_send_hostname : hostname);
+		/* WARNING: depending upon implementations, snprintf may return
+		 * either -1 or the number of bytes that would be needed to store
+		 * the total message. In both cases, we must adjust it.
+		 */
+		if (hdr_len < 0 || hdr_len > global.max_syslog_len)
+			hdr_len = global.max_syslog_len;
+
+		dataptr = logheader_rfc5424 + hdr_len;
+	}
+
+	dataptr[0] = 0; // ensure we get rid of any previous attempt
+
+	return dataptr;
 }
 
 /*
- * This function adds a header to the message and sends the syslog message
- * using a printf format string. It expects an LF-terminated message.
+ * This function sends the syslog message using a printf format string. It
+ * expects an LF-terminated message.
  */
 void send_log(struct proxy *p, int level, const char *format, ...)
 {
 	va_list argp;
-	char *dataptr;
 	int  data_len;
 
 	if (level < 0 || format == NULL || logline == NULL)
 		return;
 
-	dataptr = update_log_hdr(p && p->log_tag ? p->log_tag : global.log_tag); /* update log header and skip it */
-	data_len = dataptr - logline;
-
 	va_start(argp, format);
-	data_len += vsnprintf(dataptr, logline + global.max_syslog_len - dataptr, format, argp);
+	data_len = vsnprintf(logline, global.max_syslog_len, format, argp);
 	if (data_len < 0 || data_len > global.max_syslog_len)
 		data_len = global.max_syslog_len;
 	va_end(argp);
 
-	__send_log(p, level, logline, data_len);
+	__send_log(p, level, logline, data_len, default_rfc5424_sd_log_format, 2);
 }
 
 /*
  * This function sends a syslog message.
  * It doesn't care about errors nor does it report them.
- * It overrides the last byte (message[size-1]) with an LF character.
+ * It overrides the last byte of the message vector with an LF character.
+ * The arguments <sd> and <sd_size> are used for the structured-data part
+ * in RFC5424 formatted syslog messages.
  */
-void __send_log(struct proxy *p, int level, char *message, size_t size)
+void __send_log(struct proxy *p, int level, char *message, size_t size, char *sd, size_t sd_size)
 {
+	static struct iovec iovec[NB_MSG_IOVEC_ELEMENTS] = { };
+	static struct msghdr msghdr = {
+		.msg_iov = iovec,
+		.msg_iovlen = NB_MSG_IOVEC_ELEMENTS
+	};
 	static int logfdunix = -1;	/* syslog to AF_UNIX socket */
 	static int logfdinet = -1;	/* syslog to AF_INET socket */
 	static char *dataptr = NULL;
@@ -807,7 +1045,13 @@ void __send_log(struct proxy *p, int level, char *message, size_t size)
 	struct list *logsrvs = NULL;
 	struct logsrv *tmp = NULL;
 	int nblogger;
-	char *log_ptr;
+	char *hdr, *hdr_ptr;
+	size_t hdr_size;
+	time_t time = date.tv_sec;
+	struct chunk *tag = &global.log_tag;
+	static int curr_pid;
+	static char pidstr[100];
+	static struct chunk pid;
 
 	dataptr = message;
 
@@ -819,10 +1063,19 @@ void __send_log(struct proxy *p, int level, char *message, size_t size)
 		if (!LIST_ISEMPTY(&p->logsrvs)) {
 			logsrvs = &p->logsrvs;
 		}
+		if (p->log_tag.str) {
+			tag = &p->log_tag;
+		}
 	}
 
 	if (!logsrvs)
 		return;
+
+	if (unlikely(curr_pid != getpid())) {
+		curr_pid = getpid();
+		ltoa_o(curr_pid, pidstr, sizeof(pidstr));
+		chunk_initstr(&pid, pidstr);
+	}
 
 	/* Send log messages to syslog server. */
 	nblogger = 0;
@@ -830,9 +1083,16 @@ void __send_log(struct proxy *p, int level, char *message, size_t size)
 		const struct logsrv *logsrv = tmp;
 		int *plogfd = logsrv->addr.ss_family == AF_UNIX ?
 			&logfdunix : &logfdinet;
+		char *pid_sep1 = NULL, *pid_sep2 = NULL;
 		int sent;
-		int max;
-		char backup;
+		int maxlen;
+		int hdr_max = 0;
+		int tag_max = 0;
+		int pid_sep1_max = 0;
+		int pid_max = 0;
+		int pid_sep2_max = 0;
+		int sd_max = 0;
+		int max = 0;
 
 		nblogger++;
 
@@ -855,6 +1115,24 @@ void __send_log(struct proxy *p, int level, char *message, size_t size)
 			shutdown(*plogfd, SHUT_RD);
 		}
 
+		switch (logsrv->format) {
+		case LOG_FORMAT_RFC3164:
+			hdr = logheader;
+			hdr_ptr = update_log_hdr(time);
+			break;
+
+		case LOG_FORMAT_RFC5424:
+			hdr = logheader_rfc5424;
+			hdr_ptr = update_log_hdr_rfc5424(time);
+			sd_max = sd_size; /* the SD part allowed only in RFC5424 */
+			break;
+
+		default:
+			continue; /* must never happen */
+		}
+
+		hdr_size = hdr_ptr - hdr;
+
 		/* For each target, we may have a different facility.
 		 * We can also have a different log level for each message.
 		 * This induces variations in the message header length.
@@ -863,33 +1141,99 @@ void __send_log(struct proxy *p, int level, char *message, size_t size)
 		 * and we change the pointer to the header accordingly.
 		 */
 		fac_level = (logsrv->facility << 3) + MAX(level, logsrv->minlvl);
-		log_ptr = dataptr + 3; /* last digit of the log level */
+		hdr_ptr = hdr + 3; /* last digit of the log level */
 		do {
-			*log_ptr = '0' + fac_level % 10;
+			*hdr_ptr = '0' + fac_level % 10;
 			fac_level /= 10;
-			log_ptr--;
-		} while (fac_level && log_ptr > dataptr);
-		*log_ptr = '<';
+			hdr_ptr--;
+		} while (fac_level && hdr_ptr > hdr);
+		*hdr_ptr = '<';
 
-		max = size - (log_ptr - dataptr);
-		if (max > logsrv->maxlen)
-			max = logsrv->maxlen;
+		hdr_max = hdr_size - (hdr_ptr - hdr);
 
-		/* insert a \n at the end of the message, but save what was
-		 * there first because we could have different max lengths
-		 * for different log targets.
-		 */
-		backup = log_ptr[max - 1];
-		log_ptr[max - 1] = '\n';
+		/* time-based header */
+		if (unlikely(hdr_size >= logsrv->maxlen)) {
+			hdr_max = MIN(hdr_max, logsrv->maxlen) - 1;
+			sd_max = 0;
+			goto send;
+		}
 
-		sent = sendto(*plogfd, log_ptr, max,
-			      MSG_DONTWAIT | MSG_NOSIGNAL,
-			      (struct sockaddr *)&logsrv->addr, get_addr_len(&logsrv->addr));
+		maxlen = logsrv->maxlen - hdr_max;
 
-		log_ptr[max - 1] = backup;
+		/* tag */
+		tag_max = tag->len;
+		if (unlikely(tag_max >= maxlen)) {
+			tag_max = maxlen - 1;
+			sd_max = 0;
+			goto send;
+		}
+
+		maxlen -= tag_max;
+
+		/* first pid separator */
+		pid_sep1_max = log_formats[logsrv->format].pid.sep1.len;
+		if (unlikely(pid_sep1_max >= maxlen)) {
+			pid_sep1_max = maxlen - 1;
+			sd_max = 0;
+			goto send;
+		}
+
+		pid_sep1 = log_formats[logsrv->format].pid.sep1.str;
+		maxlen -= pid_sep1_max;
+
+		/* pid */
+		pid_max = pid.len;
+		if (unlikely(pid_max >= maxlen)) {
+			pid_max = maxlen - 1;
+			sd_max = 0;
+			goto send;
+		}
+
+		maxlen -= pid_max;
+
+		/* second pid separator */
+		pid_sep2_max = log_formats[logsrv->format].pid.sep2.len;
+		if (unlikely(pid_sep2_max >= maxlen)) {
+			pid_sep2_max = maxlen - 1;
+			sd_max = 0;
+			goto send;
+		}
+
+		pid_sep2 = log_formats[logsrv->format].pid.sep2.str;
+		maxlen -= pid_sep2_max;
+
+		/* structured-data */
+		if (sd_max >= maxlen) {
+			sd_max = maxlen - 1;
+			goto send;
+		}
+
+		max = MIN(size, maxlen - sd_max) - 1;
+send:
+		iovec[0].iov_base = hdr_ptr;
+		iovec[0].iov_len  = hdr_max;
+		iovec[1].iov_base = tag->str;
+		iovec[1].iov_len  = tag_max;
+		iovec[2].iov_base = pid_sep1;
+		iovec[2].iov_len  = pid_sep1_max;
+		iovec[3].iov_base = pid.str;
+		iovec[3].iov_len  = pid_max;
+		iovec[4].iov_base = pid_sep2;
+		iovec[4].iov_len  = pid_sep2_max;
+		iovec[5].iov_base = sd;
+		iovec[5].iov_len  = sd_max;
+		iovec[6].iov_base = dataptr;
+		iovec[6].iov_len  = max;
+		iovec[7].iov_base = "\n"; /* insert a \n at the end of the message */
+		iovec[7].iov_len  = 1;
+
+		msghdr.msg_name = (struct sockaddr *)&logsrv->addr;
+		msghdr.msg_namelen = get_addr_len(&logsrv->addr);
+
+		sent = sendmsg(*plogfd, &msghdr, MSG_DONTWAIT | MSG_NOSIGNAL);
 
 		if (sent < 0) {
-			Alert("sendto logger #%d failed: %s (errno=%d)\n",
+			Alert("sendmsg logger #%d failed: %s (errno=%d)\n",
 				nblogger, strerror(errno), errno);
 		}
 	}
@@ -917,6 +1261,26 @@ const char sess_set_cookie[8] = "NPDIRU67";	/* No set-cookie, Set-cookie found a
 		} while(0)
 
 
+/* Initializes some log data.
+ */
+void init_log()
+{
+	char *tmp;
+
+	/* Initialize the escape map for the RFC5424 structured-data : '"\]'
+	 * inside PARAM-VALUE should be escaped with '\' as prefix.
+	 * See https://tools.ietf.org/html/rfc5424#section-6.3.3 for more
+	 * details.
+	 */
+	memset(rfc5424_escape_map, 0, sizeof(rfc5424_escape_map));
+
+	tmp = "\"\\]";
+	while (*tmp) {
+		FD_SET(*tmp, rfc5424_escape_map);
+		tmp++;
+	}
+}
+
 /* Builds a log line in <dst> based on <list_format>, and stops before reaching
  * <maxsize> characters. Returns the size of the output string in characters,
  * not counting the trailing zero which is always added if the resulting size
@@ -931,6 +1295,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 	struct chunk chunk;
 	char *uri;
 	char *spc;
+	char *qmark;
 	char *end;
 	struct tm tm;
 	int t_request;
@@ -984,10 +1349,10 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				if (!key && (tmp->options & LOG_OPT_RES_CAP))
 					key = sample_fetch_as_type(be, sess, s, SMP_OPT_DIR_RES|SMP_OPT_FINAL, tmp->expr, SMP_T_STR);
 				if (tmp->options & LOG_OPT_HTTP)
-					ret = encode_chunk(tmplog, dst + maxsize,
-					                   '%', http_encode_map, key ? &key->data.str : &empty);
+					ret = lf_encode_chunk(tmplog, dst + maxsize,
+					                      '%', http_encode_map, key ? &key->data.u.str : &empty, tmp);
 				else
-					ret = lf_text_len(tmplog, key ? key->data.str.str : NULL, key ? key->data.str.len : 0, dst + maxsize - tmplog, tmp);
+					ret = lf_text_len(tmplog, key ? key->data.u.str.str : NULL, key ? key->data.u.str.len : 0, dst + maxsize - tmplog, tmp);
 				if (ret == 0)
 					goto out;
 				tmplog = ret;
@@ -1131,7 +1496,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 
 			case LOG_FMT_DATELOCAL: // %Tl
 				get_localtime(s->logs.accept_date.tv_sec, &tm);
-				ret = localdate2str_log(tmplog, &tm, dst + maxsize - tmplog);
+				ret = localdate2str_log(tmplog, s->logs.accept_date.tv_sec, &tm, dst + maxsize - tmplog);
 				if (ret == NULL)
 					goto out;
 				tmplog = ret;
@@ -1291,6 +1656,19 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				last_isspace = 0;
 				break;
 
+			case LOG_FMT_TD: // %Td
+				if (s->be->mode == PR_MODE_HTTP)
+					ret = ltoa_o((s->logs.t_data >= 0) ? s->logs.t_close - s->logs.t_data : -1,
+					             tmplog, dst + maxsize - tmplog);
+				else
+					ret = ltoa_o((s->logs.t_connect >= 0) ? s->logs.t_close - s->logs.t_connect : -1,
+					             tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
 			case LOG_FMT_TT:  // %Tt
 				if (!(fe->to_log & LW_BYTES))
 					LOGCHAR('+');
@@ -1302,7 +1680,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_STATUS: // %ST
-				ret = ltoa_o(txn->status, tmplog, dst + maxsize - tmplog);
+				ret = ltoa_o(txn ? txn->status : 0, tmplog, dst + maxsize - tmplog);
 				if (ret == NULL)
 					goto out;
 				tmplog = ret;
@@ -1328,7 +1706,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_CCLIENT: // %CC
-				src = txn->cli_cookie;
+				src = txn ? txn->cli_cookie : NULL;
 				ret = lf_text(tmplog, src, dst + maxsize - tmplog, tmp);
 				if (ret == NULL)
 					goto out;
@@ -1337,7 +1715,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_CSERVER: // %CS
-				src = txn->srv_cookie;
+				src = txn ? txn->srv_cookie : NULL;
 				ret = lf_text(tmplog, src, dst + maxsize - tmplog, tmp);
 				if (ret == NULL)
 					goto out;
@@ -1355,8 +1733,8 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 			case LOG_FMT_TERMSTATE_CK: // %tsc, same as TS with cookie state (for mode HTTP)
 				LOGCHAR(sess_term_cond[(s->flags & SF_ERR_MASK) >> SF_ERR_SHIFT]);
 				LOGCHAR(sess_fin_state[(s->flags & SF_FINST_MASK) >> SF_FINST_SHIFT]);
-				LOGCHAR((be->ck_opts & PR_CK_ANY) ? sess_cookie[(txn->flags & TX_CK_MASK) >> TX_CK_SHIFT] : '-');
-				LOGCHAR((be->ck_opts & PR_CK_ANY) ? sess_set_cookie[(txn->flags & TX_SCK_MASK) >> TX_SCK_SHIFT] : '-');
+				LOGCHAR((txn && (be->ck_opts & PR_CK_ANY)) ? sess_cookie[(txn->flags & TX_CK_MASK) >> TX_CK_SHIFT] : '-');
+				LOGCHAR((txn && (be->ck_opts & PR_CK_ANY)) ? sess_set_cookie[(txn->flags & TX_SCK_MASK) >> TX_SCK_SHIFT] : '-');
 				last_isspace = 0;
 				break;
 
@@ -1432,8 +1810,8 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 						if (hdr)
 							LOGCHAR('|');
 						if (s->req_cap[hdr] != NULL) {
-							ret = encode_string(tmplog, dst + maxsize,
-									       '#', hdr_encode_map, s->req_cap[hdr]);
+							ret = lf_encode_string(tmplog, dst + maxsize,
+							                       '#', hdr_encode_map, s->req_cap[hdr], tmp);
 							if (ret == NULL || *ret != '\0')
 								goto out;
 							tmplog = ret;
@@ -1455,8 +1833,8 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 						if (tmp->options & LOG_OPT_QUOTE)
 							LOGCHAR('"');
 						if (s->req_cap[hdr] != NULL) {
-							ret = encode_string(tmplog, dst + maxsize,
-									       '#', hdr_encode_map, s->req_cap[hdr]);
+							ret = lf_encode_string(tmplog, dst + maxsize,
+							                       '#', hdr_encode_map, s->req_cap[hdr], tmp);
 							if (ret == NULL || *ret != '\0')
 								goto out;
 							tmplog = ret;
@@ -1480,8 +1858,8 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 						if (hdr)
 							LOGCHAR('|');
 						if (s->res_cap[hdr] != NULL) {
-							ret = encode_string(tmplog, dst + maxsize,
-							                    '#', hdr_encode_map, s->res_cap[hdr]);
+							ret = lf_encode_string(tmplog, dst + maxsize,
+							                       '#', hdr_encode_map, s->res_cap[hdr], tmp);
 							if (ret == NULL || *ret != '\0')
 								goto out;
 							tmplog = ret;
@@ -1503,8 +1881,8 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 						if (tmp->options & LOG_OPT_QUOTE)
 							LOGCHAR('"');
 						if (s->res_cap[hdr] != NULL) {
-							ret = encode_string(tmplog, dst + maxsize,
-							                    '#', hdr_encode_map, s->res_cap[hdr]);
+							ret = lf_encode_string(tmplog, dst + maxsize,
+							                       '#', hdr_encode_map, s->res_cap[hdr], tmp);
 							if (ret == NULL || *ret != '\0')
 								goto out;
 							tmplog = ret;
@@ -1521,9 +1899,9 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				/* Request */
 				if (tmp->options & LOG_OPT_QUOTE)
 					LOGCHAR('"');
-				uri = txn->uri ? txn->uri : "<BADREQ>";
-				ret = encode_string(tmplog, dst + maxsize,
-						       '#', url_encode_map, uri);
+				uri = txn && txn->uri ? txn->uri : "<BADREQ>";
+				ret = lf_encode_string(tmplog, dst + maxsize,
+				                       '#', url_encode_map, uri, tmp);
 				if (ret == NULL || *ret != '\0')
 					goto out;
 				tmplog = ret;
@@ -1533,7 +1911,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_HTTP_PATH: // %HP
-				uri = txn->uri ? txn->uri : "<BADREQ>";
+				uri = txn && txn->uri ? txn->uri : "<BADREQ>";
 
 				if (tmp->options & LOG_OPT_QUOTE)
 					LOGCHAR('"');
@@ -1553,7 +1931,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				while (spc < end && *spc != '?' && !HTTP_IS_SPHT(*spc))
 					spc++;
 
-				if (!txn->uri || nspaces == 0) {
+				if (!txn || !txn->uri || nspaces == 0) {
 					chunk.str = "<BADREQ>";
 					chunk.len = strlen("<BADREQ>");
 				} else {
@@ -1561,7 +1939,41 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 					chunk.len = spc - uri;
 				}
 
-				ret = encode_chunk(tmplog, dst + maxsize, '#', url_encode_map, &chunk);
+				ret = lf_encode_chunk(tmplog, dst + maxsize, '#', url_encode_map, &chunk, tmp);
+				if (ret == NULL || *ret != '\0')
+					goto out;
+
+				tmplog = ret;
+				if (tmp->options & LOG_OPT_QUOTE)
+					LOGCHAR('"');
+
+				last_isspace = 0;
+				break;
+
+			case LOG_FMT_HTTP_QUERY: // %HQ
+				if (tmp->options & LOG_OPT_QUOTE)
+					LOGCHAR('"');
+
+				if (!txn || !txn->uri) {
+					chunk.str = "<BADREQ>";
+					chunk.len = strlen("<BADREQ>");
+				} else {
+					uri = txn->uri;
+					end = uri + strlen(uri);
+					// look for the first question mark
+					while (uri < end && *uri != '?')
+						uri++;
+
+					qmark = uri;
+					// look for first space or question mark after url
+					while (uri < end && !HTTP_IS_SPHT(*uri))
+						uri++;
+
+					chunk.str = qmark;
+					chunk.len = uri - qmark;
+				}
+
+				ret = lf_encode_chunk(tmplog, dst + maxsize, '#', url_encode_map, &chunk, tmp);
 				if (ret == NULL || *ret != '\0')
 					goto out;
 
@@ -1573,7 +1985,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_HTTP_URI: // %HU
-				uri = txn->uri ? txn->uri : "<BADREQ>";
+				uri = txn && txn->uri ? txn->uri : "<BADREQ>";
 
 				if (tmp->options & LOG_OPT_QUOTE)
 					LOGCHAR('"');
@@ -1593,7 +2005,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				while (spc < end && !HTTP_IS_SPHT(*spc))
 					spc++;
 
-				if (!txn->uri || nspaces == 0) {
+				if (!txn || !txn->uri || nspaces == 0) {
 					chunk.str = "<BADREQ>";
 					chunk.len = strlen("<BADREQ>");
 				} else {
@@ -1601,7 +2013,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 					chunk.len = spc - uri;
 				}
 
-				ret = encode_chunk(tmplog, dst + maxsize, '#', url_encode_map, &chunk);
+				ret = lf_encode_chunk(tmplog, dst + maxsize, '#', url_encode_map, &chunk, tmp);
 				if (ret == NULL || *ret != '\0')
 					goto out;
 
@@ -1613,7 +2025,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_HTTP_METHOD: // %HM
-				uri = txn->uri ? txn->uri : "<BADREQ>";
+				uri = txn && txn->uri ? txn->uri : "<BADREQ>";
 				if (tmp->options & LOG_OPT_QUOTE)
 					LOGCHAR('"');
 
@@ -1631,7 +2043,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 					chunk.len = spc - uri;
 				}
 
-				ret = encode_chunk(tmplog, dst + maxsize, '#', url_encode_map, &chunk);
+				ret = lf_encode_chunk(tmplog, dst + maxsize, '#', url_encode_map, &chunk, tmp);
 				if (ret == NULL || *ret != '\0')
 					goto out;
 
@@ -1643,7 +2055,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				break;
 
 			case LOG_FMT_HTTP_VERSION: // %HV
-				uri = txn->uri ? txn->uri : "<BADREQ>";
+				uri = txn && txn->uri ? txn->uri : "<BADREQ>";
 				if (tmp->options & LOG_OPT_QUOTE)
 					LOGCHAR('"');
 
@@ -1665,7 +2077,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				while (uri < end && HTTP_IS_SPHT(*uri))
 					uri++;
 
-				if (!txn->uri || nspaces == 0) {
+				if (!txn || !txn->uri || nspaces == 0) {
 					chunk.str = "<BADREQ>";
 					chunk.len = strlen("<BADREQ>");
 				} else if (uri == end) {
@@ -1676,7 +2088,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 					chunk.len = end - uri;
 				}
 
-				ret = encode_chunk(tmplog, dst + maxsize, '#', url_encode_map, &chunk);
+				ret = lf_encode_chunk(tmplog, dst + maxsize, '#', url_encode_map, &chunk, tmp);
 				if (ret == NULL || *ret != '\0')
 					goto out;
 
@@ -1771,8 +2183,8 @@ out:
 void strm_log(struct stream *s)
 {
 	struct session *sess = s->sess;
-	char *tmplog;
 	int size, err, level;
+	int sd_size = 0;
 
 	/* if we don't want to log normal traffic, return now */
 	err = (s->flags & SF_REDISP) ||
@@ -1806,12 +2218,15 @@ void strm_log(struct stream *s)
 			build_logline(s, s->unique_id, UNIQUEID_LEN, &sess->fe->format_unique_id);
 	}
 
-	tmplog = update_log_hdr(sess->fe->log_tag ? sess->fe->log_tag : global.log_tag);
-	size = tmplog - logline;
-	size += build_logline(s, tmplog, global.max_syslog_len - size, &sess->fe->logformat);
+	if (!LIST_ISEMPTY(&sess->fe->logformat_sd)) {
+		sd_size = build_logline(s, logline_rfc5424, global.max_syslog_len,
+		                        &sess->fe->logformat_sd);
+	}
+
+	size = build_logline(s, logline, global.max_syslog_len, &sess->fe->logformat);
 	if (size > 0) {
 		sess->fe->log_count++;
-		__send_log(sess->fe, level, logline, size + 1);
+		__send_log(sess->fe, level, logline, size + 1, logline_rfc5424, sd_size);
 		s->logs.logwait = 0;
 	}
 }

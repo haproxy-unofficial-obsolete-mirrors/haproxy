@@ -30,6 +30,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <common/chunk.h>
 #include <common/config.h>
 #include <eb32tree.h>
@@ -105,6 +106,7 @@ extern int strlcpy2(char *dst, const char *src, int size);
  */
 extern char itoa_str[][171];
 extern char *ultoa_r(unsigned long n, char *buffer, int size);
+extern char *lltoa_r(long long int n, char *buffer, int size);
 extern char *sltoa_r(long n, char *buffer, int size);
 extern const char *ulltoh_r(unsigned long long n, char *buffer, int size);
 static inline const char *ultoa(unsigned long n)
@@ -273,9 +275,10 @@ extern const char *invalid_domainchar(const char *name);
  * The IPv6 '::' address is IN6ADDR_ANY, so in order to bind to a given port on
  * IPv6, use ":::port". NULL is returned if the host part cannot be resolved.
  * If <pfx> is non-null, it is used as a string prefix before any path-based
- * address (typically the path to a unix socket).
+ * address (typically the path to a unix socket). If use_dns is not true,
+ * the funtion cannot accept the DNS resolution.
  */
-struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high, char **err, const char *pfx);
+struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high, char **err, const char *pfx, char **fqdn, int use_dns);
 
 /* converts <str> to a struct in_addr containing a network mask. It can be
  * passed in dotted form (255.255.255.0) or in CIDR form (24). It returns 1
@@ -377,6 +380,17 @@ char *encode_chunk(char *start, char *stop,
                    const char escape, const fd_set *map,
                    const struct chunk *chunk);
 
+/*
+ * Tries to prefix characters tagged in the <map> with the <escape>
+ * character. <chunk> contains the input to be escaped. The result will be
+ * stored between <start> (included) and <stop> (excluded). The function
+ * will always try to terminate the resulting string with a '\0' before
+ * <stop>, and will return its position if the conversion completes.
+ */
+char *escape_chunk(char *start, char *stop,
+                   const char escape, const fd_set *map,
+                   const struct chunk *chunk);
+
 
 /* Check a string for using it in a CSV output format. If the string contains
  * one of the following four char <">, <,>, CR or LF, the string is
@@ -385,25 +399,34 @@ char *encode_chunk(char *start, char *stop,
  * the input string is null-terminated.
  *
  * If <quote> is 0, the result is returned escaped but without double quote.
- * Is it useful if the escaped string is used between double quotes in the
+ * It is useful if the escaped string is used between double quotes in the
  * format.
  *
- *    printf("..., \"%s\", ...\r\n", csv_enc(str, 0));
+ *    printf("..., \"%s\", ...\r\n", csv_enc(str, 0, &trash));
  *
- * If the <quote> is 1, the converter put the quotes only if any character is
- * escaped. If the <quote> is 2, the converter put always the quotes.
+ * If <quote> is 1, the converter puts the quotes only if any character is
+ * escaped. If <quote> is 2, the converter always puts the quotes.
  *
- * <output> is a struct chunk used for storing the output string if any
- * change will be done.
+ * <output> is a struct chunk used for storing the output string.
  *
- * The function returns the converted string on this output. If an error
- * occurs, the function return an empty string. This type of output is useful
+ * The function returns the converted string on its output. If an error
+ * occurs, the function returns an empty string. This type of output is useful
  * for using the function directly as printf() argument.
  *
- * If the output buffer is too short to conatin the input string, the result
+ * If the output buffer is too short to contain the input string, the result
  * is truncated.
+ *
+ * This function appends the encoding to the existing output chunk. Please
+ * use csv_enc() instead if you want to replace the output chunk.
  */
-const char *csv_enc(const char *str, int quote, struct chunk *output);
+const char *csv_enc_append(const char *str, int quote, struct chunk *output);
+
+/* same as above but the output chunk is reset first */
+static inline const char *csv_enc(const char *str, int quote, struct chunk *output)
+{
+	chunk_reset(output);
+	return csv_enc_append(str, quote, output);
+}
 
 /* Decode an URL-encoded string in-place. The resulting string might
  * be shorter. If some forbidden characters are found, the conversion is
@@ -494,6 +517,9 @@ static inline unsigned int __read_uint(const char **s, const char *end)
 	*s = ptr;
 	return i;
 }
+
+unsigned long long int read_uint64(const char **s, const char *end);
+long long int read_int64(const char **s, const char *end);
 
 extern unsigned int str2ui(const char *s);
 extern unsigned int str2uic(const char *s);
@@ -806,6 +832,16 @@ static inline int set_host_port(struct sockaddr_storage *addr, int port)
 	return 0;
 }
 
+/* Convert mask from bit length form to in_addr form.
+ * This function never fails.
+ */
+void len2mask4(int len, struct in_addr *addr);
+
+/* Convert mask from bit length form to in6_addr form.
+ * This function never fails.
+ */
+void len2mask6(int len, struct in6_addr *addr);
+
 /* Return true if IPv4 address is part of the network */
 extern int in_net_ipv4(struct in_addr *addr, struct in_addr *mask, struct in_addr *net);
 
@@ -824,9 +860,6 @@ char *human_time(int t, short hz_div);
 
 extern const char *monthname[];
 
-/* numeric timezone (that is, the hour and minute offset from UTC) */
-char localtimezone[6];
-
 /* date2str_log: write a date in the format :
  * 	sprintf(str, "%02d/%s/%04d:%02d:%02d:%02d.%03d",
  *		tm.tm_mday, monthname[tm.tm_mon], tm.tm_year+1900,
@@ -837,6 +870,13 @@ char localtimezone[6];
  */
 char *date2str_log(char *dest, struct tm *tm, struct timeval *date, size_t size);
 
+/* Return the GMT offset for a specific local time.
+ * Both t and tm must represent the same time.
+ * The string returned has the same format as returned by strftime(... "%z", tm).
+ * Offsets are kept in an internal cache for better performances.
+ */
+const char *get_gmt_offset(time_t t, struct tm *tm);
+
 /* gmt2str_log: write a date in the format :
  * "%02d/%s/%04d:%02d:%02d:%02d +0000" without using snprintf
  * return a pointer to the last char written (\0) or
@@ -846,10 +886,20 @@ char *gmt2str_log(char *dst, struct tm *tm, size_t size);
 
 /* localdate2str_log: write a date in the format :
  * "%02d/%s/%04d:%02d:%02d:%02d +0000(local timezone)" without using snprintf
+ * Both t and tm must represent the same time.
  * return a pointer to the last char written (\0) or
  * NULL if there isn't enough space.
  */
-char *localdate2str_log(char *dst, struct tm *tm, size_t size);
+char *localdate2str_log(char *dst, time_t t, struct tm *tm, size_t size);
+
+/* These 3 functions parses date string and fills the
+ * corresponding broken-down time in <tm>. In succes case,
+ * it returns 1, otherwise, it returns 0.
+ */
+int parse_http_date(const char *date, int len, struct tm *tm);
+int parse_imf_date(const char *date, int len, struct tm *tm);
+int parse_rfc850_date(const char *date, int len, struct tm *tm);
+int parse_asctime_date(const char *date, int len, struct tm *tm);
 
 /* Dynamically allocates a string of the proper length to hold the formatted
  * output. NULL is returned on error. The caller is responsible for freeing the
@@ -988,6 +1038,34 @@ static inline unsigned char utf8_return_length(unsigned char code)
 	return code & 0x0f;
 }
 
+/* Turns 64-bit value <a> from host byte order to network byte order.
+ * The principle consists in letting the compiler detect we're playing
+ * with a union and simplify most or all operations. The asm-optimized
+ * htonl() version involving bswap (x86) / rev (arm) / other is a single
+ * operation on little endian, or a NOP on big-endian. In both cases,
+ * this lets the compiler "see" that we're rebuilding a 64-bit word from
+ * two 32-bit quantities that fit into a 32-bit register. In big endian,
+ * the whole code is optimized out. In little endian, with a decent compiler,
+ * a few bswap and 2 shifts are left, which is the minimum acceptable.
+ */
+static inline unsigned long long my_htonll(unsigned long long a)
+{
+	union {
+		struct {
+			unsigned int w1;
+			unsigned int w2;
+		} by32;
+		unsigned long long by64;
+	} w = { .by64 = a };
+	return ((unsigned long long)htonl(w.by32.w1) << 32) | htonl(w.by32.w2);
+}
+
+/* Turns 64-bit value <a> from network byte order to host byte order. */
+static inline unsigned long long my_ntohll(unsigned long long a)
+{
+	return my_htonll(a);
+}
+
 /* returns a 64-bit a timestamp with the finest resolution available. The
  * unit is intentionally not specified. It's mostly used to compare dates.
  */
@@ -1006,5 +1084,13 @@ static inline unsigned long long rdtsc()
 	return tv.tv_sec * 1000000 + tv.tv_usec;
 }
 #endif
+
+/* append a copy of string <str> (in a wordlist) at the end of the list <li>
+ * On failure : return 0 and <err> filled with an error message.
+ * The caller is responsible for freeing the <err> and <str> copy
+ * memory area using free()
+ */
+struct list;
+int list_append_word(struct list *li, const char *str, char **err);
 
 #endif /* _COMMON_STANDARD_H */

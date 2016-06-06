@@ -20,11 +20,13 @@
 #include <proto/log.h>
 
 static struct list pools = LIST_HEAD_INIT(pools);
-char mem_poison_byte = 0;
+int mem_poison_byte = -1;
 
 /* Try to find an existing shared pool with the same characteristics and
  * returns it, otherwise creates this one. NULL is returned if no memory
- * is available for a new creation.
+ * is available for a new creation. Two flags are supported :
+ *   - MEM_F_SHARED to indicate that the pool may be shared with other users
+ *   - MEM_F_EXACT to indicate that the size must not be rounded up
  */
 struct pool_head *create_pool(char *name, unsigned int size, unsigned int flags)
 {
@@ -33,14 +35,18 @@ struct pool_head *create_pool(char *name, unsigned int size, unsigned int flags)
 	struct list *start;
 	unsigned int align;
 
-	/* We need to store at least a (void *) in the chunks. Since we know
+	/* We need to store a (void *) at the end of the chunks. Since we know
 	 * that the malloc() function will never return such a small size,
 	 * let's round the size up to something slightly bigger, in order to
 	 * ease merging of entries. Note that the rounding is a power of two.
+	 * This extra (void *) is not accounted for in the size computation
+	 * so that the visible parts outside are not affected.
 	 */
 
-	align = 16;
-	size  = (size + align - 1) & -align;
+	if (!(flags & MEM_F_EXACT)) {
+		align = 16;
+		size  = ((size + POOL_EXTRA + align - 1) & -align) - POOL_EXTRA;
+	}
 
 	start = &pools;
 	pool = NULL;
@@ -99,8 +105,9 @@ void *pool_refill_alloc(struct pool_head *pool, unsigned int avail)
 		if (pool->limit && pool->allocated >= pool->limit)
 			return NULL;
 
-		ptr = MALLOC(pool->size);
+		ptr = MALLOC(pool->size + POOL_EXTRA);
 		if (!ptr) {
+			pool->failed++;
 			if (failed)
 				return NULL;
 			failed++;
@@ -110,10 +117,14 @@ void *pool_refill_alloc(struct pool_head *pool, unsigned int avail)
 		if (++pool->allocated > avail)
 			break;
 
-		*(void **)ptr = (void *)pool->free_list;
+		*POOL_LINK(pool, ptr) = (void *)pool->free_list;
 		pool->free_list = ptr;
 	}
 	pool->used++;
+#ifdef DEBUG_MEMORY_POOLS
+	/* keep track of where the element was allocated from */
+	*POOL_LINK(pool, ptr) = (void *)pool;
+#endif
 	return ptr;
 }
 
@@ -129,7 +140,7 @@ void pool_flush2(struct pool_head *pool)
 	next = pool->free_list;
 	while (next) {
 		temp = next;
-		next = *(void **)temp;
+		next = *POOL_LINK(pool, temp);
 		pool->allocated--;
 		FREE(temp);
 	}
@@ -158,7 +169,7 @@ void pool_gc2()
 		while (next &&
 		       (int)(entry->allocated - entry->used) > (int)entry->minavail) {
 			temp = next;
-			next = *(void **)temp;
+			next = *POOL_LINK(entry, temp);
 			entry->allocated--;
 			FREE(temp);
 		}
@@ -200,9 +211,9 @@ void dump_pools_to_trash()
 	allocated = used = nbpools = 0;
 	chunk_printf(&trash, "Dumping pools usage. Use SIGQUIT to flush them.\n");
 	list_for_each_entry(entry, &pools, list) {
-		chunk_appendf(&trash, "  - Pool %s (%d bytes) : %d allocated (%u bytes), %d used, %d users%s\n",
+		chunk_appendf(&trash, "  - Pool %s (%d bytes) : %d allocated (%u bytes), %d used, %d failures, %d users%s\n",
 			 entry->name, entry->size, entry->allocated,
-			 entry->size * entry->allocated, entry->used,
+		         entry->size * entry->allocated, entry->used, entry->failed,
 			 entry->users, (entry->flags & MEM_F_SHARED) ? " [SHARED]" : "");
 
 		allocated += entry->allocated * entry->size;
@@ -218,6 +229,39 @@ void dump_pools(void)
 {
 	dump_pools_to_trash();
 	qfprintf(stderr, "%s", trash.str);
+}
+
+/* This function returns the total number of failed pool allocations */
+int pool_total_failures()
+{
+	struct pool_head *entry;
+	int failed = 0;
+
+	list_for_each_entry(entry, &pools, list)
+		failed += entry->failed;
+	return failed;
+}
+
+/* This function returns the total amount of memory allocated in pools (in bytes) */
+unsigned long pool_total_allocated()
+{
+	struct pool_head *entry;
+	unsigned long allocated = 0;
+
+	list_for_each_entry(entry, &pools, list)
+		allocated += entry->allocated * entry->size;
+	return allocated;
+}
+
+/* This function returns the total amount of memory used in pools (in bytes) */
+unsigned long pool_total_used()
+{
+	struct pool_head *entry;
+	unsigned long used = 0;
+
+	list_for_each_entry(entry, &pools, list)
+		used += entry->used * entry->size;
+	return used;
 }
 
 /*

@@ -35,8 +35,8 @@ smp_fetch_wait_end(const struct arg *args, struct sample *smp, const char *kw, v
 		smp->flags |= SMP_F_MAY_CHANGE;
 		return 0;
 	}
-	smp->type = SMP_T_BOOL;
-	smp->data.uint = 1;
+	smp->data.type = SMP_T_BOOL;
+	smp->data.u.sint = 1;
 	return 1;
 }
 
@@ -46,16 +46,273 @@ smp_fetch_len(const struct arg *args, struct sample *smp, const char *kw, void *
 {
 	struct channel *chn;
 
-	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
-	if (!chn->buf)
+	if (!smp->strm)
 		return 0;
 
-	smp->type = SMP_T_UINT;
-	smp->data.uint = chn->buf->i;
+	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = chn->buf->i;
 	smp->flags = SMP_F_VOLATILE | SMP_F_MAY_CHANGE;
 	return 1;
 }
 
+/* Returns 0 if the client didn't send a SessionTicket Extension
+ * Returns 1 if the client sent SessionTicket Extension
+ * Returns 2 if the client also sent non-zero length SessionTicket
+ * Returns SMP_T_SINT data type
+ */
+static int
+smp_fetch_req_ssl_st_ext(const struct arg *args, struct sample *smp, const char *kw, void *private)
+{
+	int hs_len, ext_len, bleft;
+	struct channel *chn;
+	unsigned char *data;
+
+	if (!smp->strm)
+		goto not_ssl_hello;
+
+	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
+	bleft = chn->buf->i;
+	data = (unsigned char *)chn->buf->p;
+
+	/* Check for SSL/TLS Handshake */
+	if (!bleft)
+		goto too_short;
+	if (*data != 0x16)
+		goto not_ssl_hello;
+
+	/* Check for SSLv3 or later (SSL version >= 3.0) in the record layer*/
+	if (bleft < 3)
+		goto too_short;
+	if (data[1] < 0x03)
+		goto not_ssl_hello;
+
+	if (bleft < 5)
+		goto too_short;
+	hs_len = (data[3] << 8) + data[4];
+	if (hs_len < 1 + 3 + 2 + 32 + 1 + 2 + 2 + 1 + 1 + 2 + 2)
+		goto not_ssl_hello; /* too short to have an extension */
+
+	data += 5; /* enter TLS handshake */
+	bleft -= 5;
+
+	/* Check for a complete client hello starting at <data> */
+	if (bleft < 1)
+		goto too_short;
+	if (data[0] != 0x01) /* msg_type = Client Hello */
+		goto not_ssl_hello;
+
+	/* Check the Hello's length */
+	if (bleft < 4)
+		goto too_short;
+	hs_len = (data[1] << 16) + (data[2] << 8) + data[3];
+	if (hs_len < 2 + 32 + 1 + 2 + 2 + 1 + 1 + 2 + 2)
+		goto not_ssl_hello; /* too short to have an extension */
+
+	/* We want the full handshake here */
+	if (bleft < hs_len)
+		goto too_short;
+
+	data += 4;
+	/* Start of the ClientHello message */
+	if (data[0] < 0x03 || data[1] < 0x01) /* TLSv1 minimum */
+		goto not_ssl_hello;
+
+	ext_len = data[34]; /* session_id_len */
+	if (ext_len > 32 || ext_len > (hs_len - 35)) /* check for correct session_id len */
+		goto not_ssl_hello;
+
+	/* Jump to cipher suite */
+	hs_len -= 35 + ext_len;
+	data   += 35 + ext_len;
+
+	if (hs_len < 4 ||                               /* minimum one cipher */
+	    (ext_len = (data[0] << 8) + data[1]) < 2 || /* minimum 2 bytes for a cipher */
+	    ext_len > hs_len)
+		goto not_ssl_hello;
+
+	/* Jump to the compression methods */
+	hs_len -= 2 + ext_len;
+	data   += 2 + ext_len;
+
+	if (hs_len < 2 ||                       /* minimum one compression method */
+	    data[0] < 1 || data[0] > hs_len)    /* minimum 1 bytes for a method */
+		goto not_ssl_hello;
+
+	/* Jump to the extensions */
+	hs_len -= 1 + data[0];
+	data   += 1 + data[0];
+
+	if (hs_len < 2 ||                       /* minimum one extension list length */
+	    (ext_len = (data[0] << 8) + data[1]) > hs_len - 2) /* list too long */
+		goto not_ssl_hello;
+
+	hs_len = ext_len; /* limit ourselves to the extension length */
+	data += 2;
+
+	while (hs_len >= 4) {
+		int ext_type, ext_len;
+
+		ext_type = (data[0] << 8) + data[1];
+		ext_len  = (data[2] << 8) + data[3];
+
+		if (ext_len > hs_len - 4) /* Extension too long */
+			goto not_ssl_hello;
+
+		/* SesstionTicket extension */
+		if (ext_type == 35) {
+			smp->data.type = SMP_T_SINT;
+			/* SessionTicket also present */
+			if (ext_len > 0)
+				smp->data.u.sint = 2;
+			/* SessionTicket absent */
+			else
+				smp->data.u.sint = 1;
+			smp->flags = SMP_F_VOLATILE;
+			return 1;
+		}
+
+		hs_len -= 4 + ext_len;
+		data   += 4 + ext_len;
+	}
+	/* SessionTicket Extension not found */
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
+	smp->flags = SMP_F_VOLATILE;
+	return 1;
+
+	/* server name not found */
+	goto not_ssl_hello;
+
+ too_short:
+	smp->flags = SMP_F_MAY_CHANGE;
+
+ not_ssl_hello:
+	return 0;
+}
+
+/* Returns TRUE if the client sent Supported Elliptic Curves Extension (0x000a)
+ * Mainly used to detect if client supports ECC cipher suites.
+ */
+static int
+smp_fetch_req_ssl_ec_ext(const struct arg *args, struct sample *smp, const char *kw, void *private)
+{
+	int hs_len, ext_len, bleft;
+	struct channel *chn;
+	unsigned char *data;
+
+	if (!smp->strm)
+		goto not_ssl_hello;
+
+	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
+	bleft = chn->buf->i;
+	data = (unsigned char *)chn->buf->p;
+
+	/* Check for SSL/TLS Handshake */
+	if (!bleft)
+		goto too_short;
+	if (*data != 0x16)
+		goto not_ssl_hello;
+
+	/* Check for SSLv3 or later (SSL version >= 3.0) in the record layer*/
+	if (bleft < 3)
+		goto too_short;
+	if (data[1] < 0x03)
+		goto not_ssl_hello;
+
+	if (bleft < 5)
+		goto too_short;
+	hs_len = (data[3] << 8) + data[4];
+	if (hs_len < 1 + 3 + 2 + 32 + 1 + 2 + 2 + 1 + 1 + 2 + 2)
+		goto not_ssl_hello; /* too short to have an extension */
+
+	data += 5; /* enter TLS handshake */
+	bleft -= 5;
+
+	/* Check for a complete client hello starting at <data> */
+	if (bleft < 1)
+		goto too_short;
+	if (data[0] != 0x01) /* msg_type = Client Hello */
+		goto not_ssl_hello;
+
+	/* Check the Hello's length */
+	if (bleft < 4)
+		goto too_short;
+	hs_len = (data[1] << 16) + (data[2] << 8) + data[3];
+	if (hs_len < 2 + 32 + 1 + 2 + 2 + 1 + 1 + 2 + 2)
+		goto not_ssl_hello; /* too short to have an extension */
+
+	/* We want the full handshake here */
+	if (bleft < hs_len)
+		goto too_short;
+
+	data += 4;
+	/* Start of the ClientHello message */
+	if (data[0] < 0x03 || data[1] < 0x01) /* TLSv1 minimum */
+		goto not_ssl_hello;
+
+	ext_len = data[34]; /* session_id_len */
+	if (ext_len > 32 || ext_len > (hs_len - 35)) /* check for correct session_id len */
+		goto not_ssl_hello;
+
+	/* Jump to cipher suite */
+	hs_len -= 35 + ext_len;
+	data   += 35 + ext_len;
+
+	if (hs_len < 4 ||                               /* minimum one cipher */
+	    (ext_len = (data[0] << 8) + data[1]) < 2 || /* minimum 2 bytes for a cipher */
+	    ext_len > hs_len)
+		goto not_ssl_hello;
+
+	/* Jump to the compression methods */
+	hs_len -= 2 + ext_len;
+	data   += 2 + ext_len;
+
+	if (hs_len < 2 ||                       /* minimum one compression method */
+	    data[0] < 1 || data[0] > hs_len)    /* minimum 1 bytes for a method */
+		goto not_ssl_hello;
+
+	/* Jump to the extensions */
+	hs_len -= 1 + data[0];
+	data   += 1 + data[0];
+
+	if (hs_len < 2 ||                       /* minimum one extension list length */
+	    (ext_len = (data[0] << 8) + data[1]) > hs_len - 2) /* list too long */
+		goto not_ssl_hello;
+
+	hs_len = ext_len; /* limit ourselves to the extension length */
+	data += 2;
+
+	while (hs_len >= 4) {
+		int ext_type, ext_len;
+
+		ext_type = (data[0] << 8) + data[1];
+		ext_len  = (data[2] << 8) + data[3];
+
+		if (ext_len > hs_len - 4) /* Extension too long */
+			goto not_ssl_hello;
+
+		/* Elliptic curves extension */
+		if (ext_type == 10) {
+			smp->data.type = SMP_T_BOOL;
+			smp->data.u.sint = 1;
+			smp->flags = SMP_F_VOLATILE;
+			return 1;
+		}
+
+		hs_len -= 4 + ext_len;
+		data   += 4 + ext_len;
+	}
+	/* server name not found */
+	goto not_ssl_hello;
+
+ too_short:
+	smp->flags = SMP_F_MAY_CHANGE;
+
+ not_ssl_hello:
+
+	return 0;
+}
 /* returns the type of SSL hello message (mainly used to detect an SSL hello) */
 static int
 smp_fetch_ssl_hello_type(const struct arg *args, struct sample *smp, const char *kw, void *private)
@@ -65,10 +322,10 @@ smp_fetch_ssl_hello_type(const struct arg *args, struct sample *smp, const char 
 	struct channel *chn;
 	const unsigned char *data;
 
-	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
-	if (!chn->buf)
+	if (!smp->strm)
 		goto not_ssl_hello;
 
+	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
 	bleft = chn->buf->i;
 	data = (const unsigned char *)chn->buf->p;
 
@@ -102,8 +359,8 @@ smp_fetch_ssl_hello_type(const struct arg *args, struct sample *smp, const char 
 		goto not_ssl_hello;
 	}
 
-	smp->type = SMP_T_UINT;
-	smp->data.uint = hs_type;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = hs_type;
 	smp->flags = SMP_F_VOLATILE;
 
 	return 1;
@@ -129,11 +386,12 @@ smp_fetch_req_ssl_ver(const struct arg *args, struct sample *smp, const char *kw
 {
 	int version, bleft, msg_len;
 	const unsigned char *data;
-	struct channel *req = &smp->strm->req;
+	struct channel *req;
 
-	if (!req->buf)
+	if (!smp->strm)
 		return 0;
 
+	req = &smp->strm->req;
 	msg_len = 0;
 	bleft = req->buf->i;
 	if (!bleft)
@@ -142,21 +400,24 @@ smp_fetch_req_ssl_ver(const struct arg *args, struct sample *smp, const char *kw
 	data = (const unsigned char *)req->buf->p;
 	if ((*data >= 0x14 && *data <= 0x17) || (*data == 0xFF)) {
 		/* SSLv3 header format */
-		if (bleft < 5)
+		if (bleft < 11)
 			goto too_short;
 
-		version = (data[1] << 16) + data[2]; /* version: major, minor */
+		version = (data[1] << 16) + data[2]; /* record layer version: major, minor */
 		msg_len = (data[3] <<  8) + data[4]; /* record length */
 
 		/* format introduced with SSLv3 */
 		if (version < 0x00030000)
 			goto not_ssl;
 
-		/* message length between 1 and 2^14 + 2048 */
-		if (msg_len < 1 || msg_len > ((1<<14) + 2048))
+		/* message length between 6 and 2^14 + 2048 */
+		if (msg_len < 6 || msg_len > ((1<<14) + 2048))
 			goto not_ssl;
 
 		bleft -= 5; data += 5;
+
+		/* return the client hello client version, not the record layer version */
+		version = (data[4] << 16) + data[5]; /* client hello version: major, minor */
 	} else {
 		/* SSLv2 header format, only supported for hello (msg type 1) */
 		int rlen, plen, cilen, silen, chlen;
@@ -216,8 +477,8 @@ smp_fetch_req_ssl_ver(const struct arg *args, struct sample *smp, const char *kw
 	/* OK that's enough. We have at least the whole message, and we have
 	 * the protocol version.
 	 */
-	smp->type = SMP_T_UINT;
-	smp->data.uint = version;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = version;
 	smp->flags = SMP_F_VOLATILE;
 	return 1;
 
@@ -267,10 +528,10 @@ smp_fetch_ssl_hello_sni(const struct arg *args, struct sample *smp, const char *
 	struct channel *chn;
 	unsigned char *data;
 
-	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
-	if (!chn->buf)
+	if (!smp->strm)
 		goto not_ssl_hello;
 
+	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
 	bleft = chn->buf->i;
 	data = (unsigned char *)chn->buf->p;
 
@@ -370,9 +631,9 @@ smp_fetch_ssl_hello_sni(const struct arg *args, struct sample *smp, const char *
 			name_len = (data[7] << 8) + data[8];
 
 			if (name_type == 0) { /* hostname */
-				smp->type = SMP_T_STR;
-				smp->data.str.str = (char *)data + 9;
-				smp->data.str.len = name_len;
+				smp->data.type = SMP_T_STR;
+				smp->data.u.str.str = (char *)data + 9;
+				smp->data.u.str.len = name_len;
 				smp->flags = SMP_F_VOLATILE | SMP_F_CONST;
 				return 1;
 			}
@@ -402,11 +663,8 @@ fetch_rdp_cookie_name(struct stream *s, struct sample *smp, const char *cname, i
 	int bleft;
 	const unsigned char *data;
 
-	if (!s->req.buf)
-		return 0;
-
 	smp->flags = SMP_F_CONST;
-	smp->type = SMP_T_STR;
+	smp->data.type = SMP_T_STR;
 
 	bleft = s->req.buf->i;
 	if (bleft <= 11)
@@ -458,8 +716,8 @@ fetch_rdp_cookie_name(struct stream *s, struct sample *smp, const char *cname, i
 	}
 
 	/* data points to cookie value */
-	smp->data.str.str = (char *)data;
-	smp->data.str.len = 0;
+	smp->data.u.str.str = (char *)data;
+	smp->data.u.str.len = 0;
 
 	while (bleft > 0 && *data != '\r') {
 		data++;
@@ -472,7 +730,7 @@ fetch_rdp_cookie_name(struct stream *s, struct sample *smp, const char *cname, i
 	if (data[0] != '\r' || data[1] != '\n')
 		goto not_cookie;
 
-	smp->data.str.len = (char *)data - smp->data.str.str;
+	smp->data.u.str.len = (char *)data - smp->data.u.str.str;
 	smp->flags = SMP_F_VOLATILE | SMP_F_CONST;
 	return 1;
 
@@ -491,6 +749,9 @@ fetch_rdp_cookie_name(struct stream *s, struct sample *smp, const char *cname, i
 int
 smp_fetch_rdp_cookie(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
+	if (!smp->strm)
+		return 0;
+
 	return fetch_rdp_cookie_name(smp->strm, smp, args ? args->data.str.str : NULL, args ? args->data.str.len : 0);
 }
 
@@ -506,8 +767,8 @@ smp_fetch_rdp_cookie_cnt(const struct arg *args, struct sample *smp, const char 
 		return 0;
 
 	smp->flags = SMP_F_VOLATILE;
-	smp->type = SMP_T_UINT;
-	smp->data.uint = ret;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = ret;
 	return 1;
 }
 
@@ -515,8 +776,8 @@ smp_fetch_rdp_cookie_cnt(const struct arg *args, struct sample *smp, const char 
 static int
 smp_fetch_payload_lv(const struct arg *arg_p, struct sample *smp, const char *kw, void *private)
 {
-	unsigned int len_offset = arg_p[0].data.uint;
-	unsigned int len_size = arg_p[1].data.uint;
+	unsigned int len_offset = arg_p[0].data.sint;
+	unsigned int len_size = arg_p[1].data.sint;
 	unsigned int buf_offset;
 	unsigned int buf_size = 0;
 	struct channel *chn;
@@ -526,10 +787,10 @@ smp_fetch_payload_lv(const struct arg *arg_p, struct sample *smp, const char *kw
 	/* by default buf offset == len offset + len size */
 	/* buf offset could be absolute or relative to len offset + len size if prefixed by + or - */
 
-	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
-	if (!chn->buf)
+	if (!smp->strm)
 		return 0;
 
+	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
 	if (len_offset + len_size > chn->buf->i)
 		goto too_short;
 
@@ -537,14 +798,18 @@ smp_fetch_payload_lv(const struct arg *arg_p, struct sample *smp, const char *kw
 		buf_size = (buf_size << 8) + ((unsigned char *)chn->buf->p)[i + len_offset];
 	}
 
-	/* buf offset may be implicit, absolute or relative */
+	/* buf offset may be implicit, absolute or relative. If the LSB
+	 * is set, then the offset is relative otherwise it is absolute.
+	 */
 	buf_offset = len_offset + len_size;
-	if (arg_p[2].type == ARGT_UINT)
-		buf_offset = arg_p[2].data.uint;
-	else if (arg_p[2].type == ARGT_SINT)
-		buf_offset += arg_p[2].data.sint;
+	if (arg_p[2].type == ARGT_SINT) {
+		if (arg_p[2].data.sint & 1)
+			buf_offset += arg_p[2].data.sint >> 1;
+		else
+			buf_offset = arg_p[2].data.sint >> 1;
+	}
 
-	if (!buf_size || buf_size > chn->buf->size || buf_offset + buf_size > chn->buf->size) {
+	if (!buf_size || buf_size > global.tune.bufsize || buf_offset + buf_size > global.tune.bufsize) {
 		/* will never match */
 		smp->flags = 0;
 		return 0;
@@ -554,9 +819,9 @@ smp_fetch_payload_lv(const struct arg *arg_p, struct sample *smp, const char *kw
 		goto too_short;
 
 	/* init chunk as read only */
-	smp->type = SMP_T_BIN;
+	smp->data.type = SMP_T_BIN;
 	smp->flags = SMP_F_VOLATILE | SMP_F_CONST;
-	chunk_initlen(&smp->data.str, chn->buf->p + buf_offset, 0, buf_size);
+	chunk_initlen(&smp->data.u.str, chn->buf->p + buf_offset, 0, buf_size);
 	return 1;
 
  too_short:
@@ -568,15 +833,15 @@ smp_fetch_payload_lv(const struct arg *arg_p, struct sample *smp, const char *kw
 static int
 smp_fetch_payload(const struct arg *arg_p, struct sample *smp, const char *kw, void *private)
 {
-	unsigned int buf_offset = arg_p[0].data.uint;
-	unsigned int buf_size = arg_p[1].data.uint;
+	unsigned int buf_offset = arg_p[0].data.sint;
+	unsigned int buf_size = arg_p[1].data.sint;
 	struct channel *chn;
 
-	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
-	if (!chn->buf)
+	if (!smp->strm)
 		return 0;
 
-	if (buf_size > chn->buf->size || buf_offset + buf_size > chn->buf->size) {
+	chn = ((smp->opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? &smp->strm->res : &smp->strm->req;
+	if (!buf_size || buf_size > global.tune.bufsize || buf_offset + buf_size > global.tune.bufsize) {
 		/* will never match */
 		smp->flags = 0;
 		return 0;
@@ -586,9 +851,9 @@ smp_fetch_payload(const struct arg *arg_p, struct sample *smp, const char *kw, v
 		goto too_short;
 
 	/* init chunk as read only */
-	smp->type = SMP_T_BIN;
+	smp->data.type = SMP_T_BIN;
 	smp->flags = SMP_F_VOLATILE | SMP_F_CONST;
-	chunk_initlen(&smp->data.str, chn->buf->p + buf_offset, 0, buf_size ? buf_size : (chn->buf->i - buf_offset));
+	chunk_initlen(&smp->data.u.str, chn->buf->p + buf_offset, 0, buf_size ? buf_size : (chn->buf->i - buf_offset));
 	if (!buf_size && channel_may_recv(chn) && !channel_input_closed(chn))
 		smp->flags |= SMP_F_MAY_CHANGE;
 
@@ -607,18 +872,42 @@ smp_fetch_payload(const struct arg *arg_p, struct sample *smp, const char *kw, v
  * not NULL, it will be filled with a pointer to an error message in case of
  * error, that the caller is responsible for freeing. The initial location must
  * either be freeable or NULL.
+ *
+ * Note that offset2 is stored with SINT type, but its not directly usable as is.
+ * The value is contained in the 63 MSB and the LSB is used as a flag for marking
+ * the "relative" property of the value.
  */
 int val_payload_lv(struct arg *arg, char **err_msg)
 {
-	if (!arg[1].data.uint) {
+	int relative = 0;
+	const char *str;
+
+	if (arg[0].data.sint < 0) {
+		memprintf(err_msg, "payload offset1 must be positive");
+		return 0;
+	}
+
+	if (!arg[1].data.sint) {
 		memprintf(err_msg, "payload length must be > 0");
 		return 0;
 	}
 
-	if (arg[2].type == ARGT_SINT &&
-	    (int)(arg[0].data.uint + arg[1].data.uint + arg[2].data.sint) < 0) {
-		memprintf(err_msg, "payload offset too negative");
-		return 0;
+	if (arg[2].type == ARGT_STR && arg[2].data.str.len > 0) {
+		if (arg[2].data.str.str[0] == '+' || arg[2].data.str.str[0] == '-')
+			relative = 1;
+		str = arg[2].data.str.str;
+		arg[2].type = ARGT_SINT;
+		arg[2].data.sint = read_int64(&str, str + arg[2].data.str.len);
+		if (*str != '\0') {
+			memprintf(err_msg, "payload offset2 is not a number");
+			return 0;
+		}
+	   if (arg[0].data.sint + arg[1].data.sint + arg[2].data.sint < 0) {
+			memprintf(err_msg, "payload offset2 too negative");
+			return 0;
+		}
+		if (relative)
+			arg[2].data.sint = ( arg[2].data.sint << 1 ) + 1;
 	}
 	return 1;
 }
@@ -633,28 +922,30 @@ int val_payload_lv(struct arg *arg, char **err_msg)
  * instance IPv4/IPv6 must be declared IPv4.
  */
 static struct sample_fetch_kw_list smp_kws = {ILH, {
-	{ "payload",             smp_fetch_payload,        ARG2(2,UINT,UINT),      NULL,           SMP_T_BIN,  SMP_USE_L6REQ|SMP_USE_L6RES },
-	{ "payload_lv",          smp_fetch_payload_lv,     ARG3(2,UINT,UINT,SINT), val_payload_lv, SMP_T_BIN,  SMP_USE_L6REQ|SMP_USE_L6RES },
+	{ "payload",             smp_fetch_payload,        ARG2(2,SINT,SINT),      NULL,           SMP_T_BIN,  SMP_USE_L6REQ|SMP_USE_L6RES },
+	{ "payload_lv",          smp_fetch_payload_lv,     ARG3(2,SINT,SINT,STR),  val_payload_lv, SMP_T_BIN,  SMP_USE_L6REQ|SMP_USE_L6RES },
 	{ "rdp_cookie",          smp_fetch_rdp_cookie,     ARG1(0,STR),            NULL,           SMP_T_STR,  SMP_USE_L6REQ },
-	{ "rdp_cookie_cnt",      smp_fetch_rdp_cookie_cnt, ARG1(0,STR),            NULL,           SMP_T_UINT, SMP_USE_L6REQ },
-	{ "rep_ssl_hello_type",  smp_fetch_ssl_hello_type, 0,                      NULL,           SMP_T_UINT, SMP_USE_L6RES },
-	{ "req_len",             smp_fetch_len,            0,                      NULL,           SMP_T_UINT, SMP_USE_L6REQ },
-	{ "req_ssl_hello_type",  smp_fetch_ssl_hello_type, 0,                      NULL,           SMP_T_UINT, SMP_USE_L6REQ },
+	{ "rdp_cookie_cnt",      smp_fetch_rdp_cookie_cnt, ARG1(0,STR),            NULL,           SMP_T_SINT, SMP_USE_L6REQ },
+	{ "rep_ssl_hello_type",  smp_fetch_ssl_hello_type, 0,                      NULL,           SMP_T_SINT, SMP_USE_L6RES },
+	{ "req_len",             smp_fetch_len,            0,                      NULL,           SMP_T_SINT, SMP_USE_L6REQ },
+	{ "req_ssl_hello_type",  smp_fetch_ssl_hello_type, 0,                      NULL,           SMP_T_SINT, SMP_USE_L6REQ },
 	{ "req_ssl_sni",         smp_fetch_ssl_hello_sni,  0,                      NULL,           SMP_T_STR,  SMP_USE_L6REQ },
-	{ "req_ssl_ver",         smp_fetch_req_ssl_ver,    0,                      NULL,           SMP_T_UINT, SMP_USE_L6REQ },
+	{ "req_ssl_ver",         smp_fetch_req_ssl_ver,    0,                      NULL,           SMP_T_SINT, SMP_USE_L6REQ },
 
-	{ "req.len",             smp_fetch_len,            0,                      NULL,           SMP_T_UINT, SMP_USE_L6REQ },
-	{ "req.payload",         smp_fetch_payload,        ARG2(2,UINT,UINT),      NULL,           SMP_T_BIN,  SMP_USE_L6REQ },
-	{ "req.payload_lv",      smp_fetch_payload_lv,     ARG3(2,UINT,UINT,SINT), val_payload_lv, SMP_T_BIN,  SMP_USE_L6REQ },
+	{ "req.len",             smp_fetch_len,            0,                      NULL,           SMP_T_SINT, SMP_USE_L6REQ },
+	{ "req.payload",         smp_fetch_payload,        ARG2(2,SINT,SINT),      NULL,           SMP_T_BIN,  SMP_USE_L6REQ },
+	{ "req.payload_lv",      smp_fetch_payload_lv,     ARG3(2,SINT,SINT,STR),  val_payload_lv, SMP_T_BIN,  SMP_USE_L6REQ },
 	{ "req.rdp_cookie",      smp_fetch_rdp_cookie,     ARG1(0,STR),            NULL,           SMP_T_STR,  SMP_USE_L6REQ },
-	{ "req.rdp_cookie_cnt",  smp_fetch_rdp_cookie_cnt, ARG1(0,STR),            NULL,           SMP_T_UINT, SMP_USE_L6REQ },
-	{ "req.ssl_hello_type",  smp_fetch_ssl_hello_type, 0,                      NULL,           SMP_T_UINT, SMP_USE_L6REQ },
+	{ "req.rdp_cookie_cnt",  smp_fetch_rdp_cookie_cnt, ARG1(0,STR),            NULL,           SMP_T_SINT, SMP_USE_L6REQ },
+	{ "req.ssl_ec_ext",      smp_fetch_req_ssl_ec_ext, 0,                      NULL,           SMP_T_BOOL, SMP_USE_L6REQ },
+	{ "req.ssl_st_ext",      smp_fetch_req_ssl_st_ext, 0,                      NULL,           SMP_T_SINT, SMP_USE_L6REQ },
+	{ "req.ssl_hello_type",  smp_fetch_ssl_hello_type, 0,                      NULL,           SMP_T_SINT, SMP_USE_L6REQ },
 	{ "req.ssl_sni",         smp_fetch_ssl_hello_sni,  0,                      NULL,           SMP_T_STR,  SMP_USE_L6REQ },
-	{ "req.ssl_ver",         smp_fetch_req_ssl_ver,    0,                      NULL,           SMP_T_UINT, SMP_USE_L6REQ },
-	{ "res.len",             smp_fetch_len,            0,                      NULL,           SMP_T_UINT, SMP_USE_L6RES },
-	{ "res.payload",         smp_fetch_payload,        ARG2(2,UINT,UINT),      NULL,           SMP_T_BIN,  SMP_USE_L6RES },
-	{ "res.payload_lv",      smp_fetch_payload_lv,     ARG3(2,UINT,UINT,SINT), val_payload_lv, SMP_T_BIN,  SMP_USE_L6RES },
-	{ "res.ssl_hello_type",  smp_fetch_ssl_hello_type, 0,                      NULL,           SMP_T_UINT, SMP_USE_L6RES },
+	{ "req.ssl_ver",         smp_fetch_req_ssl_ver,    0,                      NULL,           SMP_T_SINT, SMP_USE_L6REQ },
+	{ "res.len",             smp_fetch_len,            0,                      NULL,           SMP_T_SINT, SMP_USE_L6RES },
+	{ "res.payload",         smp_fetch_payload,        ARG2(2,SINT,SINT),      NULL,           SMP_T_BIN,  SMP_USE_L6RES },
+	{ "res.payload_lv",      smp_fetch_payload_lv,     ARG3(2,SINT,SINT,STR),  val_payload_lv, SMP_T_BIN,  SMP_USE_L6RES },
+	{ "res.ssl_hello_type",  smp_fetch_ssl_hello_type, 0,                      NULL,           SMP_T_SINT, SMP_USE_L6RES },
 	{ "wait_end",            smp_fetch_wait_end,       0,                      NULL,           SMP_T_BOOL, SMP_USE_INTRN },
 	{ /* END */ },
 }};

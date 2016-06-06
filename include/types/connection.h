@@ -119,7 +119,10 @@ enum {
 	 */
 	CO_FL_POLL_SOCK     = CO_FL_HANDSHAKE | CO_FL_WAIT_L4_CONN | CO_FL_WAIT_L6_CONN,
 
-	/* unused : 0x10000000, 0x20000000, 0x40000000 */
+	/* This connection may not be shared between clients */
+	CO_FL_PRIVATE       = 0x10000000,
+
+	/* unused : 0x20000000, 0x40000000 */
 
 	/* This last flag indicates that the transport layer is used (for instance
 	 * by logs) and must not be cleared yet. The last call to conn_xprt_close()
@@ -228,7 +231,7 @@ struct conn_src {
 	char *iface_name;                    /* bind interface name or NULL */
 	struct port_range *sport_range;      /* optional per-server TCP source ports */
 	struct sockaddr_storage source_addr; /* the address to which we want to bind for connect() */
-#if defined(CONFIG_HAP_CTTPROXY) || defined(CONFIG_HAP_TRANSPARENT)
+#if defined(CONFIG_HAP_TRANSPARENT)
 	struct sockaddr_storage tproxy_addr; /* non-local address we want to bind to for connect() */
 	char *bind_hdr_name;                 /* bind to this header name if defined */
 	int bind_hdr_len;                    /* length of the name of the header above */
@@ -261,6 +264,7 @@ struct connection {
 		} sock;
 	} t;
 	enum obj_type *target;        /* the target to connect to (server, proxy, applet, ...) */
+	struct list list;             /* attach point to various connection lists (idle, ...) */
 	const struct netns_entry *proxy_netns;
 	struct {
 		struct sockaddr_storage from;	/* client address, or address to spoof when connecting to the server */

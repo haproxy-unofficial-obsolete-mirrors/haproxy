@@ -36,15 +36,15 @@ int init_connection()
 }
 
 /* I/O callback for fd-based connections. It calls the read/write handlers
- * provided by the connection's sock_ops, which must be valid. It returns 0.
+ * provided by the connection's sock_ops, which must be valid.
  */
-int conn_fd_handler(int fd)
+void conn_fd_handler(int fd)
 {
 	struct connection *conn = fdtab[fd].owner;
 	unsigned int flags;
 
 	if (unlikely(!conn))
-		return 0;
+		return;
 
 	conn_refresh_polling_flags(conn);
 	flags = conn->flags & ~CO_FL_ERROR; /* ensure to call the wake handler upon error */
@@ -86,7 +86,7 @@ int conn_fd_handler(int fd)
 	 * we must not use it anymore and should immediately leave instead.
 	 */
 	if ((conn->flags & CO_FL_INIT_DATA) && conn->data->init(conn) < 0)
-		return 0;
+		return;
 
 	/* The data transfer starts here and stops on error and handshakes. Note
 	 * that we must absolutely test conn->xprt at each step in case it suddenly
@@ -133,7 +133,7 @@ int conn_fd_handler(int fd)
 	if ((conn->flags & CO_FL_WAKE_DATA) &&
 	    ((conn->flags ^ flags) & CO_FL_CONN_STATE) &&
 	    conn->data->wake(conn) < 0)
-		return 0;
+		return;
 
 	/* Last check, verify if the connection just established */
 	if (unlikely(!(conn->flags & (CO_FL_WAIT_L4_CONN | CO_FL_WAIT_L6_CONN | CO_FL_CONNECTED))))
@@ -144,7 +144,7 @@ int conn_fd_handler(int fd)
 
 	/* commit polling changes */
 	conn_cond_update_polling(conn);
-	return 0;
+	return;
 }
 
 /* Update polling on connection <c>'s file descriptor depending on its current
@@ -385,7 +385,7 @@ int conn_recv_proxy(struct connection *conn, int flag)
 	if (trash.len < 9) /* shortest possible line */
 		goto missing;
 
-	if (!memcmp(line, "TCP4 ", 5) != 0) {
+	if (memcmp(line, "TCP4 ", 5) == 0) {
 		u32 src3, dst3, sport, dport;
 
 		line += 5;
@@ -426,7 +426,7 @@ int conn_recv_proxy(struct connection *conn, int flag)
 		((struct sockaddr_in *)&conn->addr.to)->sin_port          = htons(dport);
 		conn->flags |= CO_FL_ADDR_FROM_SET | CO_FL_ADDR_TO_SET;
 	}
-	else if (!memcmp(line, "TCP6 ", 5) != 0) {
+	else if (memcmp(line, "TCP6 ", 5) == 0) {
 		u32 sport, dport;
 		char *src_s;
 		char *dst_s, *sport_s, *dport_s;
@@ -744,7 +744,7 @@ int make_proxy_line_v2(char *buf, int buf_len, struct server *srv, struct connec
 	const char pp2_signature[] = PP2_SIGNATURE;
 	int ret = 0;
 	struct proxy_hdr_v2 *hdr = (struct proxy_hdr_v2 *)buf;
-	struct sockaddr_storage null_addr = {0};
+	struct sockaddr_storage null_addr = { .ss_family = 0 };
 	struct sockaddr_storage *src = &null_addr;
 	struct sockaddr_storage *dst = &null_addr;
 

@@ -35,17 +35,16 @@
 #define ARGT_NBTYPES   (1 << ARGT_BITS)
 #define ARGT_MASK      (ARGT_NBTYPES - 1)
 
-/* encoding of the arg count : up to 5 args are possible. 4 bits are left
+/* encoding of the arg count : up to 12 args are possible. 4 bits are left
  * unused at the top.
  */
 #define ARGM_MASK      ((1 << ARGM_BITS) - 1)
-#define ARGM_BITS      3
-#define ARGM_NBARGS    (32 - ARGM_BITS) / sizeof(int)
+#define ARGM_BITS      4
+#define ARGM_NBARGS    (sizeof(uint64_t) * 8 - ARGM_BITS) / ARGT_BITS
 
 enum {
 	ARGT_STOP = 0, /* end of the arg list */
-	ARGT_UINT,     /* unsigned integer, which is a positive integer without any sign */
-	ARGT_SINT,     /* signed integer, the sign (+/-) was explicit. Falls back to UINT if no sign. */
+	ARGT_SINT,     /* signed 64 bit integer. */
 	ARGT_STR,      /* string */
 	ARGT_IPV4,     /* an IPv4 address */
 	ARGT_MSK4,     /* an IPv4 address mask (integer or dotted), stored as ARGT_IPV4 */
@@ -61,6 +60,7 @@ enum {
 	ARGT_MAP,      /* a pointer to a map descriptor */
 	ARGT_REG,      /* a pointer to a regex */
 	ARGT_VAR,      /* contains a variable description. */
+	/* please update arg_type_names[] in args.c if you add entries here */
 };
 
 /* context where arguments are used, in order to help error reporting */
@@ -69,11 +69,13 @@ enum {
 	ARGC_STK,      /* sticking rule */
 	ARGC_TRK,      /* tracking rule */
 	ARGC_LOG,      /* log-format */
+	ARGC_LOGSD,    /* log-format-sd */
 	ARGC_HRQ,      /* http-request */
 	ARGC_HRS,      /* http-response */
 	ARGC_UIF,      /* unique-id-format */
 	ARGC_RDR,      /* redirect */
 	ARGC_CAP,      /* capture rule */
+	ARGC_SRV,      /* server line */
 };
 
 /* flags used when compiling and executing regex */
@@ -87,8 +89,7 @@ struct userlist;
 struct my_regex;
 
 union arg_data {
-	unsigned int uint; /* used for uint, time, size */
-	int sint;
+	long long int sint;
 	struct chunk str;
 	struct in_addr ipv4;
 	struct in6_addr ipv6;

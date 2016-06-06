@@ -87,6 +87,7 @@ enum {
 	PAT_MATCH_DOM,   /* domain-like sub-string (str) */
 	PAT_MATCH_END,   /* end of string (str) */
 	PAT_MATCH_REG,   /* regex (str -> reg) */
+	PAT_MATCH_REGM,  /* regex (str -> reg) with match zones */
 	/* keep this one last */
 	PAT_MATCH_NUM
 };
@@ -129,7 +130,7 @@ struct pat_time {
  * "sample" with a tree entry. It is used with maps.
  */
 struct pattern_tree {
-	struct sample_storage *smp;
+	struct sample_data *data;
 	struct pat_ref_elt *ref;
 	struct ebmb_node node;
 };
@@ -168,7 +169,7 @@ struct pattern {
 	} ptr;                          /* indirect values, allocated */
 	int len;                        /* data length when required  */
 	int sflags;                     /* flags relative to the storage method. */
-	struct sample_storage *smp;     /* used to store a pointer to sample value associated
+	struct sample_data *data;       /* used to store a pointer to sample value associated
 	                                   with the match. It is used with maps */
 	struct pat_ref_elt *ref;
 };
@@ -212,7 +213,7 @@ struct pattern_expr_list {
 /* This struct contain a list of pattern expr */
 struct pattern_head {
 	int (*parse)(const char *text, struct pattern *pattern, int flags, char **err);
-	int (*parse_smp)(const char *text, struct sample_storage *smp);
+	int (*parse_smp)(const char *text, struct sample_data *data);
 	int (*index)(struct pattern_expr *, struct pattern *, char **);
 	void (*delete)(struct pattern_expr *, struct pat_ref_elt *);
 	void (*prune)(struct pattern_expr *);

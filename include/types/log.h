@@ -30,11 +30,19 @@
 
 #define NB_LOG_FACILITIES       24
 #define NB_LOG_LEVELS           8
+#define NB_MSG_IOVEC_ELEMENTS   8
 #define SYSLOG_PORT             514
 #define UNIQUEID_LEN            128
 
 /* The array containing the names of the log levels. */
 extern const char *log_levels[];
+
+/* enum for log format */
+enum {
+	LOG_FORMAT_RFC3164 = 0,
+	LOG_FORMAT_RFC5424,
+	LOG_FORMATS,          /* number of supported log formats, must always be last */
+};
 
 /* lists of fields that can be logged */
 enum {
@@ -73,6 +81,7 @@ enum {
 	LOG_FMT_TW,
 	LOG_FMT_TC,
 	LOG_FMT_TR,
+	LOG_FMT_TD,
 	LOG_FMT_TT,
 	LOG_FMT_STATUS,
 	LOG_FMT_CCLIENT,
@@ -96,6 +105,7 @@ enum {
 	LOG_FMT_HTTP_METHOD,
 	LOG_FMT_HTTP_URI,
 	LOG_FMT_HTTP_PATH,
+	LOG_FMT_HTTP_QUERY,
 	LOG_FMT_HTTP_VERSION,
 	LOG_FMT_HOSTNAME,
 	LOG_FMT_UNIQUEID,
@@ -132,6 +142,7 @@ struct logformat_node {
 #define LOG_OPT_REQ_CAP         0x00000008
 #define LOG_OPT_RES_CAP         0x00000010
 #define LOG_OPT_HTTP            0x00000020
+#define LOG_OPT_ESC             0x00000040
 
 
 /* Fields that need to be extracted from the incoming connection or request for
@@ -156,6 +167,7 @@ struct logformat_node {
 struct logsrv {
 	struct list list;
 	struct sockaddr_storage addr;
+	int format;
 	int facility;
 	int level;
 	int minlvl;

@@ -1,20 +1,38 @@
+# Below we forbid everything and only allow what we know, that's much easier
+# than blocking about 500 different test files and bug report outputs.
+/.*
+/*
+!/.gitignore
+!/CHANGELOG
+!/LICENSE
+!/Makefile
+!/README
+!/CONTRIBUTING
+!/MAINTAINERS
+!/ROADMAP
+!/SUBVERS
+!/VERDATE
+!/VERSION
+!/contrib
+!/doc
+!/ebtree
+!/examples
+!/include
+!/src
+!/tests
+!/debian
+!/scripts
+# Reject some generic files
 *.o
-*/.svn
 *~
-.flxdisk*
-.flxpkg
-.flxstatus*
-.svn
-haproxy
-src/*.o
 *.rej
 *.orig
-*.log*
-*.trace*
-haproxy-*
-!doc/haproxy-*.txt
-!src/*.c
-make-*
-dlmalloc.c
-00*.patch
-*.service
+*.bak
+# And reject some specific files
+/contrib/base64/base64rev
+/contrib/halog/halog
+/contrib/ip6range/ip6range
+/contrib/iprange/iprange
+/contrib/systemd/haproxy.service
+/src/dlmalloc.c
+/tests/test_hashes

@@ -33,16 +33,18 @@ static unsigned int var_reqres_limit = 0;
 /* This function adds or remove memory size from the accounting. The inner
  * pointers may be null when setting the outer ones only.
  */
-static void var_accounting_diff(struct vars *vars, struct vars *per_sess, struct vars *per_strm, struct vars *per_chn, int size)
+static void var_accounting_diff(struct vars *vars, struct session *sess, struct stream *strm, int size)
 {
 	switch (vars->scope) {
 	case SCOPE_REQ:
 	case SCOPE_RES:
-		per_chn->size += size;
+		strm->vars_reqres.size += size;
+		/* fall through */
 	case SCOPE_TXN:
-		per_strm->size += size;
+		strm->vars_txn.size += size;
+		/* fall through */
 	case SCOPE_SESS:
-		per_sess->size += size;
+		sess->vars.size += size;
 		var_global_size += size;
 	}
 }
@@ -50,32 +52,36 @@ static void var_accounting_diff(struct vars *vars, struct vars *per_sess, struct
 /* This function returns 1 if the <size> is available in the var
  * pool <vars>, otherwise returns 0. If the space is avalaible,
  * the size is reserved. The inner pointers may be null when setting
- * the outer ones only.
+ * the outer ones only. The accounting uses either <sess> or <strm>
+ * depending on the scope. <strm> may be NULL when no stream is known
+ * and only the session exists (eg: tcp-request connection).
  */
-static int var_accounting_add(struct vars *vars, struct vars *per_sess, struct vars *per_strm, struct vars *per_chn, int size)
+static int var_accounting_add(struct vars *vars, struct session *sess, struct stream *strm, int size)
 {
 	switch (vars->scope) {
 	case SCOPE_REQ:
 	case SCOPE_RES:
-		if (var_reqres_limit && per_chn->size + size > var_reqres_limit)
+		if (var_reqres_limit && strm->vars_reqres.size + size > var_reqres_limit)
 			return 0;
+		/* fall through */
 	case SCOPE_TXN:
-		if (var_txn_limit && per_strm->size + size > var_txn_limit)
+		if (var_txn_limit && strm->vars_txn.size + size > var_txn_limit)
 			return 0;
+		/* fall through */
 	case SCOPE_SESS:
-		if (var_sess_limit && per_sess->size + size > var_sess_limit)
+		if (var_sess_limit && sess->vars.size + size > var_sess_limit)
 			return 0;
 		if (var_global_limit && var_global_size + size > var_global_limit)
 			return 0;
 	}
-	var_accounting_diff(vars, per_sess, per_strm, per_chn, size);
+	var_accounting_diff(vars, sess, strm, size);
 	return 1;
 }
 
 /* This function free all the memory used by all the varaibles
  * in the list.
  */
-void vars_prune(struct vars *vars, struct stream *strm)
+void vars_prune(struct vars *vars, struct session *sess, struct stream *strm)
 {
 	struct var *var, *tmp;
 	unsigned int size = 0;
@@ -83,18 +89,18 @@ void vars_prune(struct vars *vars, struct stream *strm)
 	list_for_each_entry_safe(var, tmp, &vars->head, l) {
 		if (var->data.type == SMP_T_STR ||
 		    var->data.type == SMP_T_BIN) {
-			free(var->data.data.str.str);
-			size += var->data.data.str.len;
+			free(var->data.u.str.str);
+			size += var->data.u.str.len;
 		}
 		else if (var->data.type == SMP_T_METH) {
-			free(var->data.data.meth.str.str);
-			size += var->data.data.meth.str.len;
+			free(var->data.u.meth.str.str);
+			size += var->data.u.meth.str.len;
 		}
 		LIST_DEL(&var->l);
 		pool_free2(var_pool, var);
 		size += sizeof(struct var);
 	}
-	var_accounting_diff(vars, &strm->sess->vars, &strm->vars_txn, &strm->vars_reqres, -size);
+	var_accounting_diff(vars, sess, strm, -size);
 }
 
 /* This function frees all the memory used by all the session variables in the
@@ -108,12 +114,12 @@ void vars_prune_per_sess(struct vars *vars)
 	list_for_each_entry_safe(var, tmp, &vars->head, l) {
 		if (var->data.type == SMP_T_STR ||
 		    var->data.type == SMP_T_BIN) {
-			free(var->data.data.str.str);
-			size += var->data.data.str.len;
+			free(var->data.u.str.str);
+			size += var->data.u.str.len;
 		}
 		else if (var->data.type == SMP_T_METH) {
-			free(var->data.data.meth.str.str);
-			size += var->data.data.meth.str.len;
+			free(var->data.u.meth.str.str);
+			size += var->data.u.meth.str.len;
 		}
 		LIST_DEL(&var->l);
 		pool_free2(var_pool, var);
@@ -234,7 +240,7 @@ static int smp_fetch_var(const struct arg *args, struct sample *smp, const char 
 
 	/* Check the availibity of the variable. */
 	switch (var_desc->scope) {
-	case SCOPE_SESS: vars = &smp->strm->sess->vars;  break;
+	case SCOPE_SESS: vars = &smp->sess->vars;  break;
 	case SCOPE_TXN:  vars = &smp->strm->vars_txn;    break;
 	case SCOPE_REQ:
 	case SCOPE_RES:
@@ -249,9 +255,8 @@ static int smp_fetch_var(const struct arg *args, struct sample *smp, const char 
 		return 0;
 
 	/* Copy sample. */
-	smp->type = var->data.type;
+	smp->data = var->data;
 	smp->flags |= SMP_F_CONST;
-	memcpy(&smp->data, &var->data.data, sizeof(smp->data));
 	return 1;
 }
 
@@ -260,7 +265,7 @@ static int smp_fetch_var(const struct arg *args, struct sample *smp, const char 
  * create it. The function stores a copy of smp> if the variable.
  * It returns 0 if fails, else returns 1.
  */
-static int sample_store(struct vars *vars, const char *name, struct stream *strm, struct sample *smp)
+static int sample_store(struct vars *vars, const char *name, struct sample *smp)
 {
 	struct var *var;
 
@@ -271,17 +276,17 @@ static int sample_store(struct vars *vars, const char *name, struct stream *strm
 		/* free its used memory. */
 		if (var->data.type == SMP_T_STR ||
 		    var->data.type == SMP_T_BIN) {
-			free(var->data.data.str.str);
-			var_accounting_diff(vars, &strm->sess->vars, &strm->vars_txn, &strm->vars_reqres, -var->data.data.str.len);
+			free(var->data.u.str.str);
+			var_accounting_diff(vars, smp->sess, smp->strm, -var->data.u.str.len);
 		}
 		else if (var->data.type == SMP_T_METH) {
-			free(var->data.data.meth.str.str);
-			var_accounting_diff(vars, &strm->sess->vars, &strm->vars_txn, &strm->vars_reqres, -var->data.data.meth.str.len);
+			free(var->data.u.meth.str.str);
+			var_accounting_diff(vars, smp->sess, smp->strm, -var->data.u.meth.str.len);
 		}
 	} else {
 
 		/* Check memory avalaible. */
-		if (!var_accounting_add(vars, &strm->sess->vars, &strm->vars_txn, &strm->vars_reqres, sizeof(struct var)))
+		if (!var_accounting_add(vars, smp->sess, smp->strm, sizeof(struct var)))
 			return 0;
 
 		/* Create new entry. */
@@ -293,78 +298,76 @@ static int sample_store(struct vars *vars, const char *name, struct stream *strm
 	}
 
 	/* Set type. */
-	var->data.type = smp->type;
+	var->data.type = smp->data.type;
 
 	/* Copy data. If the data needs memory, the function can fail. */
 	switch (var->data.type) {
 	case SMP_T_BOOL:
-	case SMP_T_UINT:
 	case SMP_T_SINT:
-		var->data.data.sint = smp->data.sint;
+		var->data.u.sint = smp->data.u.sint;
 		break;
 	case SMP_T_IPV4:
-		var->data.data.ipv4 = smp->data.ipv4;
+		var->data.u.ipv4 = smp->data.u.ipv4;
 		break;
 	case SMP_T_IPV6:
-		var->data.data.ipv6 = smp->data.ipv6;
+		var->data.u.ipv6 = smp->data.u.ipv6;
 		break;
 	case SMP_T_STR:
 	case SMP_T_BIN:
-		if (!var_accounting_add(vars, &strm->sess->vars, &strm->vars_txn, &strm->vars_reqres, smp->data.str.len)) {
+		if (!var_accounting_add(vars, smp->sess, smp->strm, smp->data.u.str.len)) {
 			var->data.type = SMP_T_BOOL; /* This type doesn't use additional memory. */
 			return 0;
 		}
-		var->data.data.str.str = malloc(smp->data.str.len);
-		if (!var->data.data.str.str) {
-			var_accounting_diff(vars, &strm->sess->vars, &strm->vars_txn, &strm->vars_reqres, -smp->data.str.len);
+		var->data.u.str.str = malloc(smp->data.u.str.len);
+		if (!var->data.u.str.str) {
+			var_accounting_diff(vars, smp->sess, smp->strm, -smp->data.u.str.len);
 			var->data.type = SMP_T_BOOL; /* This type doesn't use additional memory. */
 			return 0;
 		}
-		var->data.data.str.len = smp->data.str.len;
-		memcpy(var->data.data.str.str, smp->data.str.str, var->data.data.str.len);
+		var->data.u.str.len = smp->data.u.str.len;
+		memcpy(var->data.u.str.str, smp->data.u.str.str, var->data.u.str.len);
 		break;
 	case SMP_T_METH:
-		if (!var_accounting_add(vars, &strm->sess->vars, &strm->vars_txn, &strm->vars_reqres, smp->data.meth.str.len)) {
+		if (!var_accounting_add(vars, smp->sess, smp->strm, smp->data.u.meth.str.len)) {
 			var->data.type = SMP_T_BOOL; /* This type doesn't use additional memory. */
 			return 0;
 		}
-		var->data.data.meth.str.str = malloc(smp->data.meth.str.len);
-		if (!var->data.data.meth.str.str) {
-			var_accounting_diff(vars, &strm->sess->vars, &strm->vars_txn, &strm->vars_reqres, -smp->data.meth.str.len);
+		var->data.u.meth.str.str = malloc(smp->data.u.meth.str.len);
+		if (!var->data.u.meth.str.str) {
+			var_accounting_diff(vars, smp->sess, smp->strm, -smp->data.u.meth.str.len);
 			var->data.type = SMP_T_BOOL; /* This type doesn't use additional memory. */
 			return 0;
 		}
-		var->data.data.meth.meth = smp->data.meth.meth;
-		var->data.data.meth.str.len = smp->data.meth.str.len;
-		var->data.data.meth.str.size = smp->data.meth.str.len;
-		memcpy(var->data.data.meth.str.str, smp->data.meth.str.str, var->data.data.meth.str.len);
+		var->data.u.meth.meth = smp->data.u.meth.meth;
+		var->data.u.meth.str.len = smp->data.u.meth.str.len;
+		var->data.u.meth.str.size = smp->data.u.meth.str.len;
+		memcpy(var->data.u.meth.str.str, smp->data.u.meth.str.str, var->data.u.meth.str.len);
 		break;
 	}
 	return 1;
 }
 
 /* Returns 0 if fails, else returns 1. */
-static inline int sample_store_stream(const char *name, enum vars_scope scope,
-                                      struct stream *strm, struct sample *smp)
+static inline int sample_store_stream(const char *name, enum vars_scope scope, struct sample *smp)
 {
 	struct vars *vars;
 
 	switch (scope) {
-	case SCOPE_SESS: vars = &strm->sess->vars;  break;
-	case SCOPE_TXN:  vars = &strm->vars_txn;    break;
+	case SCOPE_SESS: vars = &smp->sess->vars;  break;
+	case SCOPE_TXN:  vars = &smp->strm->vars_txn;    break;
 	case SCOPE_REQ:
 	case SCOPE_RES:
-	default:         vars = &strm->vars_reqres; break;
+	default:         vars = &smp->strm->vars_reqres; break;
 	}
 	if (vars->scope != scope)
 		return 0;
-	return sample_store(vars, name, strm, smp);
+	return sample_store(vars, name, smp);
 }
 
 /* Returns 0 if fails, else returns 1. */
 static int smp_conv_store(const struct arg *args, struct sample *smp, void *private)
 {
-	return sample_store_stream(args[0].data.var.name, args[1].data.var.scope, smp->strm, smp);
+	return sample_store_stream(args[0].data.var.name, args[1].data.var.scope, smp);
 }
 
 /* This fucntions check an argument entry and fill it with a variable
@@ -397,7 +400,7 @@ int vars_check_arg(struct arg *arg, char **err)
 /* This function store a sample in a variable.
  * In error case, it fails silently.
  */
-void vars_set_by_name(const char *name, size_t len, struct stream *strm, struct sample *smp)
+void vars_set_by_name(const char *name, size_t len, struct sample *smp)
 {
 	enum vars_scope scope;
 
@@ -406,14 +409,14 @@ void vars_set_by_name(const char *name, size_t len, struct stream *strm, struct 
 	if (!name)
 		return;
 
-	sample_store_stream(name, scope, strm, smp);
+	sample_store_stream(name, scope, smp);
 }
 
 /* this function fills a sample with the
  * variable content. Returns 1 if the sample
  * is filled, otherwise it returns 0.
  */
-int vars_get_by_name(const char *name, size_t len, struct stream *strm, struct sample *smp)
+int vars_get_by_name(const char *name, size_t len, struct sample *smp)
 {
 	struct vars *vars;
 	struct var *var;
@@ -426,11 +429,11 @@ int vars_get_by_name(const char *name, size_t len, struct stream *strm, struct s
 
 	/* Select "vars" pool according with the scope. */
 	switch (scope) {
-	case SCOPE_SESS: vars = &strm->sess->vars;  break;
-	case SCOPE_TXN:  vars = &strm->vars_txn;    break;
+	case SCOPE_SESS: vars = &smp->sess->vars;  break;
+	case SCOPE_TXN:  vars = &smp->strm->vars_txn;    break;
 	case SCOPE_REQ:
 	case SCOPE_RES:
-	default:         vars = &strm->vars_reqres; break;
+	default:         vars = &smp->strm->vars_reqres; break;
 	}
 
 	/* Check if the scope is avalaible a this point of processing. */
@@ -443,69 +446,72 @@ int vars_get_by_name(const char *name, size_t len, struct stream *strm, struct s
 		return 0;
 
 	/* Copy sample. */
-	smp->type = var->data.type;
+	smp->data = var->data;
 	smp->flags = SMP_F_CONST;
-	memcpy(&smp->data, &var->data.data, sizeof(smp->data));
 	return 1;
 }
 
-/* Returns 0 if we need to come back later to complete the sample's retrieval,
- * otherwise 1. For now all processing is considered final so we only return 1.
+/* this function fills a sample with the
+ * content of the varaible described by <var_desc>. Returns 1
+ * if the sample is filled, otherwise it returns 0.
  */
-static inline int action_store(struct sample_expr *expr, const char *name,
-                               enum vars_scope scope, struct proxy *px,
-                               struct stream *s, int sens)
+int vars_get_by_desc(const struct var_desc *var_desc, struct sample *smp)
+{
+	struct vars *vars;
+	struct var *var;
+
+	/* Select "vars" pool according with the scope. */
+	switch (var_desc->scope) {
+	case SCOPE_SESS: vars = &smp->sess->vars;  break;
+	case SCOPE_TXN:  vars = &smp->strm->vars_txn;    break;
+	case SCOPE_REQ:
+	case SCOPE_RES:
+	default:         vars = &smp->strm->vars_reqres; break;
+	}
+
+	/* Check if the scope is avalaible a this point of processing. */
+	if (vars->scope != var_desc->scope)
+		return 0;
+
+	/* Get the variable entry. */
+	var = var_get(vars, var_desc->name);
+	if (!var)
+		return 0;
+
+	/* Copy sample. */
+	smp->data = var->data;
+	smp->flags = SMP_F_CONST;
+	return 1;
+}
+
+/* Always returns ACT_RET_CONT even if an error occurs. */
+static enum act_return action_store(struct act_rule *rule, struct proxy *px,
+                                    struct session *sess, struct stream *s, int flags)
 {
 	struct sample smp;
+	int dir;
+
+	switch (rule->from) {
+	case ACT_F_TCP_REQ_CNT: dir = SMP_OPT_DIR_REQ; break;
+	case ACT_F_TCP_RES_CNT: dir = SMP_OPT_DIR_RES; break;
+	case ACT_F_HTTP_REQ:    dir = SMP_OPT_DIR_REQ; break;
+	case ACT_F_HTTP_RES:    dir = SMP_OPT_DIR_RES; break;
+	default:
+		send_log(px, LOG_ERR, "Vars: internal error while execute action store.");
+		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))
+			Alert("Vars: internal error while execute action store.\n");
+		return ACT_RET_CONT;
+	}
 
 	/* Process the expression. */
 	memset(&smp, 0, sizeof(smp));
-	if (!sample_process(px, s->sess, s, sens|SMP_OPT_FINAL, expr, &smp))
-		return 1;
+	if (!sample_process(px, s->sess, s, dir|SMP_OPT_FINAL,
+	                    rule->arg.vars.expr, &smp))
+		return ACT_RET_CONT;
 
 	/* Store the sample, and ignore errors. */
-	sample_store_stream(name, scope, s, &smp);
-	return 1;
-}
-
-/* Returns 0 if miss data, else returns 1. */
-static int action_tcp_req_store(struct tcp_rule *rule, struct proxy *px, struct stream *s)
-{
-	struct sample_expr *expr = rule->act_prm.data[0];
-	const char *name = rule->act_prm.data[1];
-	int scope = (long)rule->act_prm.data[2];
-
-	return action_store(expr, name, scope, px, s, SMP_OPT_DIR_REQ);
-}
-
-/* Returns 0 if miss data, else returns 1. */
-static int action_tcp_res_store(struct tcp_rule *rule, struct proxy *px, struct stream *s)
-{
-	struct sample_expr *expr = rule->act_prm.data[0];
-	const char *name = rule->act_prm.data[1];
-	int scope = (long)rule->act_prm.data[2];
-
-	return action_store(expr, name, scope, px, s, SMP_OPT_DIR_RES);
-}
-
-/* Returns 0 if miss data, else returns 1. */
-static int action_http_req_store(struct http_req_rule *rule, struct proxy *px, struct stream *s)
-{
-	struct sample_expr *expr = rule->arg.act.p[0];
-	const char *name = rule->arg.act.p[1];
-	int scope = (long)rule->arg.act.p[2];
-
-	return action_store(expr, name, scope, px, s, SMP_OPT_DIR_REQ);
-}
-
-/* Returns 0 if miss data, else returns 1. */
-static int action_http_res_store(struct http_res_rule *rule, struct proxy *px, struct stream *s)
-{
-	struct sample_expr *expr = rule->arg.act.p[0];
-	const char *name = rule->arg.act.p[1];
-	int scope = (long)rule->arg.act.p[2];
-
-	return action_store(expr, name, scope, px, s, SMP_OPT_DIR_RES);
+	sample_store_stream(rule->arg.vars.name, rule->arg.vars.scope, &smp);
+	return ACT_RET_CONT;
 }
 
 /* This two function checks the variable name and replace the
@@ -532,152 +538,64 @@ static int conv_check_var(struct arg *args, struct sample_conv *conv,
  *
  *   set-var(<variable-name>) <expression>
  *
- * It returns 0 if fails and <err> is filled with an error message. Otherwise,
- * it returns 1 and the variable <expr> is filled with the pointer to the
- * expression to execute.
+ * It returns ACT_RET_PRS_ERR if fails and <err> is filled with an error
+ * message. Otherwise, it returns ACT_RET_PRS_OK and the variable <expr>
+ * is filled with the pointer to the expression to execute.
  */
-static int parse_vars(const char **args, int *arg, struct proxy *px,
-                      struct sample_expr **expr, char **name,
-                      enum vars_scope *scope, char **err)
+static enum act_parse_ret parse_store(const char **args, int *arg, struct proxy *px,
+                                      struct act_rule *rule, char **err)
 {
 	const char *var_name = args[*arg-1];
 	int var_len;
+	const char *kw_name;
+	int flags;
 
 	var_name += strlen("set-var");
 	if (*var_name != '(') {
 		memprintf(err, "invalid variable '%s'. Expects 'set-var(<var-name>)'", args[*arg-1]);
-		return 0;
+		return ACT_RET_PRS_ERR;
 	}
 	var_name++; /* jump the '(' */
 	var_len = strlen(var_name);
 	var_len--; /* remove the ')' */
 	if (var_name[var_len] != ')') {
 		memprintf(err, "invalid variable '%s'. Expects 'set-var(<var-name>)'", args[*arg-1]);
-		return 0;
+		return ACT_RET_PRS_ERR;
 	}
 
-	*name = register_name(var_name, var_len, scope, err);
-	if (!*name)
-		return 0;
+	rule->arg.vars.name = register_name(var_name, var_len, &rule->arg.vars.scope, err);
+	if (!rule->arg.vars.name)
+		return ACT_RET_PRS_ERR;
 
-	*expr = sample_parse_expr((char **)args, arg, px->conf.args.file, px->conf.args.line,
-	                          err, &px->conf.args);
-	if (!*expr)
-		return 0;
+	kw_name = args[*arg-1];
 
-	return 1;
-}
+	rule->arg.vars.expr = sample_parse_expr((char **)args, arg, px->conf.args.file,
+	                                        px->conf.args.line, err, &px->conf.args);
+	if (!rule->arg.vars.expr)
+		return ACT_RET_PRS_ERR;
 
-static int parse_tcp_req_store(const char **args, int *arg, struct proxy *px,
-                               struct tcp_rule *rule, char **err)
-{
-	struct sample_expr *expr;
-	int cur_arg = *arg;
-	char *name;
-	enum vars_scope scope;
-
-	if (!parse_vars(args, arg, px, &expr, &name, &scope, err))
-		return 0;
-
-	if (!(expr->fetch->val & SMP_VAL_FE_REQ_CNT)) {
+	switch (rule->from) {
+	case ACT_F_TCP_REQ_CNT: flags = SMP_VAL_FE_REQ_CNT; break;
+	case ACT_F_TCP_RES_CNT: flags = SMP_VAL_BE_RES_CNT; break;
+	case ACT_F_HTTP_REQ:    flags = SMP_VAL_FE_HRQ_HDR; break;
+	case ACT_F_HTTP_RES:    flags = SMP_VAL_BE_HRS_HDR; break;
+	default:
+		memprintf(err,
+			  "internal error, unexpected rule->from=%d, please report this bug!",
+			  rule->from);
+		return ACT_RET_PRS_ERR;
+	}
+	if (!(rule->arg.vars.expr->fetch->val & flags)) {
 		memprintf(err,
 			  "fetch method '%s' extracts information from '%s', none of which is available here",
-			  args[cur_arg-1], sample_src_names(expr->fetch->use));
-		free(expr);
-		return 0;
+			  kw_name, sample_src_names(rule->arg.vars.expr->fetch->use));
+		free(rule->arg.vars.expr);
+		return ACT_RET_PRS_ERR;
 	}
 
-	rule->action       = TCP_ACT_CUSTOM_CONT;
-	rule->action_ptr   = action_tcp_req_store;
-	rule->act_prm.data[0] = expr;
-	rule->act_prm.data[1] = name;
-	rule->act_prm.data[2] = (void *)(long)scope;
-
-	return 1;
-}
-
-static int parse_tcp_res_store(const char **args, int *arg, struct proxy *px,
-                         struct tcp_rule *rule, char **err)
-{
-	struct sample_expr *expr;
-	int cur_arg = *arg;
-	char *name;
-	enum vars_scope scope;
-
-	if (!parse_vars(args, arg, px, &expr, &name, &scope, err))
-		return 0;
-
-	if (!(expr->fetch->val & SMP_VAL_BE_RES_CNT)) {
-		memprintf(err,
-		          "fetch method '%s' extracts information from '%s', none of which is available here",
-		          args[cur_arg-1], sample_src_names(expr->fetch->use));
-		free(expr);
-		return 0;
-	}
-
-	rule->action       = TCP_ACT_CUSTOM_CONT;
-	rule->action_ptr   = action_tcp_res_store;
-	rule->act_prm.data[0] = expr;
-	rule->act_prm.data[1] = name;
-	rule->act_prm.data[2] = (void *)(long)scope;
-
-	return 1;
-}
-
-static int parse_http_req_store(const char **args, int *arg, struct proxy *px,
-                         struct http_req_rule *rule, char **err)
-{
-	struct sample_expr *expr;
-	int cur_arg = *arg;
-	char *name;
-	enum vars_scope scope;
-
-	if (!parse_vars(args, arg, px, &expr, &name, &scope, err))
-		return -1;
-
-	if (!(expr->fetch->val & SMP_VAL_FE_HRQ_HDR)) {
-		memprintf(err,
-		          "fetch method '%s' extracts information from '%s', none of which is available here",
-		          args[cur_arg-1], sample_src_names(expr->fetch->use));
-		free(expr);
-		return -1;
-	}
-
-	rule->action       = HTTP_REQ_ACT_CUSTOM_CONT;
-	rule->action_ptr   = action_http_req_store;
-	rule->arg.act.p[0] = expr;
-	rule->arg.act.p[1] = name;
-	rule->arg.act.p[2] = (void *)(long)scope;
-
-	return 0;
-}
-
-static int parse_http_res_store(const char **args, int *arg, struct proxy *px,
-                         struct http_res_rule *rule, char **err)
-{
-	struct sample_expr *expr;
-	int cur_arg = *arg;
-	char *name;
-	enum vars_scope scope;
-
-	if (!parse_vars(args, arg, px, &expr, &name, &scope, err))
-		return -1;
-
-	if (!(expr->fetch->val & SMP_VAL_BE_HRS_HDR)) {
-		memprintf(err,
-		          "fetch method '%s' extracts information from '%s', none of which is available here",
-		          args[cur_arg-1], sample_src_names(expr->fetch->use));
-		free(expr);
-		return -1;
-	}
-
-	rule->action       = HTTP_RES_ACT_CUSTOM_CONT;
-	rule->action_ptr   = action_http_res_store;
-	rule->arg.act.p[0] = expr;
-	rule->arg.act.p[1] = name;
-	rule->arg.act.p[2] = (void *)(long)scope;
-
-	return 0;
+	rule->action     = ACT_CUSTOM;
+	rule->action_ptr = action_store;
+	return ACT_RET_PRS_OK;
 }
 
 static int vars_max_size(char **args, int section_type, struct proxy *curpx,
@@ -733,23 +651,23 @@ static struct sample_conv_kw_list sample_conv_kws = {ILH, {
 	{ /* END */ },
 }};
 
-static struct tcp_action_kw_list tcp_req_kws = {"vars", { }, {
-	{ "set-var", parse_tcp_req_store, 1 },
+static struct action_kw_list tcp_req_kws = { { }, {
+	{ "set-var", parse_store, 1 },
 	{ /* END */ }
 }};
 
-static struct tcp_action_kw_list tcp_res_kws = {"vars", { }, {
-	{ "set-var", parse_tcp_res_store, 1 },
+static struct action_kw_list tcp_res_kws = { { }, {
+	{ "set-var", parse_store, 1 },
 	{ /* END */ }
 }};
 
-static struct http_req_action_kw_list http_req_kws = {"vars", { }, {
-	{ "set-var", parse_http_req_store, 1 },
+static struct action_kw_list http_req_kws = { { }, {
+	{ "set-var", parse_store, 1 },
 	{ /* END */ }
 }};
 
-static struct http_res_action_kw_list http_res_kws = {"vars", { }, {
-	{ "set-var", parse_http_res_store, 1 },
+static struct action_kw_list http_res_kws = { { }, {
+	{ "set-var", parse_store, 1 },
 	{ /* END */ }
 }};
 

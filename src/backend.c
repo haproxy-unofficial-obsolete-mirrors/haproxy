@@ -55,6 +55,10 @@
 #include <proto/stream_interface.h>
 #include <proto/task.h>
 
+#ifdef USE_OPENSSL
+#include <proto/ssl_sock.h>
+#endif /* USE_OPENSSL */
+
 int be_lastsession(const struct proxy *be)
 {
 	if (be->be_counters.last_sess)
@@ -472,7 +476,7 @@ struct server *get_server_rch(struct stream *s)
 	b_rew(s->req.buf, rewind = s->req.buf->o);
 
 	ret = fetch_rdp_cookie_name(s, &smp, px->hh_name, px->hh_len);
-	len = smp.data.str.len;
+	len = smp.data.u.str.len;
 
 	b_adv(s->req.buf, rewind);
 
@@ -486,7 +490,7 @@ struct server *get_server_rch(struct stream *s)
 	/* Found a the hh_name in the headers.
 	 * we will compute the hash based on this value ctx.val.
 	 */
-	hash = gen_hash(px, smp.data.str.str, len);
+	hash = gen_hash(px, smp.data.u.str.str, len);
 
 	if ((px->lbprm.algo & BE_LB_HASH_MOD) == BE_LB_HMOD_AVAL)
 		hash = full_hash(hash);
@@ -949,7 +953,7 @@ int assign_server_and_queue(struct stream *s)
  */
 static void assign_tproxy_address(struct stream *s)
 {
-#if defined(CONFIG_HAP_CTTPROXY) || defined(CONFIG_HAP_TRANSPARENT)
+#if defined(CONFIG_HAP_TRANSPARENT)
 	struct server *srv = objt_server(s->target);
 	struct conn_src *src;
 	struct connection *cli_conn;
@@ -1021,13 +1025,85 @@ int connect_server(struct stream *s)
 {
 	struct connection *cli_conn;
 	struct connection *srv_conn;
+	struct connection *old_conn;
 	struct server *srv;
 	int reuse = 0;
 	int err;
 
+	srv = objt_server(s->target);
 	srv_conn = objt_conn(s->si[1].end);
 	if (srv_conn)
 		reuse = s->target == srv_conn->target;
+
+	if (srv && !reuse) {
+		old_conn = srv_conn;
+		if (old_conn) {
+			srv_conn = NULL;
+			old_conn->owner = NULL;
+			si_detach_endpoint(&s->si[1]);
+			/* note: if the connection was in a server's idle
+			 * queue, it doesn't get dequeued.
+			 */
+		}
+
+		/* Below we pick connections from the safe or idle lists based
+		 * on the strategy, the fact that this is a first or second
+		 * (retryable) request, with the indicated priority (1 or 2) :
+		 *
+		 *          SAFE                 AGGR                ALWS
+		 *
+		 *      +-----+-----+        +-----+-----+       +-----+-----+
+		 *   req| 1st | 2nd |     req| 1st | 2nd |    req| 1st | 2nd |
+		 *  ----+-----+-----+    ----+-----+-----+   ----+-----+-----+
+		 *  safe|  -  |  2  |    safe|  1  |  2  |   safe|  1  |  2  |
+		 *  ----+-----+-----+    ----+-----+-----+   ----+-----+-----+
+		 *  idle|  -  |  1  |    idle|  -  |  1  |   idle|  2  |  1  |
+		 *  ----+-----+-----+    ----+-----+-----+   ----+-----+-----+
+		 */
+
+		if (!LIST_ISEMPTY(&srv->idle_conns) &&
+		    ((s->be->options & PR_O_REUSE_MASK) != PR_O_REUSE_NEVR &&
+		     s->txn && (s->txn->flags & TX_NOT_FIRST))) {
+			srv_conn = LIST_ELEM(srv->idle_conns.n, struct connection *, list);
+		}
+		else if (!LIST_ISEMPTY(&srv->safe_conns) &&
+			 ((s->txn && (s->txn->flags & TX_NOT_FIRST)) ||
+			  (s->be->options & PR_O_REUSE_MASK) >= PR_O_REUSE_AGGR)) {
+			srv_conn = LIST_ELEM(srv->safe_conns.n, struct connection *, list);
+		}
+		else if (!LIST_ISEMPTY(&srv->idle_conns) &&
+			 (s->be->options & PR_O_REUSE_MASK) == PR_O_REUSE_ALWS) {
+			srv_conn = LIST_ELEM(srv->idle_conns.n, struct connection *, list);
+		}
+
+		/* If we've picked a connection from the pool, we now have to
+		 * detach it. We may have to get rid of the previous idle
+		 * connection we had, so for this we try to swap it with the
+		 * other owner's. That way it may remain alive for others to
+		 * pick.
+		 */
+		if (srv_conn) {
+			LIST_DEL(&srv_conn->list);
+			LIST_INIT(&srv_conn->list);
+
+			if (srv_conn->owner) {
+				si_detach_endpoint(srv_conn->owner);
+				if (old_conn && !(old_conn->flags & CO_FL_PRIVATE)) {
+					si_attach_conn(srv_conn->owner, old_conn);
+					si_idle_conn(srv_conn->owner, NULL);
+				}
+			}
+			si_attach_conn(&s->si[1], srv_conn);
+			reuse = 1;
+		}
+
+		/* we may have to release our connection if we couldn't swap it */
+		if (old_conn && !old_conn->owner) {
+			LIST_DEL(&old_conn->list);
+			conn_force_close(old_conn);
+			conn_free(old_conn);
+		}
+	}
 
 	if (reuse) {
 		/* Disable connection reuse if a dynamic source is used.
@@ -1035,7 +1111,6 @@ int connect_server(struct stream *s)
 		 * we don't need to disable connection reuse on no-idempotent
 		 * requests nor when PROXY protocol is used.
 		 */
-		srv = objt_server(s->target);
 		if (srv && srv->conn_src.opts & CO_SRC_BIND) {
 			if ((srv->conn_src.opts & CO_SRC_TPROXY_MASK) == CO_SRC_TPROXY_DYN)
 				reuse = 0;
@@ -1046,7 +1121,14 @@ int connect_server(struct stream *s)
 		}
 	}
 
-	srv_conn = si_alloc_conn(&s->si[1], reuse);
+	if (!reuse)
+		srv_conn = si_alloc_conn(&s->si[1]);
+	else {
+		/* reusing our connection, take it out of the idle list */
+		LIST_DEL(&srv_conn->list);
+		LIST_INIT(&srv_conn->list);
+	}
+
 	if (!srv_conn)
 		return SF_ERR_RESOURCE;
 
@@ -1061,8 +1143,8 @@ int connect_server(struct stream *s)
 		srv_conn->target = s->target;
 
 		/* set the correct protocol on the output stream interface */
-		if (objt_server(s->target)) {
-			conn_prepare(srv_conn, protocol_by_family(srv_conn->addr.to.ss_family), objt_server(s->target)->xprt);
+		if (srv) {
+			conn_prepare(srv_conn, protocol_by_family(srv_conn->addr.to.ss_family), srv->xprt);
 		}
 		else if (obj_type(s->target) == OBJ_TYPE_PROXY) {
 			/* proxies exclusively run on raw_sock right now */
@@ -1075,7 +1157,8 @@ int connect_server(struct stream *s)
 
 		/* process the case where the server requires the PROXY protocol to be sent */
 		srv_conn->send_proxy_ofs = 0;
-		if (objt_server(s->target) && objt_server(s->target)->pp_opts) {
+		if (srv && srv->pp_opts) {
+			srv_conn->flags |= CO_FL_PRIVATE;
 			srv_conn->send_proxy_ofs = 1; /* must compute size */
 			cli_conn = objt_conn(strm_orig(s));
 			if (cli_conn)
@@ -1108,7 +1191,6 @@ int connect_server(struct stream *s)
 	/* set connect timeout */
 	s->si[1].exp = tick_add_ifset(now_ms, s->be->timeout.connect);
 
-	srv = objt_server(s->target);
 	if (srv) {
 		s->flags |= SF_CURR_SESS;
 		srv->cur_sess++;
@@ -1116,6 +1198,37 @@ int connect_server(struct stream *s)
 			srv->counters.cur_sess_max = srv->cur_sess;
 		if (s->be->lbprm.server_take_conn)
 			s->be->lbprm.server_take_conn(srv);
+
+#ifdef USE_OPENSSL
+		if (srv->ssl_ctx.sni) {
+			struct sample *smp;
+			int rewind;
+
+			/* Tricky case : we have already scheduled the pending
+			 * HTTP request or TCP data for leaving. So in HTTP we
+			 * rewind exactly the headers, otherwise we rewind the
+			 * output data.
+			 */
+			rewind = s->txn ? http_hdr_rewind(&s->txn->req) : s->req.buf->o;
+			b_rew(s->req.buf, rewind);
+
+			smp = sample_fetch_as_type(s->be, s->sess, s, SMP_OPT_DIR_REQ | SMP_OPT_FINAL, srv->ssl_ctx.sni, SMP_T_STR);
+
+			/* restore the pointers */
+			b_adv(s->req.buf, rewind);
+
+			if (smp) {
+				/* get write access to terminate with a zero */
+				smp_dup(smp);
+				if (smp->data.u.str.len >= smp->data.u.str.size)
+					smp->data.u.str.len = smp->data.u.str.size - 1;
+				smp->data.u.str.str[smp->data.u.str.len] = 0;
+				ssl_sock_set_servername(srv_conn, smp->data.u.str.str);
+				srv_conn->flags |= CO_FL_PRIVATE;
+			}
+		}
+#endif /* USE_OPENSSL */
+
 	}
 
 	return SF_ERR_NONE;  /* connection is OK */
@@ -1250,14 +1363,14 @@ int tcp_persist_rdp_cookie(struct stream *s, struct channel *req, int an_bit)
 	memset(&smp, 0, sizeof(smp));
 
 	ret = fetch_rdp_cookie_name(s, &smp, s->be->rdp_cookie_name, s->be->rdp_cookie_len);
-	if (ret == 0 || (smp.flags & SMP_F_MAY_CHANGE) || smp.data.str.len == 0)
+	if (ret == 0 || (smp.flags & SMP_F_MAY_CHANGE) || smp.data.u.str.len == 0)
 		goto no_cookie;
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
 
 	/* Considering an rdp cookie detected using acl, str ended with <cr><lf> and should return */
-	addr.sin_addr.s_addr = strtoul(smp.data.str.str, &p, 10);
+	addr.sin_addr.s_addr = strtoul(smp.data.u.str.str, &p, 10);
 	if (*p != '.')
 		goto no_cookie;
 	p++;
@@ -1491,15 +1604,15 @@ smp_fetch_nbsrv(const struct arg *args, struct sample *smp, const char *kw, void
 	struct proxy *px;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_UINT;
+	smp->data.type = SMP_T_SINT;
 	px = args->data.prx;
 
 	if (px->srv_act)
-		smp->data.uint = px->srv_act;
+		smp->data.u.sint = px->srv_act;
 	else if (px->lbprm.fbck)
-		smp->data.uint = 1;
+		smp->data.u.sint = 1;
 	else
-		smp->data.uint = px->srv_bck;
+		smp->data.u.sint = px->srv_bck;
 
 	return 1;
 }
@@ -1515,12 +1628,12 @@ smp_fetch_srv_is_up(const struct arg *args, struct sample *smp, const char *kw, 
 	struct server *srv = args->data.srv;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_BOOL;
+	smp->data.type = SMP_T_BOOL;
 	if (!(srv->admin & SRV_ADMF_MAINT) &&
 	    (!(srv->check.state & CHK_ST_CONFIGURED) || (srv->state != SRV_ST_STOPPED)))
-		smp->data.uint = 1;
+		smp->data.u.sint = 1;
 	else
-		smp->data.uint = 0;
+		smp->data.u.sint = 0;
 	return 1;
 }
 
@@ -1534,8 +1647,8 @@ smp_fetch_connslots(const struct arg *args, struct sample *smp, const char *kw, 
 	struct server *iterator;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_UINT;
-	smp->data.uint = 0;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = 0;
 
 	for (iterator = args->data.prx->srv; iterator; iterator = iterator->next) {
 		if (iterator->state == SRV_ST_STOPPED)
@@ -1543,11 +1656,11 @@ smp_fetch_connslots(const struct arg *args, struct sample *smp, const char *kw, 
 
 		if (iterator->maxconn == 0 || iterator->maxqueue == 0) {
 			/* configuration is stupid */
-			smp->data.uint = -1;  /* FIXME: stupid value! */
+			smp->data.u.sint = -1;  /* FIXME: stupid value! */
 			return 1;
 		}
 
-		smp->data.uint += (iterator->maxconn - iterator->cur_sess)
+		smp->data.u.sint += (iterator->maxconn - iterator->cur_sess)
 		                       +  (iterator->maxqueue - iterator->nbpend);
 	}
 
@@ -1558,9 +1671,12 @@ smp_fetch_connslots(const struct arg *args, struct sample *smp, const char *kw, 
 static int
 smp_fetch_be_id(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
+	if (!smp->strm)
+		return 0;
+
 	smp->flags = SMP_F_VOL_TXN;
-	smp->type = SMP_T_UINT;
-	smp->data.uint = smp->strm->be->uuid;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = smp->strm->be->uuid;
 	return 1;
 }
 
@@ -1568,11 +1684,14 @@ smp_fetch_be_id(const struct arg *args, struct sample *smp, const char *kw, void
 static int
 smp_fetch_srv_id(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
+	if (!smp->strm)
+		return 0;
+
 	if (!objt_server(smp->strm->target))
 		return 0;
 
-	smp->type = SMP_T_UINT;
-	smp->data.uint = objt_server(smp->strm->target)->puid;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = objt_server(smp->strm->target)->puid;
 
 	return 1;
 }
@@ -1585,8 +1704,8 @@ static int
 smp_fetch_be_sess_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_UINT;
-	smp->data.uint = read_freq_ctr(&args->data.prx->be_sess_per_sec);
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = read_freq_ctr(&args->data.prx->be_sess_per_sec);
 	return 1;
 }
 
@@ -1598,8 +1717,8 @@ static int
 smp_fetch_be_conn(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_UINT;
-	smp->data.uint = args->data.prx->beconn;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = args->data.prx->beconn;
 	return 1;
 }
 
@@ -1611,8 +1730,8 @@ static int
 smp_fetch_queue_size(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_UINT;
-	smp->data.uint = args->data.prx->totpend;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = args->data.prx->totpend;
 	return 1;
 }
 
@@ -1631,7 +1750,7 @@ smp_fetch_avg_queue_size(const struct arg *args, struct sample *smp, const char 
 	struct proxy *px;
 
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_UINT;
+	smp->data.type = SMP_T_SINT;
 	px = args->data.prx;
 
 	if (px->srv_act)
@@ -1642,9 +1761,9 @@ smp_fetch_avg_queue_size(const struct arg *args, struct sample *smp, const char 
 		nbsrv = px->srv_bck;
 
 	if (nbsrv > 0)
-		smp->data.uint = (px->totpend + nbsrv - 1) / nbsrv;
+		smp->data.u.sint = (px->totpend + nbsrv - 1) / nbsrv;
 	else
-		smp->data.uint = px->totpend * 2;
+		smp->data.u.sint = px->totpend * 2;
 
 	return 1;
 }
@@ -1657,8 +1776,8 @@ static int
 smp_fetch_srv_conn(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_UINT;
-	smp->data.uint = args->data.srv->cur_sess;
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = args->data.srv->cur_sess;
 	return 1;
 }
 
@@ -1670,8 +1789,8 @@ static int
 smp_fetch_srv_sess_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
 	smp->flags = SMP_F_VOL_TEST;
-	smp->type = SMP_T_UINT;
-	smp->data.uint = read_freq_ctr(&args->data.srv->sess_per_sec);
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = read_freq_ctr(&args->data.srv->sess_per_sec);
 	return 1;
 }
 
@@ -1680,17 +1799,17 @@ smp_fetch_srv_sess_rate(const struct arg *args, struct sample *smp, const char *
  * Please take care of keeping this list alphabetically sorted.
  */
 static struct sample_fetch_kw_list smp_kws = {ILH, {
-	{ "avg_queue",     smp_fetch_avg_queue_size, ARG1(1,BE),  NULL, SMP_T_UINT, SMP_USE_INTRN, },
-	{ "be_conn",       smp_fetch_be_conn,        ARG1(1,BE),  NULL, SMP_T_UINT, SMP_USE_INTRN, },
-	{ "be_id",         smp_fetch_be_id,          0,           NULL, SMP_T_UINT, SMP_USE_BKEND, },
-	{ "be_sess_rate",  smp_fetch_be_sess_rate,   ARG1(1,BE),  NULL, SMP_T_UINT, SMP_USE_INTRN, },
-	{ "connslots",     smp_fetch_connslots,      ARG1(1,BE),  NULL, SMP_T_UINT, SMP_USE_INTRN, },
-	{ "nbsrv",         smp_fetch_nbsrv,          ARG1(1,BE),  NULL, SMP_T_UINT, SMP_USE_INTRN, },
-	{ "queue",         smp_fetch_queue_size,     ARG1(1,BE),  NULL, SMP_T_UINT, SMP_USE_INTRN, },
-	{ "srv_conn",      smp_fetch_srv_conn,       ARG1(1,SRV), NULL, SMP_T_UINT, SMP_USE_INTRN, },
-	{ "srv_id",        smp_fetch_srv_id,         0,           NULL, SMP_T_UINT, SMP_USE_SERVR, },
+	{ "avg_queue",     smp_fetch_avg_queue_size, ARG1(1,BE),  NULL, SMP_T_SINT, SMP_USE_INTRN, },
+	{ "be_conn",       smp_fetch_be_conn,        ARG1(1,BE),  NULL, SMP_T_SINT, SMP_USE_INTRN, },
+	{ "be_id",         smp_fetch_be_id,          0,           NULL, SMP_T_SINT, SMP_USE_BKEND, },
+	{ "be_sess_rate",  smp_fetch_be_sess_rate,   ARG1(1,BE),  NULL, SMP_T_SINT, SMP_USE_INTRN, },
+	{ "connslots",     smp_fetch_connslots,      ARG1(1,BE),  NULL, SMP_T_SINT, SMP_USE_INTRN, },
+	{ "nbsrv",         smp_fetch_nbsrv,          ARG1(1,BE),  NULL, SMP_T_SINT, SMP_USE_INTRN, },
+	{ "queue",         smp_fetch_queue_size,     ARG1(1,BE),  NULL, SMP_T_SINT, SMP_USE_INTRN, },
+	{ "srv_conn",      smp_fetch_srv_conn,       ARG1(1,SRV), NULL, SMP_T_SINT, SMP_USE_INTRN, },
+	{ "srv_id",        smp_fetch_srv_id,         0,           NULL, SMP_T_SINT, SMP_USE_SERVR, },
 	{ "srv_is_up",     smp_fetch_srv_is_up,      ARG1(1,SRV), NULL, SMP_T_BOOL, SMP_USE_INTRN, },
-	{ "srv_sess_rate", smp_fetch_srv_sess_rate,  ARG1(1,SRV), NULL, SMP_T_UINT, SMP_USE_INTRN, },
+	{ "srv_sess_rate", smp_fetch_srv_sess_rate,  ARG1(1,SRV), NULL, SMP_T_SINT, SMP_USE_INTRN, },
 	{ /* END */ },
 }};
 

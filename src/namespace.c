@@ -1,12 +1,5 @@
 #define _GNU_SOURCE
 
-#include <common/namespace.h>
-#include <common/compiler.h>
-#include <common/hash.h>
-#include <common/errors.h>
-#include <proto/log.h>
-#include <types/global.h>
-
 #include <sched.h>
 #include <stdio.h>
 #include <sys/stat.h>
@@ -16,6 +9,14 @@
 #include <sys/socket.h>
 
 #include <string.h>
+
+#include <common/namespace.h>
+#include <common/compiler.h>
+#include <common/hash.h>
+#include <common/errors.h>
+#include <proto/log.h>
+#include <types/global.h>
+
 #ifdef CONFIG_HAP_NS
 
 /* Opens the namespace <ns_name> and returns the FD or -1 in case of error
@@ -66,7 +67,7 @@ struct netns_entry* netns_store_insert(const char *ns_name)
 	if (fd == -1)
 		goto out;
 
-	entry = (struct netns_entry *)calloc(1, sizeof(struct netns_entry));
+	entry = calloc(1, sizeof(*entry));
 	if (!entry)
 		goto out;
 	entry->fd = fd;
@@ -97,14 +98,13 @@ int my_socketat(const struct netns_entry *ns, int domain, int type, int protocol
 	int sock;
 
 #ifdef CONFIG_HAP_NS
-	if (default_namespace < 0 ||
-	    (ns && setns(ns->fd, CLONE_NEWNET) == -1))
+	if (default_namespace >= 0 && ns && setns(ns->fd, CLONE_NEWNET) == -1)
 		return -1;
 #endif
 	sock = socket(domain, type, protocol);
 
 #ifdef CONFIG_HAP_NS
-	if (ns && setns(default_namespace, CLONE_NEWNET) == -1) {
+	if (default_namespace >= 0 && ns && setns(default_namespace, CLONE_NEWNET) == -1) {
 		close(sock);
 		return -1;
 	}

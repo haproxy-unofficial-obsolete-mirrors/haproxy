@@ -5,7 +5,6 @@
 #
 # Valid USE_* options are the following. Most of them are automatically set by
 # the TARGET, others have to be explictly specified :
-#   USE_CTTPROXY         : enable CTTPROXY on Linux (needs kernel patch).
 #   USE_DLMALLOC         : enable use of dlmalloc (see DLMALLOC_SRC)
 #   USE_EPOLL            : enable epoll() on Linux 2.6. Automatic.
 #   USE_GETSOCKNAME      : enable getsockname() on Linux 2.2. Automatic.
@@ -99,7 +98,7 @@ DOCDIR = $(PREFIX)/doc/haproxy
 # Use TARGET=<target_name> to optimize for a specifc target OS among the
 # following list (use the default "generic" if uncertain) :
 #    generic, linux22, linux24, linux24e, linux26, solaris,
-#    freebsd, openbsd, netbsd, cygwin, custom, aix51, aix52
+#    freebsd, openbsd, netbsd, cygwin, haiku, custom, aix51, aix52
 TARGET =
 
 #### TARGET CPU
@@ -219,6 +218,12 @@ USE_POLL   = default
 ifeq ($(TARGET),generic)
   # generic system target has nothing specific
   USE_POLL   = implicit
+  USE_TPROXY = implicit
+else
+ifeq ($(TARGET),haiku)
+  # For Haiku
+  TARGET_LDFLAGS = -lnetwork
+  USE_POLL = implicit
   USE_TPROXY = implicit
 else
 ifeq ($(TARGET),linux22)
@@ -348,6 +353,7 @@ endif # linux26
 endif # linux24e
 endif # linux24
 endif # linux22
+endif # haiku
 endif # generic
 
 
@@ -424,12 +430,6 @@ endif
 ifneq ($(USE_LINUX_SPLICE),)
 OPTIONS_CFLAGS += -DCONFIG_HAP_LINUX_SPLICE
 BUILD_OPTIONS  += $(call ignore_implicit,USE_LINUX_SPLICE)
-endif
-
-ifneq ($(USE_CTTPROXY),)
-OPTIONS_CFLAGS += -DCONFIG_HAP_CTTPROXY
-OPTIONS_OBJS   += src/cttproxy.o
-BUILD_OPTIONS  += $(call ignore_implicit,USE_CTTPROXY)
 endif
 
 ifneq ($(USE_TPROXY),)
@@ -569,7 +569,7 @@ OPTIONS_OBJS  += src/dlmalloc.o
 endif
 
 ifneq ($(USE_OPENSSL),)
-# OpenSSL is packaged in various forms and with various dependences.
+# OpenSSL is packaged in various forms and with various dependencies.
 # In general -lssl is enough, but on some platforms, -lcrypto may be needed,
 # reason why it's added by default. Some even need -lz, then you'll need to
 # pass it in the "ADDLIB" variable if needed. If your SSL libraries are not
@@ -595,8 +595,9 @@ endif
 ifneq ($(USE_LUA),)
 check_lua_lib = $(shell echo "int main(){}" | $(CC) -o /dev/null -x c - $(2) -l$(1) 2>/dev/null && echo $(1))
 
+BUILD_OPTIONS   += $(call ignore_implicit,USE_LUA)
 OPTIONS_CFLAGS  += -DUSE_LUA $(if $(LUA_INC),-I$(LUA_INC))
-LUA_LD_FLAGS := $(if $(LUA_LIB),-L$(LUA_LIB))
+LUA_LD_FLAGS := -Wl,--export-dynamic $(if $(LUA_LIB),-L$(LUA_LIB))
 ifeq ($(LUA_LIB_NAME),)
 # Try to automatically detect the Lua library
 LUA_LIB_NAME := $(firstword $(foreach lib,lua5.3 lua53 lua,$(call check_lua_lib,$(lib),$(LUA_LD_FLAGS))))
@@ -606,10 +607,16 @@ endif
 endif
 
 OPTIONS_LDFLAGS += $(LUA_LD_FLAGS) -l$(LUA_LIB_NAME) -lm
-OPTIONS_OBJS    += src/hlua.o
+ifneq ($(USE_DL),)
+OPTIONS_LDFLAGS += -ldl
+endif
+OPTIONS_OBJS    += src/hlua.o src/hlua_fcn.o
 endif
 
 ifneq ($(USE_DEVICEATLAS),)
+ifeq ($(USE_PCRE),)
+$(error the DeviceAtlas module needs the PCRE library in order to compile)
+endif
 # Use DEVICEATLAS_SRC and possibly DEVICEATLAS_INC and DEVICEATLAS_LIB to force path
 # to DeviceAtlas headers and libraries if needed.
 DEVICEATLAS_SRC =
@@ -628,11 +635,12 @@ ifneq ($(USE_51DEGREES),)
 51DEGREES_SRC =
 51DEGREES_INC = $(51DEGREES_SRC)
 51DEGREES_LIB = $(51DEGREES_SRC)
+OPTIONS_OBJS    += $(51DEGREES_LIB)/../cityhash/city.o
 OPTIONS_OBJS    += $(51DEGREES_LIB)/51Degrees.o
 OPTIONS_OBJS    += src/51d.o
-OPTIONS_CFLAGS  += -DUSE_51DEGREES $(if $(51DEGREES_INC),-I$(51DEGREES_INC))
+OPTIONS_CFLAGS  += -DUSE_51DEGREES -DFIFTYONEDEGREES_NO_THREADING $(if $(51DEGREES_INC),-I$(51DEGREES_INC))
 BUILD_OPTIONS   += $(call ignore_implicit,USE_51DEGREES)
-OPTIONS_LDFLAGS += $(if $(51DEGREES_LIB),-L$(51DEGREES_LIB)) -lz
+OPTIONS_LDFLAGS += $(if $(51DEGREES_LIB),-L$(51DEGREES_LIB)) -lm
 endif
 
 ifneq ($(USE_PCRE)$(USE_STATIC_PCRE)$(USE_PCRE_JIT),)
@@ -730,19 +738,20 @@ else
 all: haproxy $(EXTRA)
 endif
 
-OBJS = src/haproxy.o src/sessionhash.o src/base64.o src/protocol.o \
+OBJS = src/haproxy.o src/base64.o src/protocol.o \
        src/uri_auth.o src/standard.o src/buffer.o src/log.o src/task.o \
        src/chunk.o src/channel.o src/listener.o src/lru.o src/xxhash.o \
        src/time.o src/fd.o src/pipe.o src/regex.o src/cfgparse.o src/server.o \
        src/checks.o src/queue.o src/frontend.o src/proxy.o src/peers.o \
        src/arg.o src/stick_table.o src/proto_uxst.o src/connection.o \
-       src/proto_http.o src/raw_sock.o src/appsession.o src/backend.o \
+       src/proto_http.o src/raw_sock.o src/backend.o \
        src/lb_chash.o src/lb_fwlc.o src/lb_fwrr.o src/lb_map.o src/lb_fas.o \
        src/stream_interface.o src/dumpstats.o src/proto_tcp.o src/applet.o \
        src/session.o src/stream.o src/hdr_idx.o src/ev_select.o src/signal.o \
        src/acl.o src/sample.o src/memory.o src/freq_ctr.o src/auth.o src/proto_udp.o \
        src/compression.o src/payload.o src/hash.o src/pattern.o src/map.o \
-       src/namespace.o src/mailers.o src/dns.o src/vars.o
+       src/namespace.o src/mailers.o src/dns.o src/vars.o src/filters.o \
+       src/flt_http_comp.o src/flt_trace.o
 
 EBTREE_OBJS = $(EBTREE_DIR)/ebtree.o \
               $(EBTREE_DIR)/eb32tree.o $(EBTREE_DIR)/eb64tree.o \
@@ -798,22 +807,24 @@ install-man:
 	install -d "$(DESTDIR)$(MANDIR)"/man1
 	install -m 644 doc/haproxy.1 "$(DESTDIR)$(MANDIR)"/man1
 
+EXCLUDE_DOCUMENTATION = lgpl gpl coding-style
+DOCUMENTATION = $(filter-out $(EXCLUDE_DOCUMENTATION),$(patsubst doc/%.txt,%,$(wildcard doc/*.txt)))
+
 install-doc:
 	install -d "$(DESTDIR)$(DOCDIR)"
-	for x in configuration architecture haproxy-en haproxy-fr; do \
+	for x in $(DOCUMENTATION); do \
 		install -m 644 doc/$$x.txt "$(DESTDIR)$(DOCDIR)" ; \
 	done
 
-install-bin: haproxy haproxy-systemd-wrapper
+install-bin: haproxy $(EXTRA)
 	install -d "$(DESTDIR)$(SBINDIR)"
-	install haproxy "$(DESTDIR)$(SBINDIR)"
-	install haproxy-systemd-wrapper "$(DESTDIR)$(SBINDIR)"
+	install haproxy $(EXTRA) "$(DESTDIR)$(SBINDIR)"
 
 install: install-bin install-man install-doc
 
 uninstall:
 	rm -f "$(DESTDIR)$(MANDIR)"/man1/haproxy.1
-	for x in configuration architecture haproxy-en haproxy-fr; do \
+	for x in $(DOCUMENTATION); do \
 		rm -f "$(DESTDIR)$(DOCDIR)"/$$x.txt ; \
 	done
 	-rmdir "$(DESTDIR)$(DOCDIR)"

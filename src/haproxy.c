@@ -1,6 +1,6 @@
 /*
  * HA-Proxy : High Availability-enabled HTTP/TCP proxy
- * Copyright 2000-2015  Willy Tarreau <w@1wt.eu>.
+ * Copyright 2000-2016 Willy Tarreau <willy@haproxy.org>.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -25,11 +25,14 @@
  *
  */
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 #include <ctype.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -47,16 +50,17 @@
 #include <syslog.h>
 #include <grp.h>
 #ifdef USE_CPU_AFFINITY
-#define __USE_GNU
 #include <sched.h>
-#undef __USE_GNU
+#ifdef __FreeBSD__
+#include <sys/param.h>
+#include <sys/cpuset.h>
+#endif
 #endif
 
 #ifdef DEBUG_FULL
 #include <assert.h>
 #endif
 
-#include <common/appsession.h>
 #include <common/base64.h>
 #include <common/cfgparse.h>
 #include <common/chunk.h>
@@ -74,8 +78,9 @@
 #include <common/version.h>
 
 #include <types/capture.h>
+#include <types/compression.h>
+#include <types/filters.h>
 #include <types/global.h>
-#include <types/proto_tcp.h>
 #include <types/acl.h>
 #include <types/peers.h>
 
@@ -88,6 +93,7 @@
 #include <proto/checks.h>
 #include <proto/connection.h>
 #include <proto/fd.h>
+#include <proto/filters.h>
 #include <proto/hdr_idx.h>
 #include <proto/hlua.h>
 #include <proto/listener.h>
@@ -103,10 +109,6 @@
 #include <proto/signal.h>
 #include <proto/task.h>
 #include <proto/dns.h>
-
-#ifdef CONFIG_HAP_CTTPROXY
-#include <proto/cttproxy.h>
-#endif
 
 #ifdef USE_OPENSSL
 #include <proto/ssl_sock.h>
@@ -136,7 +138,7 @@ struct global global = {
 	.nbproc = 1,
 	.req_count = 0,
 	.logsrvs = LIST_HEAD_INIT(global.logsrvs),
-#ifdef DEFAULT_MAXZLIBMEM
+#if defined(USE_ZLIB) && defined(DEFAULT_MAXZLIBMEM)
 	.maxzlibmem = DEFAULT_MAXZLIBMEM * 1024U * 1024U,
 #else
 	.maxzlibmem = 0,
@@ -152,7 +154,7 @@ struct global global = {
 	},
 	.tune = {
 		.bufsize = BUFSIZE,
-		.maxrewrite = MAXREWRITE,
+		.maxrewrite = -1,
 		.chksize = BUFSIZE,
 		.reserved_bufs = RESERVED_BUFS,
 		.pattern_cache = DEFAULT_PAT_LRU_SIZE,
@@ -182,9 +184,12 @@ struct global global = {
 #endif
 #ifdef USE_DEVICEATLAS
 	.deviceatlas = {
-		.loglevel = DA_SEV_INFO,
-		.useragentid = 0,
+		.loglevel = 0,
 		.jsonpath = 0,
+		.cookiename = 0,
+		.cookienamelen = 0,
+		.useragentid = 0,
+		.daset = 0,
 		.separator = '|',
 	},
 #endif
@@ -195,8 +200,8 @@ struct global global = {
 		.data_file_path = NULL,
 #ifdef FIFTYONEDEGREES_H_PATTERN_INCLUDED
 		.data_set = { },
-		.cache_size = 0,
 #endif
+		.cache_size = 0,
 	},
 #endif
 	/* others NULL OK */
@@ -251,7 +256,7 @@ unsigned int warned = 0;
 void display_version()
 {
 	printf("HA-Proxy version " HAPROXY_VERSION " " HAPROXY_DATE"\n");
-	printf("Copyright 2000-2015 Willy Tarreau <willy@haproxy.org>\n\n");
+	printf("Copyright 2000-2016 Willy Tarreau <willy@haproxy.org>\n\n");
 }
 
 void display_build_opts()
@@ -287,8 +292,10 @@ void display_build_opts()
 
 #ifdef USE_ZLIB
 	printf("Built with zlib version : " ZLIB_VERSION "\n");
+#elif defined(USE_SLZ)
+	printf("Built with libslz for stateless compression.\n");
 #else /* USE_ZLIB */
-	printf("Built without zlib support (USE_ZLIB not set)\n");
+	printf("Built without compression support (neither USE_ZLIB nor USE_SLZ are set)\n");
 #endif
 	printf("Compression algorithms supported :");
 	{
@@ -370,11 +377,8 @@ void display_build_opts()
 	printf("Built without Lua support\n");
 #endif
 
-#if defined(CONFIG_HAP_TRANSPARENT) || defined(CONFIG_HAP_CTTPROXY)
+#if defined(CONFIG_HAP_TRANSPARENT)
 	printf("Built with transparent proxy support using:"
-#if defined(CONFIG_HAP_CTTPROXY)
-	       " CTTPROXY"
-#endif
 #if defined(IP_TRANSPARENT)
 	       " IP_TRANSPARENT"
 #endif
@@ -400,12 +404,17 @@ void display_build_opts()
 	printf("Built with network namespace support\n");
 #endif
 
+#ifdef USE_DEVICEATLAS
+    printf("Built with DeviceAtlas support\n");
+#endif
 #ifdef USE_51DEGREES
 	printf("Built with 51Degrees support\n");
 #endif
 	putchar('\n');
 
 	list_pollers(stdout);
+	putchar('\n');
+	list_filters(stdout);
 	putchar('\n');
 }
 
@@ -416,9 +425,9 @@ void usage(char *name)
 {
 	display_version();
 	fprintf(stderr,
-		"Usage : %s [-f <cfgfile>]* [ -vdV"
+		"Usage : %s [-f <cfgfile|cfgdir>]* [ -vdV"
 		"D ] [ -n <maxconn> ] [ -N <maxpconn> ]\n"
-		"        [ -p <pidfile> ] [ -m <max megs> ] [ -C <dir> ]\n"
+		"        [ -p <pidfile> ] [ -m <max megs> ] [ -C <dir> ] [-- <cfgfile>*]\n"
 		"        -v displays version ; -vv shows known build options.\n"
 		"        -d enters debug mode ; -db only disables background mode.\n"
 		"        -dM[<byte>] poisons memory with <byte> (defaults to 0x50)\n"
@@ -447,7 +456,7 @@ void usage(char *name)
 		"        -dG disables getaddrinfo() usage\n"
 #endif
 		"        -dV disables SSL verify on servers side\n"
-		"        -sf/-st [pid ]* finishes/terminates old pids. Must be last arguments.\n"
+		"        -sf/-st [pid ]* finishes/terminates old pids.\n"
 		"\n",
 		name, DEFAULT_MAXCONN, cfg_maxpconn);
 	exit(1);
@@ -544,6 +553,99 @@ void dump(struct sig_handler *sh)
 	pool_gc2();
 }
 
+/* This function check if cfg_cfgfiles containes directories.
+ * If it find one, it add all the files (and only files) it containes
+ * in cfg_cfgfiles in place of the directory (and remove the directory).
+ * It add the files in lexical order.
+ * It add only files with .cfg extension.
+ * It doesn't add files with name starting with '.'
+ */
+void cfgfiles_expand_directories(void)
+{
+	struct wordlist *wl, *wlb;
+	char *err = NULL;
+
+	list_for_each_entry_safe(wl, wlb, &cfg_cfgfiles, list) {
+		struct stat file_stat;
+		struct dirent **dir_entries = NULL;
+		int dir_entries_nb;
+		int dir_entries_it;
+
+		if (stat(wl->s, &file_stat)) {
+			Alert("Cannot open configuration file/directory %s : %s\n",
+			      wl->s,
+			      strerror(errno));
+			exit(1);
+		}
+
+		if (!S_ISDIR(file_stat.st_mode))
+			continue;
+
+		/* from this point wl->s is a directory */
+
+		dir_entries_nb = scandir(wl->s, &dir_entries, NULL, alphasort);
+		if (dir_entries_nb < 0) {
+			Alert("Cannot open configuration directory %s : %s\n",
+			      wl->s,
+			      strerror(errno));
+			exit(1);
+		}
+
+		/* for each element in the directory wl->s */
+		for (dir_entries_it = 0; dir_entries_it < dir_entries_nb; dir_entries_it++) {
+			struct dirent *dir_entry = dir_entries[dir_entries_it];
+			char *filename = NULL;
+			char *d_name_cfgext = strstr(dir_entry->d_name, ".cfg");
+
+			/* don't add filename that begin with .
+			 * only add filename with .cfg extention
+			 */
+			if (dir_entry->d_name[0] == '.' ||
+			    !(d_name_cfgext && d_name_cfgext[4] == '\0'))
+				goto next_dir_entry;
+
+			if (!memprintf(&filename, "%s/%s", wl->s, dir_entry->d_name)) {
+				Alert("Cannot load configuration files %s : out of memory.\n",
+				      filename);
+				exit(1);
+			}
+
+			if (stat(filename, &file_stat)) {
+				Alert("Cannot open configuration file %s : %s\n",
+				      wl->s,
+				      strerror(errno));
+				exit(1);
+			}
+
+			/* don't add anything else than regular file in cfg_cfgfiles
+			 * this way we avoid loops
+			 */
+			if (!S_ISREG(file_stat.st_mode))
+				goto next_dir_entry;
+
+			if (!list_append_word(&wl->list, filename, &err)) {
+				Alert("Cannot load configuration files %s : %s\n",
+				      filename,
+				      err);
+				exit(1);
+			}
+
+next_dir_entry:
+			free(filename);
+			free(dir_entry);
+		}
+
+		free(dir_entries);
+
+		/* remove the current directory (wl) from cfg_cfgfiles */
+		free(wl->s);
+		LIST_DEL(&wl->list);
+		free(wl);
+	}
+
+	free(err);
+}
+
 /*
  * This function initializes all the necessary variables. It only returns
  * if everything is OK. If something fails, it exits.
@@ -554,10 +656,11 @@ void init(int argc, char **argv)
 	char *tmp;
 	char *cfg_pidfile = NULL;
 	int err_code = 0;
+	char *err_msg = NULL;
 	struct wordlist *wl;
 	char *progname;
 	char *change_dir = NULL;
-	struct tm curtime;
+	struct proxy *px;
 
 	chunk_init(&trash, malloc(global.tune.bufsize), global.tune.bufsize);
 	alloc_trash_buffers(global.tune.bufsize);
@@ -579,18 +682,16 @@ void init(int argc, char **argv)
     
 
 #ifdef HAPROXY_MEMMAX
-	global.rlimit_memmax = HAPROXY_MEMMAX;
+	global.rlimit_memmax_all = HAPROXY_MEMMAX;
 #endif
 
+	tzset();
 	tv_update_date(-1,-1);
 	start_date = now;
 
 	srandom(now_ms - getpid());
 
-	/* Get the numeric timezone. */
-	get_localtime(start_date.tv_sec, &curtime);
-	strftime(localtimezone, 6, "%z", &curtime);
-
+	init_log();
 	signal_init();
 	if (init_acl() != 0)
 		exit(1);
@@ -628,7 +729,7 @@ void init(int argc, char **argv)
 		progname = tmp + 1;
 
 	/* the process name is used for the logs only */
-	global.log_tag = strdup(progname);
+	chunk_initstr(&global.log_tag, strdup(progname));
 
 	argc--; argv++;
 	while (argc > 0) {
@@ -690,18 +791,33 @@ void init(int argc, char **argv)
 					oldpids_sig = SIGUSR1; /* finish then exit */
 				else
 					oldpids_sig = SIGTERM; /* terminate immediately */
-				argv++; argc--;
 
-				if (argc > 0) {
-					oldpids = calloc(argc, sizeof(int));
-					while (argc > 0) {
-						oldpids[nb_oldpids] = atol(*argv);
-						if (oldpids[nb_oldpids] <= 0)
-							usage(progname);
-						argc--; argv++;
-						nb_oldpids++;
+				while (argc > 1 && argv[1][0] != '-') {
+					oldpids = realloc(oldpids, (nb_oldpids + 1) * sizeof(int));
+					if (!oldpids) {
+						Alert("Cannot allocate old pid : out of memory.\n");
+						exit(1);
 					}
+					argc--; argv++;
+					oldpids[nb_oldpids] = atol(*argv);
+					if (oldpids[nb_oldpids] <= 0)
+						usage(progname);
+					nb_oldpids++;
 				}
+			}
+			else if (flag[0] == '-' && flag[1] == 0) { /* "--" */
+				/* now that's a cfgfile list */
+				argv++; argc--;
+				while (argc > 0) {
+					if (!list_append_word(&cfg_cfgfiles, *argv, &err_msg)) {
+						Alert("Cannot load configuration file/directory %s : %s\n",
+						      *argv,
+						      err_msg);
+						exit(1);
+					}
+					argv++; argc--;
+				}
+				break;
 			}
 			else { /* >=2 args */
 				argv++; argc--;
@@ -711,17 +827,16 @@ void init(int argc, char **argv)
 				switch (*flag) {
 				case 'C' : change_dir = *argv; break;
 				case 'n' : cfg_maxconn = atol(*argv); break;
-				case 'm' : global.rlimit_memmax = atol(*argv); break;
+				case 'm' : global.rlimit_memmax_all = atol(*argv); break;
 				case 'N' : cfg_maxpconn = atol(*argv); break;
 				case 'L' : strncpy(localpeer, *argv, sizeof(localpeer) - 1); break;
 				case 'f' :
-					wl = (struct wordlist *)calloc(1, sizeof(*wl));
-					if (!wl) {
-						Alert("Cannot load configuration file %s : out of memory.\n", *argv);
+					if (!list_append_word(&cfg_cfgfiles, *argv, &err_msg)) {
+						Alert("Cannot load configuration file/directory %s : %s\n",
+						      *argv,
+						      err_msg);
 						exit(1);
 					}
-					wl->s = *argv;
-					LIST_ADDQ(&cfg_cfgfiles, &wl->list);
 					break;
 				case 'p' : cfg_pidfile = *argv; break;
 				default: usage(progname);
@@ -737,15 +852,17 @@ void init(int argc, char **argv)
 		(arg_mode & (MODE_DAEMON | MODE_SYSTEMD | MODE_FOREGROUND | MODE_VERBOSE
 			     | MODE_QUIET | MODE_CHECK | MODE_DEBUG));
 
-	if (LIST_ISEMPTY(&cfg_cfgfiles))
-		usage(progname);
-
 	if (change_dir && chdir(change_dir) < 0) {
 		Alert("Could not change to directory %s : %s\n", change_dir, strerror(errno));
 		exit(1);
 	}
 
-	have_appsession = 0;
+	/* handle cfgfiles that are actualy directories */
+	cfgfiles_expand_directories();
+
+	if (LIST_ISEMPTY(&cfg_cfgfiles))
+		usage(progname);
+
 	global.maxsock = 10; /* reserve 10 fds ; will be incremented by socket eaters */
 
 	init_default_instance();
@@ -777,6 +894,22 @@ void init(int argc, char **argv)
 		exit(1);
 	}
 
+	/* recompute the amount of per-process memory depending on nbproc and
+	 * the shared SSL cache size (allowed to exist in all processes).
+	 */
+	if (global.rlimit_memmax_all) {
+#if defined (USE_OPENSSL) && !defined(USE_PRIVATE_CACHE)
+		int64_t ssl_cache_bytes = global.tune.sslcachesize * 200LL;
+
+		global.rlimit_memmax =
+			((((int64_t)global.rlimit_memmax_all * 1048576LL) -
+			  ssl_cache_bytes) / global.nbproc +
+			 ssl_cache_bytes + 1048575LL) / 1048576LL;
+#else
+		global.rlimit_memmax = global.rlimit_memmax_all / global.nbproc;
+#endif
+	}
+
 #ifdef CONFIG_HAP_NS
         err_code |= netns_init();
         if (err_code & (ERR_ABORT|ERR_FATAL)) {
@@ -806,6 +939,9 @@ void init(int argc, char **argv)
 		exit(2);
 	}
 
+	/* Apply server states */
+	apply_server_state();
+
 	global_listener_queue_task = task_new();
 	if (!global_listener_queue_task) {
 		Alert("Out of memory when initializing global task\n");
@@ -825,8 +961,14 @@ void init(int argc, char **argv)
 	init_51degrees();
 #endif
 
-	if (have_appsession)
-		appsession_init();
+	for (px = proxy; px; px = px->next) {
+		err_code |= flt_init(px);
+		if (err_code & (ERR_ABORT|ERR_FATAL)) {
+			Alert("Failed to initialize filters for proxy '%s'.\n",
+			      px->id);
+			exit(1);
+		}
+	}
 
 	if (start_checks() < 0)
 		exit(1);
@@ -1024,6 +1166,9 @@ void init(int argc, char **argv)
 	if (global.tune.recv_enough == 0)
 		global.tune.recv_enough = MIN_RECV_AT_ONCE_ENOUGH;
 
+	if (global.tune.maxrewrite < 0)
+		global.tune.maxrewrite = MAXREWRITE;
+
 	if (global.tune.maxrewrite >= global.tune.bufsize / 2)
 		global.tune.maxrewrite = global.tune.bufsize / 2;
 
@@ -1055,14 +1200,12 @@ void init(int argc, char **argv)
 	if (global.nbproc < 1)
 		global.nbproc = 1;
 
-	swap_buffer = (char *)calloc(1, global.tune.bufsize);
-	get_http_auth_buff = (char *)calloc(1, global.tune.bufsize);
-	static_table_key = calloc(1, sizeof(*static_table_key) + global.tune.bufsize);
+	swap_buffer = calloc(1, global.tune.bufsize);
+	get_http_auth_buff = calloc(1, global.tune.bufsize);
+	static_table_key = calloc(1, sizeof(*static_table_key));
 
-	fdinfo = (struct fdinfo *)calloc(1,
-				       sizeof(struct fdinfo) * (global.maxsock));
-	fdtab = (struct fdtab *)calloc(1,
-				       sizeof(struct fdtab) * (global.maxsock));
+	fdinfo = calloc(1, sizeof(struct fdinfo) * (global.maxsock));
+	fdtab = calloc(1, sizeof(struct fdtab) * (global.maxsock));
 	/*
 	 * Note: we could register external pollers here.
 	 * Built-in pollers have been registered before main().
@@ -1082,8 +1225,11 @@ void init(int argc, char **argv)
 
 	/* Note: we could disable any poller by name here */
 
-	if (global.mode & (MODE_VERBOSE|MODE_DEBUG))
+	if (global.mode & (MODE_VERBOSE|MODE_DEBUG)) {
 		list_pollers(stderr);
+		fprintf(stderr, "\n");
+		list_filters(stderr);
+	}
 
 	if (!init_pollers()) {
 		Alert("No polling mechanism available.\n"
@@ -1111,6 +1257,8 @@ void init(int argc, char **argv)
 	/* initialize structures for name resolution */
 	if (!dns_init_resolvers())
 		exit(1);
+
+	free(err_msg);
 }
 
 static void deinit_acl_cond(struct acl_cond *cond)
@@ -1135,7 +1283,7 @@ static void deinit_acl_cond(struct acl_cond *cond)
 
 static void deinit_tcp_rules(struct list *rules)
 {
-	struct tcp_rule *trule, *truleb;
+	struct act_rule *trule, *truleb;
 
 	list_for_each_entry_safe(trule, truleb, rules, list) {
 		LIST_DEL(&trule->list);
@@ -1229,6 +1377,10 @@ void deinit(void)
 		free(p->conf.uniqueid_format_string);
 		free(p->conf.uif_file);
 		free(p->lbprm.map.srv);
+
+		if (p->conf.logformat_sd_string != default_rfc5424_sd_log_format)
+			free(p->conf.logformat_sd_string);
+		free(p->conf.lfsd_file);
 
 		for (i = 0; i < HTTP_ERR_SIZE; i++)
 			chunk_destroy(&p->errmsg[i]);
@@ -1337,13 +1489,16 @@ void deinit(void)
 			free(lf);
 		}
 
+		list_for_each_entry_safe(lf, lfb, &p->logformat_sd, list) {
+			LIST_DEL(&lf->list);
+			free(lf);
+		}
+
 		deinit_tcp_rules(&p->tcp_req.inspect_rules);
 		deinit_tcp_rules(&p->tcp_req.l4_rules);
 
 		deinit_stick_rules(&p->storersp_rules);
 		deinit_stick_rules(&p->sticking_rules);
-
-		free(p->appsession_name);
 
 		h = p->req_cap;
 		while (h) {
@@ -1387,7 +1542,12 @@ void deinit(void)
 			free(s->check.bo);
 			free(s->agent.bi);
 			free(s->agent.bo);
+			free(s->agent.send_string);
 			free((char*)s->conf.file);
+#ifdef USE_OPENSSL
+			if (s->use_ssl || s->check.use_ssl)
+				ssl_sock_free_srv_ctx(s);
+#endif
 			free(s);
 			s = s_next;
 		}/* end while(s) */
@@ -1419,6 +1579,8 @@ void deinit(void)
 			LIST_DEL(&bind_conf->by_fe);
 			free(bind_conf);
 		}
+
+		flt_deinit(p);
 
 		free(p->desc);
 		free(p->fwdfor_hdr_name);
@@ -1453,6 +1615,11 @@ void deinit(void)
 
 	userlist_free(userlist);
 
+	cfg_unregister_sections();
+
+	free_trash_buffers();
+	chunk_destroy(&trash);
+
 	protocol_unbind_all();
 
 #if defined(USE_DEVICEATLAS)
@@ -1464,7 +1631,7 @@ void deinit(void)
 #endif
 
 	free(global.log_send_hostname); global.log_send_hostname = NULL;
-	free(global.log_tag); global.log_tag = NULL;
+	chunk_destroy(&global.log_tag);
 	free(global.chroot);  global.chroot = NULL;
 	free(global.pidfile); global.pidfile = NULL;
 	free(global.node);    global.node = NULL;
@@ -1472,6 +1639,9 @@ void deinit(void)
 	free(fdinfo);         fdinfo  = NULL;
 	free(fdtab);          fdtab   = NULL;
 	free(oldpids);        oldpids = NULL;
+	free(static_table_key); static_table_key = NULL;
+	free(get_http_auth_buff); get_http_auth_buff = NULL;
+	free(swap_buffer);    swap_buffer = NULL;
 	free(global_listener_queue_task); global_listener_queue_task = NULL;
 
 	list_for_each_entry_safe(log, logb, &global.logsrvs, list) {
@@ -1479,6 +1649,7 @@ void deinit(void)
 			free(log);
 		}
 	list_for_each_entry_safe(wl, wlb, &cfg_cfgfiles, list) {
+		free(wl->s);
 		LIST_DEL(&wl->list);
 		free(wl);
 	}
@@ -1490,17 +1661,10 @@ void deinit(void)
 	pool_destroy2(pool2_requri);
 	pool_destroy2(pool2_task);
 	pool_destroy2(pool2_capture);
-	pool_destroy2(pool2_appsess);
 	pool_destroy2(pool2_pendconn);
 	pool_destroy2(pool2_sig_handlers);
 	pool_destroy2(pool2_hdr_idx);
 	pool_destroy2(pool2_http_txn);
-    
-	if (have_appsession) {
-		pool_destroy2(apools.serverid);
-		pool_destroy2(apools.sessid);
-	}
-
 	deinit_pollers();
 } /* end deinit() */
 
@@ -1538,7 +1702,7 @@ void run_poll_loop()
 			break;
 
 		/* expire immediately if events are pending */
-		if (fd_cache_num || run_queue || signal_queue_len || !LIST_ISEMPTY(&applet_runq))
+		if (fd_cache_num || run_queue || signal_queue_len || !LIST_ISEMPTY(&applet_active_queue))
 			next = now_ms;
 
 		/* The poller will ensure it returns around <next> */
@@ -1611,7 +1775,7 @@ int main(int argc, char **argv)
 
 	if (global.rlimit_memmax) {
 		limit.rlim_cur = limit.rlim_max =
-			global.rlimit_memmax * 1048576 / global.nbproc;
+			global.rlimit_memmax * 1048576ULL;
 #ifdef RLIMIT_AS
 		if (setrlimit(RLIMIT_AS, &limit) == -1) {
 			Warning("[%s.main()] Cannot fix MEM limit to %d megs.\n",
@@ -1666,7 +1830,7 @@ int main(int argc, char **argv)
 	}
 
 	if (listeners == 0) {
-		Alert("[%s.main()] No enabled listener found (check the <listen> keywords) ! Exiting.\n", argv[0]);
+		Alert("[%s.main()] No enabled listener found (check for 'bind' directives) ! Exiting.\n", argv[0]);
 		/* Note: we don't have to send anything to the old pids because we
 		 * never stopped them. */
 		exit(1);
@@ -1710,22 +1874,6 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 	}
-
-#ifdef CONFIG_HAP_CTTPROXY
-	if (global.last_checks & LSTCHK_CTTPROXY) {
-		int ret;
-
-		ret = check_cttproxy_version();
-		if (ret < 0) {
-			Alert("[%s.main()] Cannot enable cttproxy.\n%s",
-			      argv[0],
-			      (ret == -1) ? "  Incorrect module version.\n"
-			      : "  Make sure you have enough permissions and that the module is loaded.\n");
-			protocol_unbind_all();
-			exit(1);
-		}
-	}
-#endif
 
 	if ((global.last_checks & LSTCHK_NETADM) && global.uid) {
 		Alert("[%s.main()] Some configuration options require full privileges, so global.uid cannot be changed.\n"
@@ -1817,7 +1965,11 @@ int main(int argc, char **argv)
 		if (proc < global.nbproc &&  /* child */
 		    proc < LONGBITS &&       /* only the first 32/64 processes may be pinned */
 		    global.cpu_map[proc])    /* only do this if the process has a CPU map */
+#ifdef __FreeBSD__
+			cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_PID, -1, sizeof(unsigned long), (void *)&global.cpu_map[proc]);
+#else
 			sched_setaffinity(0, sizeof(unsigned long), (void *)&global.cpu_map[proc]);
+#endif
 #endif
 		/* close the pidfile both in children and father */
 		if (pidfd >= 0) {
@@ -1832,7 +1984,14 @@ int main(int argc, char **argv)
 
 		if (proc == global.nbproc) {
 			if (global.mode & MODE_SYSTEMD) {
+				int i;
+
 				protocol_unbind_all();
+				for (i = 1; i < argc; i++) {
+					memset(argv[i], '\0', strlen(argv[i]));
+				}
+				/* it's OK because "-Ds -f x" is the shortest form going here */
+				memcpy(argv[0] + strlen(argv[0]), "-master", 8);
 				for (proc = 0; proc < global.nbproc; proc++)
 					while (waitpid(children[proc], NULL, 0) == -1 && errno == EINTR);
 			}
@@ -1859,6 +2018,12 @@ int main(int argc, char **argv)
 
 			stop_proxy(curpeers->peers_fe);
 			/* disable this peer section so that it kills itself */
+			signal_unregister_handler(curpeers->sighandler);
+			task_delete(curpeers->sync_task);
+			task_free(curpeers->sync_task);
+			curpeers->sync_task = NULL;
+			task_free(curpeers->peers_fe->task);
+			curpeers->peers_fe->task = NULL;
 			curpeers->peers_fe = NULL;
 		}
 
@@ -1886,8 +2051,6 @@ int main(int argc, char **argv)
 	 */
 	run_poll_loop();
 
-	/* Free all Hash Keys and all Hash elements */
-	appsession_cleanup();
 	/* Do some cleanup */ 
 	deinit();
     

@@ -35,6 +35,7 @@
 
 #include <proto/backend.h>
 #include <proto/fd.h>
+#include <proto/filters.h>
 #include <proto/hdr_idx.h>
 #include <proto/listener.h>
 #include <proto/log.h>
@@ -414,7 +415,7 @@ static int proxy_parse_declare(char **args, int section, struct proxy *curpx,
 		}
 
 		/* register the capture. */
-		hdr = calloc(sizeof(struct cap_hdr), 1);
+		hdr = calloc(1, sizeof(*hdr));
 		hdr->name = NULL; /* not a header capture */
 		hdr->namelen = 0;
 		hdr->len = len;
@@ -533,9 +534,12 @@ struct proxy *proxy_find_by_name(const char *name, int cap, int table)
  *    ok  ok  ok  | perfect match
  *
  * Upon return if <diff> is not NULL, it is zeroed then filled with up to 3 bits :
- *   - 0x01 : proxy was found but ID differs (and ID was not zero)
- *   - 0x02 : proxy was found by ID but name differs (and name was not NULL)
- *   - 0x04 : a proxy of different type was found with the same name and/or id
+ *   - PR_FBM_MISMATCH_ID        : proxy was found but ID differs
+ *                                 (and ID was not zero)
+ *   - PR_FBM_MISMATCH_NAME      : proxy was found by ID but name differs
+ *                                 (and name was not NULL)
+ *   - PR_FBM_MISMATCH_PROXYTYPE : a proxy of different type was found with
+ *                                 the same name and/or id
  *
  * Only a valid proxy is returned. If capabilities do not match, NULL is
  * returned. The caller can check <diff> to report detailed warnings / errors,
@@ -574,12 +578,12 @@ struct proxy *proxy_find_best_match(int cap, const char *name, int id, int *diff
 				 */
 				if (byid->options & PR_O_FORCED_ID) {
 					if (diff)
-						*diff |= 2;
+						*diff |= PR_FBM_MISMATCH_NAME;
 					return byid;
 				}
 				else {
 					if (diff)
-						*diff |= 1;
+						*diff |= PR_FBM_MISMATCH_ID;
 					return byname;
 				}
 			}
@@ -589,14 +593,14 @@ struct proxy *proxy_find_best_match(int cap, const char *name, int id, int *diff
 			 *   - name set but not found
 			 */
 			if (name && diff)
-				*diff |= 2;
+				*diff |= PR_FBM_MISMATCH_NAME;
 			return byid;
 		}
 
 		/* ID not found */
 		if (byname) {
 			if (diff)
-				*diff |= 1;
+				*diff |= PR_FBM_MISMATCH_ID;
 			return byname;
 		}
 	}
@@ -615,16 +619,16 @@ struct proxy *proxy_find_best_match(int cap, const char *name, int id, int *diff
 	if (name) {
 		byname = proxy_find_by_name(name, 0, 0);
 		if (byname && (!id || byname->uuid == id))
-			*diff |= 4;
+			*diff |= PR_FBM_MISMATCH_PROXYTYPE;
 	}
 
 	if (id) {
 		byid = proxy_find_by_id(id, 0, 0);
 		if (byid) {
 			if (!name)
-				*diff |= 4; /* only type changed */
+				*diff |= PR_FBM_MISMATCH_PROXYTYPE; /* only type changed */
 			else if (byid->options & PR_O_FORCED_ID)
-				*diff |= 2 | 4; /* name and type changed */
+				*diff |= PR_FBM_MISMATCH_NAME | PR_FBM_MISMATCH_PROXYTYPE; /* name and type changed */
 			/* otherwise it's a different proxy that was returned */
 		}
 	}
@@ -738,11 +742,13 @@ void init_new_proxy(struct proxy *p)
 	LIST_INIT(&p->listener_queue);
 	LIST_INIT(&p->logsrvs);
 	LIST_INIT(&p->logformat);
+	LIST_INIT(&p->logformat_sd);
 	LIST_INIT(&p->format_unique_id);
 	LIST_INIT(&p->conf.bind);
 	LIST_INIT(&p->conf.listeners);
 	LIST_INIT(&p->conf.args.list);
 	LIST_INIT(&p->tcpcheck_rules);
+	LIST_INIT(&p->filter_configs);
 
 	/* Timeouts are defined as -1 */
 	proxy_reset_timeouts(p);
@@ -921,19 +927,23 @@ void soft_stop(void)
 			Warning("Stopping %s %s in %d ms.\n", proxy_cap_str(p->cap), p->id, p->grace);
 			send_log(p, LOG_WARNING, "Stopping %s %s in %d ms.\n", proxy_cap_str(p->cap), p->id, p->grace);
 			p->stop_time = tick_add(now_ms, p->grace);
-		}
-		if (p->table.size && p->table.sync_task)
-			 task_wakeup(p->table.sync_task, TASK_WOKEN_MSG);
 
-		/* wake every proxy task up so that they can handle the stopping */
-		if (p->task)
-			task_wakeup(p->task, TASK_WOKEN_MSG);
+			/* Note: do not wake up stopped proxies' task nor their tables'
+			 * tasks as these ones might point to already released entries.
+			 */
+			if (p->table.size && p->table.sync_task)
+				task_wakeup(p->table.sync_task, TASK_WOKEN_MSG);
+
+			if (p->task)
+				task_wakeup(p->task, TASK_WOKEN_MSG);
+		}
 		p = p->next;
 	}
 
 	prs = peers;
 	while (prs) {
-		stop_proxy((struct proxy *)prs->peers_fe);
+		if (prs->peers_fe)
+			stop_proxy(prs->peers_fe);
 		prs = prs->next;
 	}
 	/* signal zero is used to broadcast the "stopping" event */
@@ -1067,8 +1077,8 @@ void pause_proxies(void)
 
 	prs = peers;
 	while (prs) {
-		p = prs->peers_fe;
-		err |= !pause_proxy(p);
+		if (prs->peers_fe)
+			err |= !pause_proxy(prs->peers_fe);
 		prs = prs->next;
         }
 
@@ -1101,8 +1111,8 @@ void resume_proxies(void)
 
 	prs = peers;
 	while (prs) {
-		p = prs->peers_fe;
-		err |= !resume_proxy(p);
+		if (prs->peers_fe)
+			err |= !resume_proxy(prs->peers_fe);
 		prs = prs->next;
         }
 
@@ -1128,6 +1138,9 @@ int stream_set_backend(struct stream *s, struct proxy *be)
 		be->be_counters.conn_max = be->beconn;
 	proxy_inc_be_ctr(be);
 
+	if (flt_set_stream_backend(s, be) < 0)
+		return 0;
+
 	/* assign new parameters to the stream from the new backend */
 	s->si[1].flags &= ~SI_FL_INDEP_STR;
 	if (be->options2 & PR_O2_INDEPSTR)
@@ -1138,7 +1151,7 @@ int stream_set_backend(struct stream *s, struct proxy *be)
 	 * be more reliable to store the list of analysers that have been run,
 	 * but what we do here is OK for now.
 	 */
-	s->req.analysers |= be->be_req_ana & ~strm_li(s)->analysers;
+	s->req.analysers |= be->be_req_ana & (strm_li(s) ? ~strm_li(s)->analysers : 0);
 
 	/* If the target backend requires HTTP processing, we have to allocate
 	 * the HTTP transaction and hdr_idx if we did not have one.
@@ -1150,6 +1163,11 @@ int stream_set_backend(struct stream *s, struct proxy *be)
 		/* and now initialize the HTTP transaction state */
 		http_init_txn(s);
 	}
+
+	/* Be sure to filter request headers if the backend is an HTTP proxy and
+	 * if there are filters attached to the stream. */
+	if (s->be->mode == PR_MODE_HTTP && HAS_FILTERS(s))
+		s->req.analysers |= AN_FLT_HTTP_HDRS;
 
 	if (s->txn) {
 		if (be->options2 & PR_O2_RSPBUG_OK)

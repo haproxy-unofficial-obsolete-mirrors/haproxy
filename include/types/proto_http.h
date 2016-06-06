@@ -28,7 +28,7 @@
 #include <common/regex.h>
 
 #include <types/hdr_idx.h>
-#include <types/stick_table.h>
+#include <types/filters.h>
 
 /* These are the flags that are found in txn->flags */
 
@@ -170,10 +170,11 @@ enum ht_state {
 	HTTP_MSG_CHUNK_CRLF   = 31, // skipping CRLF after data chunk
 	HTTP_MSG_TRAILERS     = 32, // trailers (post-data entity headers)
 	/* we enter this state when we've received the end of the current message */
-	HTTP_MSG_DONE         = 33, // message end received, waiting for resync or close
-	HTTP_MSG_CLOSING      = 34, // shutdown_w done, not all bytes sent yet
-	HTTP_MSG_CLOSED       = 35, // shutdown_w done, all bytes sent
-	HTTP_MSG_TUNNEL       = 36, // tunneled data after DONE
+	HTTP_MSG_ENDING       = 33, // message end received, wait that the filters end too
+	HTTP_MSG_DONE         = 34, // message end received, waiting for resync or close
+	HTTP_MSG_CLOSING      = 35, // shutdown_w done, not all bytes sent yet
+	HTTP_MSG_CLOSED       = 36, // shutdown_w done, all bytes sent
+	HTTP_MSG_TUNNEL       = 37, // tunneled data after DONE
 } __attribute__((packed));
 
 /*
@@ -194,6 +195,7 @@ enum ht_state {
  * contents if something needs them during a redispatch.
  */
 #define HTTP_MSGF_WAIT_CONN   0x00000010  /* Wait for connect() to be confirmed before processing body */
+#define HTTP_MSGF_COMPRESSING 0x00000020  /* data compression is in progress */
 
 
 /* Redirect flags */
@@ -218,80 +220,12 @@ enum {
 	PERSIST_TYPE_IGNORE,            /* ignore-persist */
 };
 
-/* Known HTTP methods */
-enum http_meth_t {
-	HTTP_METH_NONE = 0,
-	HTTP_METH_OPTIONS,
-	HTTP_METH_GET,
-	HTTP_METH_HEAD,
-	HTTP_METH_POST,
-	HTTP_METH_PUT,
-	HTTP_METH_DELETE,
-	HTTP_METH_TRACE,
-	HTTP_METH_CONNECT,
-	HTTP_METH_OTHER, /* Must be the last entry */
-} __attribute__((packed));
-
 enum ht_auth_m {
 	HTTP_AUTH_WRONG		= -1,		/* missing or unknown */
 	HTTP_AUTH_UNKNOWN	= 0,
 	HTTP_AUTH_BASIC,
 	HTTP_AUTH_DIGEST,
 } __attribute__((packed));
-
-/* actions for "http-request" */
-enum {
-	HTTP_REQ_ACT_UNKNOWN = 0,
-	HTTP_REQ_ACT_ALLOW,
-	HTTP_REQ_ACT_DENY,
-	HTTP_REQ_ACT_TARPIT,
-	HTTP_REQ_ACT_AUTH,
-	HTTP_REQ_ACT_ADD_HDR,
-	HTTP_REQ_ACT_SET_HDR,
-	HTTP_REQ_ACT_DEL_HDR,
-	HTTP_REQ_ACT_REPLACE_HDR,
-	HTTP_REQ_ACT_REPLACE_VAL,
-	HTTP_REQ_ACT_REDIR,
-	HTTP_REQ_ACT_SET_NICE,
-	HTTP_REQ_ACT_SET_LOGL,
-	HTTP_REQ_ACT_SET_TOS,
-	HTTP_REQ_ACT_SET_MARK,
-	HTTP_REQ_ACT_ADD_ACL,
-	HTTP_REQ_ACT_DEL_ACL,
-	HTTP_REQ_ACT_DEL_MAP,
-	HTTP_REQ_ACT_SET_MAP,
-	HTTP_REQ_ACT_CUSTOM_STOP,
-	HTTP_REQ_ACT_CUSTOM_CONT,
-	HTTP_REQ_ACT_SET_SRC,
-	HTTP_REQ_ACT_TRK_SC0,
-	/* SC1, SC2, ... SCn */
-	HTTP_REQ_ACT_TRK_SCMAX = HTTP_REQ_ACT_TRK_SC0 + MAX_SESS_STKCTR - 1,
-	HTTP_REQ_ACT_MAX /* must always be last */
-};
-
-/* actions for "http-response" */
-enum {
-	HTTP_RES_ACT_UNKNOWN = 0,
-	HTTP_RES_ACT_ALLOW,
-	HTTP_RES_ACT_DENY,
-	HTTP_RES_ACT_ADD_HDR,
-	HTTP_RES_ACT_REPLACE_HDR,
-	HTTP_RES_ACT_REPLACE_VAL,
-	HTTP_RES_ACT_SET_HDR,
-	HTTP_RES_ACT_DEL_HDR,
-	HTTP_RES_ACT_SET_NICE,
-	HTTP_RES_ACT_SET_LOGL,
-	HTTP_RES_ACT_SET_TOS,
-	HTTP_RES_ACT_SET_MARK,
-	HTTP_RES_ACT_ADD_ACL,
-	HTTP_RES_ACT_DEL_ACL,
-	HTTP_RES_ACT_DEL_MAP,
-	HTTP_RES_ACT_SET_MAP,
-	HTTP_RES_ACT_REDIR,
-	HTTP_RES_ACT_CUSTOM_STOP,  /* used for module keywords */
-	HTTP_RES_ACT_CUSTOM_CONT,  /* used for module keywords */
-	HTTP_RES_ACT_MAX /* must always be last */
-};
 
 /* final results for http-request rules */
 enum rule_result {
@@ -362,10 +296,12 @@ enum {
  *                             to a byte matching the current state.
  *
  *  - sol (start of line)    : start of current line before MSG_BODY. Starting
- *                             from MSG_BODY, contains the length of the last
- *                             parsed chunk size so that when added to sov it
- *                             always points to the beginning of the current
- *                             data chunk.
+ *                             from MSG_BODY and until MSG_TRAILERS, contains
+ *                             the length of the last parsed chunk size so that
+ *                             when added to sov it always points to the
+ *                             beginning of the current data chunk.
+ *                             in MSG_TRAILERS state, it contains the length of
+ *                             the last parsed part of the trailer headers.
  *
  *  - eol (End of Line)      : Before HTTP_MSG_BODY, relative offset in the
  *                             buffer of the first byte which marks the end of
@@ -420,72 +356,6 @@ struct proxy;
 struct http_txn;
 struct stream;
 
-struct http_req_rule {
-	struct list list;
-	struct acl_cond *cond;                 /* acl condition to meet */
-	unsigned int action;                   /* HTTP_REQ_* */
-	short deny_status;                     /* HTTP status to return to user when denying */
-	int (*action_ptr)(struct http_req_rule *rule, struct proxy *px, struct stream *s);  /* ptr to custom action */
-	union {
-		struct {
-			char *realm;
-		} auth;                        /* arg used by "auth" */
-		struct {
-			char *name;            /* header name */
-			int name_len;          /* header name's length */
-			struct list fmt;       /* log-format compatible expression */
-			struct my_regex re;    /* used by replace-header and replace-value */
-		} hdr_add;                     /* args used by "add-header" and "set-header" */
-		struct redirect_rule *redir;   /* redirect rule or "http-request redirect" */
-		int nice;                      /* nice value for HTTP_REQ_ACT_SET_NICE */
-		int loglevel;                  /* log-level value for HTTP_REQ_ACT_SET_LOGL */
-		int tos;                       /* tos value for HTTP_REQ_ACT_SET_TOS */
-		int mark;                      /* nfmark value for HTTP_REQ_ACT_SET_MARK */
-		void *data;                    /* generic pointer for module or external rule */
-		struct {
-			char *ref;             /* MAP or ACL file name to update */
-			struct list key;       /* pattern to retrieve MAP or ACL key */
-			struct list value;     /* pattern to retrieve MAP value */
-		} map;
-		struct {
-			void *p[4];
-		} act;                         /* generic pointers to be used by custom actions */
-	} arg;                                 /* arguments used by some actions */
-
-	union {
-		struct track_ctr_prm trk_ctr;
-	} act_prm;
-};
-
-struct http_res_rule {
-	struct list list;
-	struct acl_cond *cond;                 /* acl condition to meet */
-	unsigned int action;                   /* HTTP_RES_* */
-	int (*action_ptr)(struct http_res_rule *rule, struct proxy *px, struct stream *s);  /* ptr to custom action */
-	union {
-		struct {
-			char *name;            /* header name */
-			int name_len;          /* header name's length */
-			struct list fmt;       /* log-format compatible expression */
-			struct my_regex re;    /* used by replace-header and replace-value */
-		} hdr_add;                     /* args used by "add-header" and "set-header" */
-		struct redirect_rule *redir;   /* redirect rule or "http-request redirect" */
-		int nice;                      /* nice value for HTTP_RES_ACT_SET_NICE */
-		int loglevel;                  /* log-level value for HTTP_RES_ACT_SET_LOGL */
-		int tos;                       /* tos value for HTTP_RES_ACT_SET_TOS */
-		int mark;                      /* nfmark value for HTTP_RES_ACT_SET_MARK */
-		void *data;                    /* generic pointer for module or external rule */
-		struct {
-			char *ref;             /* MAP or ACL file name to update */
-			struct list key;       /* pattern to retrieve MAP or ACL key */
-			struct list value;     /* pattern to retrieve MAP value */
-		} map;
-		struct {
-			void *p[4];
-		} act;                         /* generic pointers to be used by custom actions */
-	} arg;                                 /* arguments used by some actions */
-};
-
 /* This is an HTTP transaction. It contains both a request message and a
  * response message (which can be empty).
  */
@@ -496,13 +366,11 @@ struct http_txn {
 	unsigned int flags;             /* transaction flags */
 	enum http_meth_t meth;          /* HTTP method */
 	/* 1 unused byte here */
-	short rule_deny_status;         /* HTTP status from rule when denying */
 	short status;                   /* HTTP status from the server, negative if from proxy */
 
 	char *uri;                      /* first line if log needed, NULL otherwise */
 	char *cli_cookie;               /* cookie presented by the client, in capture mode */
 	char *srv_cookie;               /* cookie presented by the server, in capture mode */
-	char *sessid;                   /* the appsession id, if found in the request or in the response */
 	int cookie_first_date;          /* if non-zero, first date the expirable cookie was set/seen */
 	int cookie_last_date;           /* if non-zero, last date the expirable cookie was set/seen */
 
@@ -532,32 +400,8 @@ struct http_method_name {
 	int len;
 };
 
-struct http_req_action_kw {
-       const char *kw;
-       int (*parse)(const char **args, int *cur_arg, struct proxy *px, struct http_req_rule *rule, char **err);
-	int match_pfx;
-};
-
-struct http_res_action_kw {
-       const char *kw;
-       int (*parse)(const char **args, int *cur_arg, struct proxy *px, struct http_res_rule *rule, char **err);
-	int match_pfx;
-};
-
-struct http_req_action_kw_list {
-       const char *scope;
-       struct list list;
-       struct http_req_action_kw kw[VAR_ARRAY];
-};
-
-struct http_res_action_kw_list {
-       const char *scope;
-       struct list list;
-       struct http_res_action_kw kw[VAR_ARRAY];
-};
-
-extern struct http_req_action_kw_list http_req_keywords;
-extern struct http_res_action_kw_list http_res_keywords;
+extern struct action_kw_list http_req_keywords;
+extern struct action_kw_list http_res_keywords;
 
 extern const struct http_method_name http_known_methods[HTTP_METH_OTHER];
 

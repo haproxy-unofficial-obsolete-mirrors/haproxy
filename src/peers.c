@@ -250,8 +250,8 @@ static int peer_prepare_updatemsg(struct stksess *ts, struct shared_table *st, c
 	/* construct message */
 
 	/* check if we need to send the update identifer */
-	if (st->last_pushed && ts->upd.key > st->last_pushed && (ts->upd.key - st->last_pushed) == 1) {
-		use_identifier = 0;
+	if (!st->last_pushed || ts->upd.key < st->last_pushed || ((ts->upd.key - st->last_pushed) != 1)) {
+		use_identifier = 1;
 	}
 
 	/* encode update identifier if needed */
@@ -262,14 +262,14 @@ static int peer_prepare_updatemsg(struct stksess *ts, struct shared_table *st, c
 	}
 
 	/* encode the key */
-	if (st->table->type == STKTABLE_TYPE_STRING) {
+	if (st->table->type == SMP_T_STR) {
 		int stlen = strlen((char *)ts->key.key);
 
 		intencode(stlen, &cursor);
 		memcpy(cursor, ts->key.key, stlen);
 		cursor += stlen;
 	}
-	else if (st->table->type == STKTABLE_TYPE_INTEGER) {
+	else if (st->table->type == SMP_T_SINT) {
 		netinteger = htonl(*((uint32_t *)ts->key.key));
 		memcpy(cursor, &netinteger, sizeof(netinteger));
 		cursor += sizeof(netinteger);
@@ -417,7 +417,7 @@ static int peer_prepare_ackmsg(struct shared_table *st, char *msg, size_t size)
 	char *cursor, *datamsg;
 	uint32_t netinteger;
 
-	cursor = datamsg = trash.str + 2 + 5;
+	cursor = datamsg = msg + 2 + 5;
 
 	intencode(st->remote_id, &cursor);
 	netinteger = htonl(st->last_get);
@@ -429,7 +429,7 @@ static int peer_prepare_ackmsg(struct shared_table *st, char *msg, size_t size)
 
 	/*  prepare message header */
 	msg[0] = PEER_MSG_CLASS_STICKTABLE;
-	msg[1] = PEER_MSG_STKT_DEFINE;
+	msg[1] = PEER_MSG_STKT_ACK;
 	cursor = &msg[2];
 	intencode(datalen, &cursor);
 
@@ -447,8 +447,8 @@ static void peer_session_release(struct appctx *appctx)
 {
 	struct stream_interface *si = appctx->owner;
 	struct stream *s = si_strm(si);
-	struct peer *peer = (struct peer *)appctx->ctx.peers.ptr;
-	struct peers *peers = (struct peers *)strm_fe(s)->parent;
+	struct peer *peer = appctx->ctx.peers.ptr;
+	struct peers *peers = strm_fe(s)->parent;
 
 	/* appctx->ctx.peers.ptr is not a peer session */
 	if (appctx->st0 < PEER_SESS_ST_SENDSUCCESS)
@@ -457,6 +457,8 @@ static void peer_session_release(struct appctx *appctx)
 	/* peer session identified */
 	if (peer) {
 		if (peer->stream == s) {
+			/* Re-init current table pointers to force announcement on re-connect */
+			peer->remote_table = peer->last_local_table = NULL;
 			peer->stream = NULL;
 			peer->appctx = NULL;
 			if (peer->flags & PEER_F_LEARN_ASSIGN) {
@@ -483,7 +485,7 @@ static void peer_io_handler(struct appctx *appctx)
 {
 	struct stream_interface *si = appctx->owner;
 	struct stream *s = si_strm(si);
-	struct peers *curpeers = (struct peers *)strm_fe(s)->parent;
+	struct peers *curpeers = strm_fe(s)->parent;
 	int reql = 0;
 	int repl = 0;
 
@@ -613,7 +615,7 @@ switchstate:
 				/* fall through */
 			}
 			case PEER_SESS_ST_SENDSUCCESS: {
-				struct peer *curpeer = (struct peer *)appctx->ctx.peers.ptr;
+				struct peer *curpeer = appctx->ctx.peers.ptr;
 				struct shared_table *st;
 
 				repl = snprintf(trash.str, trash.size, "%d\n", PEER_SESS_SC_SUCCESSCODE);
@@ -668,7 +670,7 @@ switchstate:
 				goto switchstate;
 			}
 			case PEER_SESS_ST_CONNECT: {
-				struct peer *curpeer = (struct peer *)appctx->ctx.peers.ptr;
+				struct peer *curpeer = appctx->ctx.peers.ptr;
 
 				/* Send headers */
 				repl = snprintf(trash.str, trash.size,
@@ -696,7 +698,7 @@ switchstate:
 				/* fall through */
 			}
 			case PEER_SESS_ST_GETSTATUS: {
-				struct peer *curpeer = (struct peer *)appctx->ctx.peers.ptr;
+				struct peer *curpeer = appctx->ctx.peers.ptr;
 				struct shared_table *st;
 
 				if (si_ic(si)->flags & CF_WRITE_PARTIAL)
@@ -768,7 +770,7 @@ switchstate:
 				/* fall through */
 			}
 			case PEER_SESS_ST_WAITMSG: {
-				struct peer *curpeer = (struct peer *)appctx->ctx.peers.ptr;
+				struct peer *curpeer = appctx->ctx.peers.ptr;
 				struct stksess *ts, *newts = NULL;
 				uint32_t msg_len = 0;
 				char *msg_cur = trash.str;
@@ -1028,7 +1030,7 @@ switchstate:
 						if (!newts)
 							goto ignore_msg;
 
-						if (st->table->type == STKTABLE_TYPE_STRING) {
+						if (st->table->type == SMP_T_STR) {
 							unsigned int to_read, to_store;
 
 							to_read = intdecode(&msg_cur, msg_end);
@@ -1050,7 +1052,7 @@ switchstate:
 							newts->key.key[to_store] = 0;
 							msg_cur += to_read;
 						}
-						else if (st->table->type == STKTABLE_TYPE_INTEGER) {
+						else if (st->table->type == SMP_T_SINT) {
 							unsigned int netinteger;
 
 							if (msg_cur + sizeof(netinteger) > msg_end) {
@@ -1090,7 +1092,7 @@ switchstate:
 							ts = stktable_store(st->table, newts, 0);
 							newts = NULL; /* don't reuse it */
 
-							ts->upd.key= (++st->table->update)+(2^31);
+							ts->upd.key= (++st->table->update)+(2147483648U);
 							eb = eb32_insert(&st->table->updates, &ts->upd);
 							if (eb != &ts->upd) {
 								eb32_delete(eb);
@@ -1150,7 +1152,7 @@ switchstate:
 									case STD_T_FRQP: {
 										struct freq_ctr_period data;
 
-										data.curr_tick = tick_add(now_ms, intdecode(&msg_cur, msg_end));
+										data.curr_tick = tick_add(now_ms, -intdecode(&msg_cur, msg_end));
 										if (!msg_cur) {
 											/* malformed message */
 											appctx->st0 = PEER_SESS_ST_ERRPROTO;
@@ -1553,7 +1555,6 @@ incomplete:
 			}
 			case PEER_SESS_ST_EXIT:
 				repl = snprintf(trash.str, trash.size, "%d\n", appctx->st1);
-
 				if (bi_putblk(si_ic(si), trash.str, repl) == -1)
 					goto full;
 				appctx->st0 = PEER_SESS_ST_END;
@@ -1625,7 +1626,7 @@ static void peer_session_forceshutdown(struct stream * stream)
 	if (!appctx)
 		return;
 
-	ps = (struct peer *)appctx->ctx.peers.ptr;
+	ps = appctx->ctx.peers.ptr;
 	/* we're killing a connection, we must apply a random delay before
 	 * retrying otherwise the other end will do the same and we can loop
 	 * for a while.
@@ -1660,7 +1661,7 @@ void peers_setup_frontend(struct proxy *fe)
 static struct stream *peer_session_create(struct peers *peers, struct peer *peer)
 {
 	struct listener *l = LIST_NEXT(&peers->peers_fe->conf.listeners, struct listener *, by_fe);
-	struct proxy *p = (struct proxy *)l->frontend; /* attached frontend */
+	struct proxy *p = l->frontend; /* attached frontend */
 	struct appctx *appctx;
 	struct session *sess;
 	struct stream *s;
@@ -1754,7 +1755,7 @@ static struct stream *peer_session_create(struct peers *peers, struct peer *peer
  */
 static struct task *process_peer_sync(struct task * task)
 {
-	struct peers *peers = (struct peers *)task->context;
+	struct peers *peers = task->context;
 	struct peer *ps;
 	struct shared_table *st;
 
@@ -1763,9 +1764,9 @@ static struct task *process_peer_sync(struct task * task)
 	if (!peers->peers_fe) {
 		/* this one was never started, kill it */
 		signal_unregister_handler(peers->sighandler);
-		peers->sync_task = NULL;
 		task_delete(peers->sync_task);
 		task_free(peers->sync_task);
+		peers->sync_task = NULL;
 		return NULL;
 	}
 
@@ -1974,7 +1975,7 @@ void peers_register_table(struct peers *peers, struct stktable *table)
 	int id = 0;
 
 	for (curpeer = peers->remote; curpeer; curpeer = curpeer->next) {
-		st = (struct shared_table *)calloc(1,sizeof(struct shared_table));
+		st = calloc(1,sizeof(*st));
 		st->table = table;
 		st->next = curpeer->tables;
 		if (curpeer->tables)

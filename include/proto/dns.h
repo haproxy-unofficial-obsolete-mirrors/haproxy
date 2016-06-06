@@ -25,7 +25,7 @@
 #include <types/dns.h>
 #include <types/proto_udp.h>
 
-char *dns_str_to_dn_label(char *string, char *dn, int dn_len);
+char *dns_str_to_dn_label(const char *string, char *dn, int dn_len);
 int dns_str_to_dn_label_len(const char *string);
 int dns_hostname_validation(const char *string, char **err);
 int dns_build_query(int query_id, int query_type, char *hostname_dn, int hostname_dn_len, char *buf, int bufsize);
@@ -34,8 +34,8 @@ int dns_init_resolvers(void);
 uint16_t dns_rnd16(void);
 int dns_validate_dns_response(unsigned char *resp, unsigned char *bufend, char *dn_name, int dn_name_len);
 int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
-                             char *dn_name, int dn_name_len, void *currentip,
-                             short currentip_sin_family, int family_priority,
+                             struct dns_resolution *resol, void *currentip,
+                             short currentip_sin_family,
                              void **newip, short *newip_sin_family);
 void dns_resolve_send(struct dgram_conn *dgram);
 void dns_resolve_recv(struct dgram_conn *dgram);
@@ -44,6 +44,6 @@ void dns_print_current_resolutions(struct dns_resolvers *resolvers);
 void dns_update_resolvers_timeout(struct dns_resolvers *resolvers);
 void dns_reset_resolution(struct dns_resolution *resolution);
 int dns_check_resolution_queue(struct dns_resolvers *resolvers);
-int dns_response_get_query_id(unsigned char *resp);
+unsigned short dns_response_get_query_id(unsigned char *resp);
 
 #endif // _PROTO_DNS_H

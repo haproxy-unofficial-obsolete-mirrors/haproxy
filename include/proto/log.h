@@ -39,9 +39,23 @@ extern char *log_format;
 extern char default_tcp_log_format[];
 extern char default_http_log_format[];
 extern char clf_http_log_format[];
+
+extern char default_rfc5424_sd_log_format[];
+
+extern char *logheader;
+extern char *logheader_rfc5424;
 extern char *logline;
+extern char *logline_rfc5424;
 
 
+/*
+ * Initializes some log data.
+ */
+void init_log();
+
+/*
+ * Builds a log line.
+ */
 int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list_format);
 
 /*
@@ -105,7 +119,12 @@ void send_log(struct proxy *p, int level, const char *format, ...)
  * It doesn't care about errors nor does it report them.
  */
 
-void __send_log(struct proxy *p, int level, char *message, size_t size);
+void __send_log(struct proxy *p, int level, char *message, size_t size, char *sd, size_t sd_size);
+
+/*
+ * returns log format for <fmt> or -1 if not found.
+ */
+int get_log_format(const char *fmt);
 
 /*
  * returns log level for <lev> or -1 if not found.

@@ -67,6 +67,7 @@ int pat_idx_list_val(struct pattern_expr *expr, struct pattern *pat, char **err)
 int pat_idx_list_ptr(struct pattern_expr *expr, struct pattern *pat, char **err);
 int pat_idx_list_str(struct pattern_expr *expr, struct pattern *pat, char **err);
 int pat_idx_list_reg(struct pattern_expr *expr, struct pattern *pat, char **err);
+int pat_idx_list_regm(struct pattern_expr *expr, struct pattern *pat, char **err);
 int pat_idx_tree_ip(struct pattern_expr *expr, struct pattern *pat, char **err);
 int pat_idx_tree_str(struct pattern_expr *expr, struct pattern *pat, char **err);
 int pat_idx_tree_pfx(struct pattern_expr *expr, struct pattern *pat, char **err);
@@ -174,6 +175,7 @@ struct pattern *pat_match_ip(struct sample *smp, struct pattern_expr *expr, int 
  * and restores the previous character when leaving.
  */
 struct pattern *pat_match_reg(struct sample *smp, struct pattern_expr *expr, int fill);
+struct pattern *pat_match_regm(struct sample *smp, struct pattern_expr *expr, int fill);
 
 /*
  * pattern_ref manipulation.
@@ -208,7 +210,7 @@ void pattern_init_expr(struct pattern_expr *expr);
 struct pattern_expr *pattern_lookup_expr(struct pattern_head *head, struct pat_ref *ref);
 struct pattern_expr *pattern_new_expr(struct pattern_head *head, struct pat_ref *ref,
                                       char **err, int *reuse);
-struct sample_storage **pattern_find_smp(struct pattern_expr *expr, struct pat_ref_elt *elt);
+struct sample_data **pattern_find_smp(struct pattern_expr *expr, struct pat_ref_elt *elt);
 int pattern_delete(struct pattern_expr *expr, struct pat_ref_elt *ref);
 
 

@@ -86,12 +86,16 @@ enum {
 	STAT_CLI_O_CLR,      /* clear tables */
 	STAT_CLI_O_SET,      /* set entries in tables */
 	STAT_CLI_O_STAT,     /* dump stats */
-	STAT_CLI_O_PATS,     /* list all pattern reference avalaible */
+	STAT_CLI_O_PATS,     /* list all pattern reference available */
 	STAT_CLI_O_PAT,      /* list all entries of a pattern */
 	STAT_CLI_O_MLOOK,    /* lookup a map entry */
 	STAT_CLI_O_POOLS,    /* dump memory pools */
 	STAT_CLI_O_TLSK,     /* list all TLS ticket keys references */
+	STAT_CLI_O_TLSK_ENT, /* list all TLS ticket keys entries for a reference */
 	STAT_CLI_O_RESOLVERS,/* dump a resolver's section nameservers counters */
+	STAT_CLI_O_SERVERS_STATE, /* dump server state and changing information */
+	STAT_CLI_O_BACKEND,  /* dump backend list */
+	STAT_CLI_O_ENV,      /* dump environment */
 };
 
 /* Actions available for the stats admin forms */
@@ -127,7 +131,163 @@ enum {
 	ST_ADM_ACTION_START,
 };
 
+
+/* These are the field names for each INF_* field position. Please pay attention
+ * to always use the exact same name except that the strings for new names must
+ * be lower case or CamelCase while the enum entries must be upper case.
+ */
+const char *info_field_names[INF_TOTAL_FIELDS] = {
+	[INF_NAME]                           = "Name",
+	[INF_VERSION]                        = "Version",
+	[INF_RELEASE_DATE]                   = "Release_date",
+	[INF_NBPROC]                         = "Nbproc",
+	[INF_PROCESS_NUM]                    = "Process_num",
+	[INF_PID]                            = "Pid",
+	[INF_UPTIME]                         = "Uptime",
+	[INF_UPTIME_SEC]                     = "Uptime_sec",
+	[INF_MEMMAX_MB]                      = "Memmax_MB",
+	[INF_POOL_ALLOC_MB]                  = "PoolAlloc_MB",
+	[INF_POOL_USED_MB]                   = "PoolUsed_MB",
+	[INF_POOL_FAILED]                    = "PoolFailed",
+	[INF_ULIMIT_N]                       = "Ulimit-n",
+	[INF_MAXSOCK]                        = "Maxsock",
+	[INF_MAXCONN]                        = "Maxconn",
+	[INF_HARD_MAXCONN]                   = "Hard_maxconn",
+	[INF_CURR_CONN]                      = "CurrConns",
+	[INF_CUM_CONN]                       = "CumConns",
+	[INF_CUM_REQ]                        = "CumReq",
+	[INF_MAX_SSL_CONNS]                  = "MaxSslConns",
+	[INF_CURR_SSL_CONNS]                 = "CurrSslConns",
+	[INF_CUM_SSL_CONNS]                  = "CumSslConns",
+	[INF_MAXPIPES]                       = "Maxpipes",
+	[INF_PIPES_USED]                     = "PipesUsed",
+	[INF_PIPES_FREE]                     = "PipesFree",
+	[INF_CONN_RATE]                      = "ConnRate",
+	[INF_CONN_RATE_LIMIT]                = "ConnRateLimit",
+	[INF_MAX_CONN_RATE]                  = "MaxConnRate",
+	[INF_SESS_RATE]                      = "SessRate",
+	[INF_SESS_RATE_LIMIT]                = "SessRateLimit",
+	[INF_MAX_SESS_RATE]                  = "MaxSessRate",
+	[INF_SSL_RATE]                       = "SslRate",
+	[INF_SSL_RATE_LIMIT]                 = "SslRateLimit",
+	[INF_MAX_SSL_RATE]                   = "MaxSslRate",
+	[INF_SSL_FRONTEND_KEY_RATE]          = "SslFrontendKeyRate",
+	[INF_SSL_FRONTEND_MAX_KEY_RATE]      = "SslFrontendMaxKeyRate",
+	[INF_SSL_FRONTEND_SESSION_REUSE_PCT] = "SslFrontendSessionReuse_pct",
+	[INF_SSL_BACKEND_KEY_RATE]           = "SslBackendKeyRate",
+	[INF_SSL_BACKEND_MAX_KEY_RATE]       = "SslBackendMaxKeyRate",
+	[INF_SSL_CACHE_LOOKUPS]              = "SslCacheLookups",
+	[INF_SSL_CACHE_MISSES]               = "SslCacheMisses",
+	[INF_COMPRESS_BPS_IN]                = "CompressBpsIn",
+	[INF_COMPRESS_BPS_OUT]               = "CompressBpsOut",
+	[INF_COMPRESS_BPS_RATE_LIM]          = "CompressBpsRateLim",
+	[INF_ZLIB_MEM_USAGE]                 = "ZlibMemUsage",
+	[INF_MAX_ZLIB_MEM_USAGE]             = "MaxZlibMemUsage",
+	[INF_TASKS]                          = "Tasks",
+	[INF_RUN_QUEUE]                      = "Run_queue",
+	[INF_IDLE_PCT]                       = "Idle_pct",
+	[INF_NODE]                           = "node",
+	[INF_DESCRIPTION]                    = "description",
+};
+
+/* one line of stats */
+static struct field info[INF_TOTAL_FIELDS];
+
+/* These are the field names for each ST_F_* field position. Please pay attention
+ * to always use the exact same name except that the strings must be lower case
+ * while the enum entries must be upper case.
+ */
+const char *stat_field_names[ST_F_TOTAL_FIELDS] = {
+	[ST_F_PXNAME]         = "pxname",
+	[ST_F_SVNAME]         = "svname",
+	[ST_F_QCUR]           = "qcur",
+	[ST_F_QMAX]           = "qmax",
+	[ST_F_SCUR]           = "scur",
+	[ST_F_SMAX]           = "smax",
+	[ST_F_SLIM]           = "slim",
+	[ST_F_STOT]           = "stot",
+	[ST_F_BIN]            = "bin",
+	[ST_F_BOUT]           = "bout",
+	[ST_F_DREQ]           = "dreq",
+	[ST_F_DRESP]          = "dresp",
+	[ST_F_EREQ]           = "ereq",
+	[ST_F_ECON]           = "econ",
+	[ST_F_ERESP]          = "eresp",
+	[ST_F_WRETR]          = "wretr",
+	[ST_F_WREDIS]         = "wredis",
+	[ST_F_STATUS]         = "status",
+	[ST_F_WEIGHT]         = "weight",
+	[ST_F_ACT]            = "act",
+	[ST_F_BCK]            = "bck",
+	[ST_F_CHKFAIL]        = "chkfail",
+	[ST_F_CHKDOWN]        = "chkdown",
+	[ST_F_LASTCHG]        = "lastchg",
+	[ST_F_DOWNTIME]       = "downtime",
+	[ST_F_QLIMIT]         = "qlimit",
+	[ST_F_PID]            = "pid",
+	[ST_F_IID]            = "iid",
+	[ST_F_SID]            = "sid",
+	[ST_F_THROTTLE]       = "throttle",
+	[ST_F_LBTOT]          = "lbtot",
+	[ST_F_TRACKED]        = "tracked",
+	[ST_F_TYPE]           = "type",
+	[ST_F_RATE]           = "rate",
+	[ST_F_RATE_LIM]       = "rate_lim",
+	[ST_F_RATE_MAX]       = "rate_max",
+	[ST_F_CHECK_STATUS]   = "check_status",
+	[ST_F_CHECK_CODE]     = "check_code",
+	[ST_F_CHECK_DURATION] = "check_duration",
+	[ST_F_HRSP_1XX]       = "hrsp_1xx",
+	[ST_F_HRSP_2XX]       = "hrsp_2xx",
+	[ST_F_HRSP_3XX]       = "hrsp_3xx",
+	[ST_F_HRSP_4XX]       = "hrsp_4xx",
+	[ST_F_HRSP_5XX]       = "hrsp_5xx",
+	[ST_F_HRSP_OTHER]     = "hrsp_other",
+	[ST_F_HANAFAIL]       = "hanafail",
+	[ST_F_REQ_RATE]       = "req_rate",
+	[ST_F_REQ_RATE_MAX]   = "req_rate_max",
+	[ST_F_REQ_TOT]        = "req_tot",
+	[ST_F_CLI_ABRT]       = "cli_abrt",
+	[ST_F_SRV_ABRT]       = "srv_abrt",
+	[ST_F_COMP_IN]        = "comp_in",
+	[ST_F_COMP_OUT]       = "comp_out",
+	[ST_F_COMP_BYP]       = "comp_byp",
+	[ST_F_COMP_RSP]       = "comp_rsp",
+	[ST_F_LASTSESS]       = "lastsess",
+	[ST_F_LAST_CHK]       = "last_chk",
+	[ST_F_LAST_AGT]       = "last_agt",
+	[ST_F_QTIME]          = "qtime",
+	[ST_F_CTIME]          = "ctime",
+	[ST_F_RTIME]          = "rtime",
+	[ST_F_TTIME]          = "ttime",
+	[ST_F_AGENT_STATUS]   = "agent_status",
+	[ST_F_AGENT_CODE]     = "agent_code",
+	[ST_F_AGENT_DURATION] = "agent_duration",
+	[ST_F_CHECK_DESC]     = "check_desc",
+	[ST_F_AGENT_DESC]     = "agent_desc",
+	[ST_F_CHECK_RISE]     = "check_rise",
+	[ST_F_CHECK_FALL]     = "check_fall",
+	[ST_F_CHECK_HEALTH]   = "check_health",
+	[ST_F_AGENT_RISE]     = "agent_rise",
+	[ST_F_AGENT_FALL]     = "agent_fall",
+	[ST_F_AGENT_HEALTH]   = "agent_health",
+	[ST_F_ADDR]           = "addr",
+	[ST_F_COOKIE]         = "cookie",
+	[ST_F_MODE]           = "mode",
+	[ST_F_ALGO]           = "algo",
+	[ST_F_CONN_RATE]      = "conn_rate",
+	[ST_F_CONN_RATE_MAX]  = "conn_rate_max",
+	[ST_F_CONN_TOT]       = "conn_tot",
+	[ST_F_INTERCEPTED]    = "intercepted",
+};
+
+/* one line of stats */
+static struct field stats[ST_F_TOTAL_FIELDS];
+
+static int stats_dump_backend_to_buffer(struct stream_interface *si);
+static int stats_dump_env_to_buffer(struct stream_interface *si);
 static int stats_dump_info_to_buffer(struct stream_interface *si);
+static int stats_dump_servers_state_to_buffer(struct stream_interface *si);
 static int stats_dump_pools_to_buffer(struct stream_interface *si);
 static int stats_dump_full_sess_to_buffer(struct stream_interface *si, struct stream *sess);
 static int stats_dump_sess_to_buffer(struct stream_interface *si);
@@ -144,13 +304,17 @@ static int stats_tlskeys_list(struct stream_interface *si);
 #endif
 static void cli_release_handler(struct appctx *appctx);
 
+static int dump_servers_state(struct stream_interface *si, struct chunk *buf);
+
 /*
  * cli_io_handler()
  *     -> stats_dump_sess_to_buffer()     // "show sess"
  *     -> stats_dump_errors_to_buffer()   // "show errors"
  *     -> stats_dump_info_to_buffer()     // "show info"
+ *     -> stats_dump_backend_to_buffer()  // "show backend"
+ *     -> stats_dump_servers_state_to_buffer() // "show servers state [<backend name>]"
  *     -> stats_dump_stat_to_buffer()     // "show stat"
- *        -> stats_dump_resolvers_to_buffer() // "show stat resolver <id>"
+ *        -> stats_dump_resolvers_to_buffer() // "show stat resolvers <id>"
  *        -> stats_dump_csv_header()
  *        -> stats_dump_proxy_to_buffer()
  *           -> stats_dump_fe_stats()
@@ -182,12 +346,17 @@ static const char stats_sock_usage_msg[] =
 	"  help           : this message\n"
 	"  prompt         : toggle interactive mode with prompt\n"
 	"  quit           : disconnect\n"
+	"  show backend   : list backends in the current running config\n"
+	"  show env [var] : dump environment variables known to the process\n"
 	"  show info      : report information about the running process\n"
 	"  show pools     : report information about the memory pools usage\n"
 	"  show stat      : report counters for each proxy and server\n"
+	"  show stat resolvers [id]: dumps counters from all resolvers section and\n"
+	"                            associated name servers\n"
 	"  show errors    : report last request and response errors for each proxy\n"
 	"  show sess [id] : report the list of current sessions or dump this session\n"
 	"  show table [id]: report table usage stats or dump this table's contents\n"
+	"  show servers state [id]: dump volatile server information (for backend <id>)\n"
 	"  get weight     : report a server's current weight\n"
 	"  set weight     : change a server's weight\n"
 	"  set server     : change a server's state, weight or address\n"
@@ -198,18 +367,21 @@ static const char stats_sock_usage_msg[] =
 	"  disable        : put a server or frontend in maintenance mode\n"
 	"  enable         : re-enable a server or frontend which is in maintenance mode\n"
 	"  shutdown       : kill a session or a frontend (eg:to release listening ports)\n"
-	"  show acl [id]  : report avalaible acls or dump an acl's contents\n"
+	"  show acl [id]  : report available acls or dump an acl's contents\n"
 	"  get acl        : reports the patterns matching a sample for an ACL\n"
 	"  add acl        : add acl entry\n"
 	"  del acl        : delete acl entry\n"
 	"  clear acl <id> : clear the content of this acl\n"
-	"  show map [id]  : report avalaible maps or dump a map's contents\n"
+	"  show map [id]  : report available maps or dump a map's contents\n"
 	"  get map        : reports the keys and values matching a sample for a map\n"
 	"  set map        : modify map entry\n"
 	"  add map        : add map entry\n"
 	"  del map        : delete map entry\n"
 	"  clear map <id> : clear the content of this map\n"
 	"  set ssl <stmt> : set statement for ssl\n"
+#if (defined SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB && TLS_TICKETS_NO > 0)
+	"  show tls-keys [id|*]: show tls keys references or dump tls ticket keys when id specified\n"
+#endif
 	"";
 
 static const char stats_permission_denied_msg[] =
@@ -247,7 +419,7 @@ static struct proxy *alloc_stats_fe(const char *name, const char *file, int line
 {
 	struct proxy *fe;
 
-	fe = (struct proxy *)calloc(1, sizeof(struct proxy));
+	fe = calloc(1, sizeof(*fe));
 	if (!fe)
 		return NULL;
 
@@ -320,7 +492,7 @@ static int stats_parse_global(char **args, int section_type, struct proxy *curpx
 					return -1;
 				}
 
-				if (kw->parse(args, cur_arg, curpx, bind_conf, err) != 0) {
+				if (kw->parse(args, cur_arg, global.stats_fe, bind_conf, err) != 0) {
 					if (err && *err)
 						memprintf(err, "'%s %s' : '%s'", args[0], args[1], *err);
 					else
@@ -462,24 +634,13 @@ static int stats_parse_global(char **args, int section_type, struct proxy *curpx
  */
 static void stats_dump_csv_header()
 {
-	chunk_appendf(&trash,
-	              "# pxname,svname,"
-	              "qcur,qmax,"
-	              "scur,smax,slim,stot,"
-	              "bin,bout,"
-	              "dreq,dresp,"
-	              "ereq,econ,eresp,"
-	              "wretr,wredis,"
-	              "status,weight,act,bck,"
-	              "chkfail,chkdown,lastchg,downtime,qlimit,"
-	              "pid,iid,sid,throttle,lbtot,tracked,type,"
-	              "rate,rate_lim,rate_max,"
-	              "check_status,check_code,check_duration,"
-	              "hrsp_1xx,hrsp_2xx,hrsp_3xx,hrsp_4xx,hrsp_5xx,hrsp_other,hanafail,"
-	              "req_rate,req_rate_max,req_tot,"
-	              "cli_abrt,srv_abrt,"
-	              "comp_in,comp_out,comp_byp,comp_rsp,lastsess,last_chk,last_agt,qtime,ctime,rtime,ttime,"
-	              "\n");
+	int field;
+
+	chunk_appendf(&trash, "# ");
+	for (field = 0; field < ST_F_TOTAL_FIELDS; field++)
+		chunk_appendf(&trash, "%s,", stat_field_names[field]);
+
+	chunk_appendf(&trash, "\n");
 }
 
 /* print a string of text buffer to <out>. The format is :
@@ -584,20 +745,20 @@ static int stats_dump_table_entry_to_buffer(struct chunk *msg, struct stream_int
 
 	chunk_appendf(msg, "%p:", entry);
 
-	if (proxy->table.type == STKTABLE_TYPE_IP) {
+	if (proxy->table.type == SMP_T_IPV4) {
 		char addr[INET_ADDRSTRLEN];
 		inet_ntop(AF_INET, (const void *)&entry->key.key, addr, sizeof(addr));
 		chunk_appendf(msg, " key=%s", addr);
 	}
-	else if (proxy->table.type == STKTABLE_TYPE_IPV6) {
+	else if (proxy->table.type == SMP_T_IPV6) {
 		char addr[INET6_ADDRSTRLEN];
 		inet_ntop(AF_INET6, (const void *)&entry->key.key, addr, sizeof(addr));
 		chunk_appendf(msg, " key=%s", addr);
 	}
-	else if (proxy->table.type == STKTABLE_TYPE_INTEGER) {
+	else if (proxy->table.type == SMP_T_SINT) {
 		chunk_appendf(msg, " key=%u", *(unsigned int *)entry->key.key);
 	}
-	else if (proxy->table.type == STKTABLE_TYPE_STRING) {
+	else if (proxy->table.type == SMP_T_STR) {
 		chunk_appendf(msg, " key=");
 		dump_text(msg, (const char *)entry->key.key, proxy->table.key_size);
 	}
@@ -669,15 +830,15 @@ static void stats_sock_table_key_request(struct stream_interface *si, char **arg
 	}
 
 	switch (px->table.type) {
-	case STKTABLE_TYPE_IP:
+	case SMP_T_IPV4:
 		uint32_key = htonl(inetaddr_host(args[4]));
 		static_table_key->key = &uint32_key;
 		break;
-	case STKTABLE_TYPE_IPV6:
+	case SMP_T_IPV6:
 		inet_pton(AF_INET6, args[4], ip6_key);
 		static_table_key->key = &ip6_key;
 		break;
-	case STKTABLE_TYPE_INTEGER:
+	case SMP_T_SINT:
 		{
 			char *endptr;
 			unsigned long val;
@@ -695,7 +856,7 @@ static void stats_sock_table_key_request(struct stream_interface *si, char **arg
 			break;
 		}
 		break;
-	case STKTABLE_TYPE_STRING:
+	case SMP_T_STR:
 		static_table_key->key = args[4];
 		static_table_key->key_len = strlen(args[4]);
 		break;
@@ -1148,27 +1309,56 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 	appctx->ctx.stats.scope_len = 0;
 	appctx->ctx.stats.flags = 0;
 	if (strcmp(args[0], "show") == 0) {
-		if (strcmp(args[1], "stat") == 0) {
+		if (strcmp(args[1], "backend") == 0) {
+			appctx->ctx.be.px = NULL;
+			appctx->st2 = STAT_ST_INIT;
+			appctx->st0 = STAT_CLI_O_BACKEND;
+		}
+		else if (strcmp(args[1], "env") == 0) {
+			extern char **environ;
+
+			if (strm_li(s)->bind_conf->level < ACCESS_LVL_OPER) {
+				appctx->ctx.cli.msg = stats_permission_denied_msg;
+				appctx->st0 = STAT_CLI_PRINT;
+				return 1;
+			}
+			appctx->ctx.env.var = environ;
+			appctx->st2 = STAT_ST_INIT;
+			appctx->st0 = STAT_CLI_O_ENV; // stats_dump_env_to_buffer
+
+			if (*args[2]) {
+				int len = strlen(args[2]);
+
+				for (; *appctx->ctx.env.var; appctx->ctx.env.var++) {
+					if (strncmp(*appctx->ctx.env.var, args[2], len) == 0 &&
+					    (*appctx->ctx.env.var)[len] == '=')
+						break;
+				}
+				if (!*appctx->ctx.env.var) {
+					appctx->ctx.cli.msg = "Variable not found\n";
+					appctx->st0 = STAT_CLI_PRINT;
+					return 1;
+				}
+				appctx->st2 = STAT_ST_END;
+			}
+		}
+		else if (strcmp(args[1], "stat") == 0) {
 			if (strcmp(args[2], "resolvers") == 0) {
 				struct dns_resolvers *presolvers;
 
-				if (!*args[3]) {
-					appctx->ctx.cli.msg = "Missing resolver section identifier.\n";
-					appctx->st0 = STAT_CLI_PRINT;
-					return 1;
-				}
-
-				appctx->ctx.resolvers.ptr = NULL;
-				list_for_each_entry(presolvers, &dns_resolvers, list) {
-					if (strcmp(presolvers->id, args[3]) == 0) {
-						appctx->ctx.resolvers.ptr = presolvers;
-						break;
+				if (*args[3]) {
+					appctx->ctx.resolvers.ptr = NULL;
+					list_for_each_entry(presolvers, &dns_resolvers, list) {
+						if (strcmp(presolvers->id, args[3]) == 0) {
+							appctx->ctx.resolvers.ptr = presolvers;
+							break;
+						}
 					}
-				}
-				if (appctx->ctx.resolvers.ptr == NULL) {
-					appctx->ctx.cli.msg = "Can't find resolvers section.\n";
-					appctx->st0 = STAT_CLI_PRINT;
-					return 1;
+					if (appctx->ctx.resolvers.ptr == NULL) {
+						appctx->ctx.cli.msg = "Can't find that resolvers section\n";
+						appctx->st0 = STAT_CLI_PRINT;
+						return 1;
+					}
 				}
 
 				appctx->st2 = STAT_ST_INIT;
@@ -1180,14 +1370,41 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 				appctx->ctx.stats.iid = atoi(args[2]);
 				appctx->ctx.stats.type = atoi(args[3]);
 				appctx->ctx.stats.sid = atoi(args[4]);
+				if (strcmp(args[5], "typed") == 0)
+					appctx->ctx.stats.flags |= STAT_FMT_TYPED;
 			}
+			else if (strcmp(args[2], "typed") == 0)
+				appctx->ctx.stats.flags |= STAT_FMT_TYPED;
 
 			appctx->st2 = STAT_ST_INIT;
 			appctx->st0 = STAT_CLI_O_STAT; // stats_dump_stat_to_buffer
 		}
 		else if (strcmp(args[1], "info") == 0) {
+			if (strcmp(args[2], "typed") == 0)
+				appctx->ctx.stats.flags |= STAT_FMT_TYPED;
 			appctx->st2 = STAT_ST_INIT;
 			appctx->st0 = STAT_CLI_O_INFO; // stats_dump_info_to_buffer
+		}
+		else if (strcmp(args[1], "servers") == 0 && strcmp(args[2], "state") == 0) {
+			appctx->ctx.server_state.iid = 0;
+			appctx->ctx.server_state.px = NULL;
+			appctx->ctx.server_state.sv = NULL;
+
+			/* check if a backend name has been provided */
+			if (*args[3]) {
+				/* read server state from local file */
+				appctx->ctx.server_state.px = proxy_be_by_name(args[3]);
+
+				if (!appctx->ctx.server_state.px) {
+					appctx->ctx.cli.msg = "Can't find backend.\n";
+					appctx->st0 = STAT_CLI_PRINT;
+					return 1;
+				}
+				appctx->ctx.server_state.iid = appctx->ctx.server_state.px->uuid;
+			}
+			appctx->st2 = STAT_ST_INIT;
+			appctx->st0 = STAT_CLI_O_SERVERS_STATE; // stats_dump_servers_state_to_buffer
+			return 1;
 		}
 		else if (strcmp(args[1], "pools") == 0) {
 			appctx->st2 = STAT_ST_INIT;
@@ -1229,8 +1446,27 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 		}
 		else if (strcmp(args[1], "tls-keys") == 0) {
 #if (defined SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB && TLS_TICKETS_NO > 0)
+			/* no parameter, shows only file list */
+			if (!*args[2]) {
+				appctx->st2 = STAT_ST_INIT;
+				appctx->st0 = STAT_CLI_O_TLSK;
+				return 1;
+			}
+
+			if (args[2][0] == '*') {
+				/* list every TLS ticket keys */
+				appctx->ctx.tlskeys.ref = NULL;
+			} else {
+				appctx->ctx.tlskeys.ref = tlskeys_ref_lookup_ref(args[2]);
+				if(!appctx->ctx.tlskeys.ref) {
+					appctx->ctx.cli.msg = "'show tls-keys' unable to locate referenced filename\n";
+					appctx->st0 = STAT_CLI_PRINT;
+					return 1;
+				}
+			}
 			appctx->st2 = STAT_ST_INIT;
-			appctx->st0 = STAT_CLI_O_TLSK;
+			appctx->st0 = STAT_CLI_O_TLSK_ENT;
+
 #else
 			appctx->ctx.cli.msg = "HAProxy was compiled against a version of OpenSSL "
 						"that doesn't support specifying TLS ticket keys\n";
@@ -1247,7 +1483,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			else
 				appctx->ctx.map.display_flags = PAT_REF_ACL;
 
-			/* no parameter: display all map avalaible */
+			/* no parameter: display all map available */
 			if (!*args[2]) {
 				appctx->st2 = STAT_ST_INIT;
 				appctx->st0 = STAT_CLI_O_PATS;
@@ -1541,7 +1777,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 				}
 			}
 			else if (strcmp(args[3], "addr") == 0) {
-				warning = server_parse_addr_change_request(sv, args[4]);
+				warning = server_parse_addr_change_request(sv, args[4], "stats command");
 				if (warning) {
 					appctx->ctx.cli.msg = warning;
 					appctx->st0 = STAT_CLI_PRINT;
@@ -1618,6 +1854,22 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 
 				return 1;
 			}
+			else if (strcmp(args[2], "server") == 0) {
+				struct server *sv;
+				const char *warning;
+
+				sv = expect_server_admin(s, si, args[3]);
+				if (!sv)
+					return 1;
+
+				warning = server_parse_maxconn_change_request(sv, args[4]);
+				if (warning) {
+					appctx->ctx.cli.msg = warning;
+					appctx->st0 = STAT_CLI_PRINT;
+				}
+
+				return 1;
+			}
 			else if (strcmp(args[2], "global") == 0) {
 				int v;
 
@@ -1653,7 +1905,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 				return 1;
 			}
 			else {
-				appctx->ctx.cli.msg = "'set maxconn' only supports 'frontend' and 'global'.\n";
+				appctx->ctx.cli.msg = "'set maxconn' only supports 'frontend', 'server', and 'global'.\n";
 				appctx->st0 = STAT_CLI_PRINT;
 				return 1;
 			}
@@ -1775,6 +2027,12 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			else if (strcmp(args[2], "http-compression") == 0) {
 				if (strcmp(args[3], "global") == 0) {
 					int v;
+
+					if (strm_li(s)->bind_conf->level < ACCESS_LVL_ADMIN) {
+						appctx->ctx.cli.msg = stats_permission_denied_msg;
+						appctx->st0 = STAT_CLI_PRINT;
+						return 1;
+					}
 
 					if (!*args[4]) {
 						appctx->ctx.cli.msg = "Expects a maximum input byte rate in kB/s.\n";
@@ -1933,8 +2191,8 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 					return 1;
 				}
 
-				memcpy(appctx->ctx.tlskeys.ref->tlskeys + 2 % TLS_TICKETS_NO, trash.str, trash.len);
-				appctx->ctx.tlskeys.ref->tls_ticket_enc_index = appctx->ctx.tlskeys.ref->tls_ticket_enc_index + 1 % TLS_TICKETS_NO;
+				memcpy(appctx->ctx.tlskeys.ref->tlskeys + ((appctx->ctx.tlskeys.ref->tls_ticket_enc_index + 2) % TLS_TICKETS_NO), trash.str, trash.len);
+				appctx->ctx.tlskeys.ref->tls_ticket_enc_index = (appctx->ctx.tlskeys.ref->tls_ticket_enc_index + 1) % TLS_TICKETS_NO;
 
 				appctx->ctx.cli.msg = "TLS ticket key updated!";
 				appctx->st0 = STAT_CLI_PRINT;
@@ -2450,14 +2708,10 @@ static void cli_io_handler(struct appctx *appctx)
 			bo_skip(si_oc(si), reql);
 			req->flags |= CF_READ_DONTWAIT; /* we plan to read small requests */
 		}
-		else {	/* output functions: first check if the output buffer is closed then abort */
-			if (res->flags & (CF_SHUTR_NOW|CF_SHUTR)) {
-				cli_release_handler(appctx);
-				appctx->st0 = STAT_CLI_END;
-				continue;
-			}
-
+		else {	/* output functions */
 			switch (appctx->st0) {
+			case STAT_CLI_PROMPT:
+				break;
 			case STAT_CLI_PRINT:
 				if (bi_putstr(si_ic(si), appctx->ctx.cli.msg) != -1)
 					appctx->st0 = STAT_CLI_PROMPT;
@@ -2472,8 +2726,16 @@ static void cli_io_handler(struct appctx *appctx)
 				else
 					si_applet_cant_put(si);
 				break;
+			case STAT_CLI_O_BACKEND:
+				if (stats_dump_backend_to_buffer(si))
+					appctx->st0 = STAT_CLI_PROMPT;
+				break;
 			case STAT_CLI_O_INFO:
 				if (stats_dump_info_to_buffer(si))
+					appctx->st0 = STAT_CLI_PROMPT;
+				break;
+			case STAT_CLI_O_SERVERS_STATE:
+				if (stats_dump_servers_state_to_buffer(si))
 					appctx->st0 = STAT_CLI_PROMPT;
 				break;
 			case STAT_CLI_O_STAT:
@@ -2518,10 +2780,17 @@ static void cli_io_handler(struct appctx *appctx)
 				if (stats_tlskeys_list(si))
 					appctx->st0 = STAT_CLI_PROMPT;
 				break;
+			case STAT_CLI_O_TLSK_ENT:
+				if (stats_tlskeys_list(si))
+					appctx->st0 = STAT_CLI_PROMPT;
+				break;
 #endif
+			case STAT_CLI_O_ENV:	/* environment dump */
+				if (stats_dump_env_to_buffer(si))
+					appctx->st0 = STAT_CLI_PROMPT;
+				break;
 			default: /* abnormal state */
-				cli_release_handler(appctx);
-				appctx->st0 = STAT_CLI_PROMPT;
+				si->flags |= SI_FL_ERR;
 				break;
 			}
 
@@ -2552,7 +2821,7 @@ static void cli_io_handler(struct appctx *appctx)
 		}
 	}
 
-	if ((res->flags & CF_SHUTR) && (si->state == SI_ST_EST) && (appctx->st0 != STAT_CLI_GETREQ)) {
+	if ((res->flags & CF_SHUTR) && (si->state == SI_ST_EST)) {
 		DPRINTF(stderr, "%s@%d: si to buf closed. req=%08x, res=%08x, st=%d\n",
 			__FUNCTION__, __LINE__, req->flags, res->flags, si->state);
 		/* Other side has closed, let's abort if we have no more processing to do
@@ -2580,13 +2849,131 @@ static void cli_io_handler(struct appctx *appctx)
 		si->state, req->flags, res->flags, req->buf->i, req->buf->o, res->buf->i, res->buf->o);
 }
 
-/* This function dumps information onto the stream interface's read buffer.
- * It returns 0 as long as it does not complete, non-zero upon completion.
- * No state is used.
+/* Emits a stats field without any surrounding element and properly encoded to
+ * resist CSV output. Returns non-zero on success, 0 if the buffer is full.
  */
-static int stats_dump_info_to_buffer(struct stream_interface *si)
+int stats_emit_raw_data_field(struct chunk *out, const struct field *f)
+{
+	switch (field_format(f, 0)) {
+	case FF_EMPTY: return 1;
+	case FF_S32:   return chunk_appendf(out, "%d", f->u.s32);
+	case FF_U32:   return chunk_appendf(out, "%u", f->u.u32);
+	case FF_S64:   return chunk_appendf(out, "%lld", (long long)f->u.s64);
+	case FF_U64:   return chunk_appendf(out, "%llu", (unsigned long long)f->u.u64);
+	case FF_STR:   return csv_enc_append(field_str(f, 0), 1, out) != NULL;
+	default:       return chunk_appendf(out, "[INCORRECT_FIELD_TYPE_%08x]", f->type);
+	}
+}
+
+/* Emits a stats field prefixed with its type. No CSV encoding is prepared, the
+ * output is supposed to be used on its own line. Returns non-zero on success, 0
+ * if the buffer is full.
+ */
+int stats_emit_typed_data_field(struct chunk *out, const struct field *f)
+{
+	switch (field_format(f, 0)) {
+	case FF_EMPTY: return 1;
+	case FF_S32:   return chunk_appendf(out, "s32:%d", f->u.s32);
+	case FF_U32:   return chunk_appendf(out, "u32:%u", f->u.u32);
+	case FF_S64:   return chunk_appendf(out, "s64:%lld", (long long)f->u.s64);
+	case FF_U64:   return chunk_appendf(out, "u64:%llu", (unsigned long long)f->u.u64);
+	case FF_STR:   return chunk_appendf(out, "str:%s", field_str(f, 0));
+	default:       return chunk_appendf(out, "%08x:?", f->type);
+	}
+}
+
+/* Emits an encoding of the field type on 3 characters followed by a delimiter.
+ * Returns non-zero on success, 0 if the buffer is full.
+ */
+int stats_emit_field_tags(struct chunk *out, const struct field *f, char delim)
+{
+	char origin, nature, scope;
+
+	switch (field_origin(f, 0)) {
+	case FO_METRIC:  origin = 'M'; break;
+	case FO_STATUS:  origin = 'S'; break;
+	case FO_KEY:     origin = 'K'; break;
+	case FO_CONFIG:  origin = 'C'; break;
+	case FO_PRODUCT: origin = 'P'; break;
+	default:         origin = '?'; break;
+	}
+
+	switch (field_nature(f, 0)) {
+	case FN_GAUGE:    nature = 'G'; break;
+	case FN_LIMIT:    nature = 'L'; break;
+	case FN_MIN:      nature = 'm'; break;
+	case FN_MAX:      nature = 'M'; break;
+	case FN_RATE:     nature = 'R'; break;
+	case FN_COUNTER:  nature = 'C'; break;
+	case FN_DURATION: nature = 'D'; break;
+	case FN_AGE:      nature = 'A'; break;
+	case FN_TIME:     nature = 'T'; break;
+	case FN_NAME:     nature = 'N'; break;
+	case FN_OUTPUT:   nature = 'O'; break;
+	case FN_AVG:      nature = 'a'; break;
+	default:          nature = '?'; break;
+	}
+
+	switch (field_scope(f, 0)) {
+	case FS_PROCESS: scope = 'P'; break;
+	case FS_SERVICE: scope = 'S'; break;
+	case FS_SYSTEM:  scope = 's'; break;
+	case FS_CLUSTER: scope = 'C'; break;
+	default:         scope = '?'; break;
+	}
+
+	return chunk_appendf(out, "%c%c%c%c", origin, nature, scope, delim);
+}
+
+/* Dump all fields from <info> into <out> using the "show info" format (name: value) */
+static int stats_dump_info_fields(struct chunk *out, const struct field *info)
+{
+	int field;
+
+	for (field = 0; field < INF_TOTAL_FIELDS; field++) {
+		if (!field_format(info, field))
+			continue;
+
+		if (!chunk_appendf(out, "%s: ", info_field_names[field]))
+			return 0;
+		if (!stats_emit_raw_data_field(out, &info[field]))
+			return 0;
+		if (!chunk_strcat(out, "\n"))
+			return 0;
+	}
+	return 1;
+}
+
+/* Dump all fields from <info> into <out> using the "show info typed" format */
+static int stats_dump_typed_info_fields(struct chunk *out, const struct field *info)
+{
+	int field;
+
+	for (field = 0; field < INF_TOTAL_FIELDS; field++) {
+		if (!field_format(info, field))
+			continue;
+
+		if (!chunk_appendf(out, "%d.%s.%u:", field, info_field_names[field], info[INF_PROCESS_NUM].u.u32))
+			return 0;
+		if (!stats_emit_field_tags(out, &info[field], ':'))
+			return 0;
+		if (!stats_emit_typed_data_field(out, &info[field]))
+			return 0;
+		if (!chunk_strcat(out, "\n"))
+			return 0;
+	}
+	return 1;
+}
+
+/* Fill <info> with HAProxy global info. <info> is preallocated
+ * array of length <len>. The length of the aray must be
+ * INF_TOTAL_FIELDS. If this length is less then this value, the
+ * function returns 0, otherwise, it returns 1.
+ */
+int stats_fill_info(struct field *info, int len)
 {
 	unsigned int up = (now.tv_sec - start_date.tv_sec);
+	struct chunk *out = get_trash_chunk();
 
 #ifdef USE_OPENSSL
 	int ssl_sess_rate = read_freq_ctr(&global.ssl_per_sec);
@@ -2599,96 +2986,241 @@ static int stats_dump_info_to_buffer(struct stream_interface *si)
 	}
 #endif
 
-	chunk_printf(&trash,
-	             "Name: " PRODUCT_NAME "\n"
-	             "Version: " HAPROXY_VERSION "\n"
-	             "Release_date: " HAPROXY_DATE "\n"
-	             "Nbproc: %d\n"
-	             "Process_num: %d\n"
-	             "Pid: %d\n"
-	             "Uptime: %dd %dh%02dm%02ds\n"
-	             "Uptime_sec: %d\n"
-	             "Memmax_MB: %d\n"
-	             "Ulimit-n: %d\n"
-	             "Maxsock: %d\n"
-	             "Maxconn: %d\n"
-	             "Hard_maxconn: %d\n"
-	             "CurrConns: %d\n"
-		     "CumConns: %d\n"
-		     "CumReq: %u\n"
+	if (len < INF_TOTAL_FIELDS)
+		return 0;
+
+	chunk_reset(out);
+	memset(info, 0, sizeof(*info) * len);
+
+	info[INF_NAME]                           = mkf_str(FO_PRODUCT|FN_OUTPUT|FS_SERVICE, PRODUCT_NAME);
+	info[INF_VERSION]                        = mkf_str(FO_PRODUCT|FN_OUTPUT|FS_SERVICE, HAPROXY_VERSION);
+	info[INF_RELEASE_DATE]                   = mkf_str(FO_PRODUCT|FN_OUTPUT|FS_SERVICE, HAPROXY_DATE);
+
+	info[INF_NBPROC]                         = mkf_u32(FO_CONFIG|FS_SERVICE, global.nbproc);
+	info[INF_PROCESS_NUM]                    = mkf_u32(FO_KEY, relative_pid);
+	info[INF_PID]                            = mkf_u32(FO_STATUS, pid);
+
+	info[INF_UPTIME]                         = mkf_str(FN_DURATION, chunk_newstr(out));
+	chunk_appendf(out, "%ud %uh%02um%02us", up / 86400, (up % 86400) / 3600, (up % 3600) / 60, (up % 60));
+
+	info[INF_UPTIME_SEC]                     = mkf_u32(FN_DURATION, up);
+	info[INF_MEMMAX_MB]                      = mkf_u32(FO_CONFIG|FN_LIMIT, global.rlimit_memmax);
+	info[INF_POOL_ALLOC_MB]                  = mkf_u32(0, (unsigned)(pool_total_allocated() / 1048576L));
+	info[INF_POOL_USED_MB]                   = mkf_u32(0, (unsigned)(pool_total_used() / 1048576L));
+	info[INF_POOL_FAILED]                    = mkf_u32(FN_COUNTER, pool_total_failures());
+	info[INF_ULIMIT_N]                       = mkf_u32(FO_CONFIG|FN_LIMIT, global.rlimit_nofile);
+	info[INF_MAXSOCK]                        = mkf_u32(FO_CONFIG|FN_LIMIT, global.maxsock);
+	info[INF_MAXCONN]                        = mkf_u32(FO_CONFIG|FN_LIMIT, global.maxconn);
+	info[INF_HARD_MAXCONN]                   = mkf_u32(FO_CONFIG|FN_LIMIT, global.hardmaxconn);
+	info[INF_CURR_CONN]                      = mkf_u32(0, actconn);
+	info[INF_CUM_CONN]                       = mkf_u32(FN_COUNTER, totalconn);
+	info[INF_CUM_REQ]                        = mkf_u32(FN_COUNTER, global.req_count);
 #ifdef USE_OPENSSL
-		     "MaxSslConns: %d\n"
-	             "CurrSslConns: %d\n"
-		     "CumSslConns: %d\n"
+	info[INF_MAX_SSL_CONNS]                  = mkf_u32(FN_MAX, global.maxsslconn);
+	info[INF_CURR_SSL_CONNS]                 = mkf_u32(0, sslconns);
+	info[INF_CUM_SSL_CONNS]                  = mkf_u32(FN_COUNTER, totalsslconns);
 #endif
-	             "Maxpipes: %d\n"
-	             "PipesUsed: %d\n"
-	             "PipesFree: %d\n"
-	             "ConnRate: %d\n"
-	             "ConnRateLimit: %d\n"
-	             "MaxConnRate: %d\n"
-	             "SessRate: %d\n"
-	             "SessRateLimit: %d\n"
-	             "MaxSessRate: %d\n"
+	info[INF_MAXPIPES]                       = mkf_u32(FO_CONFIG|FN_LIMIT, global.maxpipes);
+	info[INF_PIPES_USED]                     = mkf_u32(0, pipes_used);
+	info[INF_PIPES_FREE]                     = mkf_u32(0, pipes_free);
+	info[INF_CONN_RATE]                      = mkf_u32(FN_RATE, read_freq_ctr(&global.conn_per_sec));
+	info[INF_CONN_RATE_LIMIT]                = mkf_u32(FO_CONFIG|FN_LIMIT, global.cps_lim);
+	info[INF_MAX_CONN_RATE]                  = mkf_u32(FN_MAX, global.cps_max);
+	info[INF_SESS_RATE]                      = mkf_u32(FN_RATE, read_freq_ctr(&global.sess_per_sec));
+	info[INF_SESS_RATE_LIMIT]                = mkf_u32(FO_CONFIG|FN_LIMIT, global.sps_lim);
+	info[INF_MAX_SESS_RATE]                  = mkf_u32(FN_RATE, global.sps_max);
+
 #ifdef USE_OPENSSL
-	             "SslRate: %d\n"
-	             "SslRateLimit: %d\n"
-	             "MaxSslRate: %d\n"
-		     "SslFrontendKeyRate: %d\n"
-		     "SslFrontendMaxKeyRate: %d\n"
-		     "SslFrontendSessionReuse_pct: %d\n"
-		     "SslBackendKeyRate: %d\n"
-		     "SslBackendMaxKeyRate: %d\n"
-		     "SslCacheLookups: %u\n"
-		     "SslCacheMisses: %u\n"
+	info[INF_SSL_RATE]                       = mkf_u32(FN_RATE, ssl_sess_rate);
+	info[INF_SSL_RATE_LIMIT]                 = mkf_u32(FO_CONFIG|FN_LIMIT, global.ssl_lim);
+	info[INF_MAX_SSL_RATE]                   = mkf_u32(FN_MAX, global.ssl_max);
+	info[INF_SSL_FRONTEND_KEY_RATE]          = mkf_u32(0, ssl_key_rate);
+	info[INF_SSL_FRONTEND_MAX_KEY_RATE]      = mkf_u32(FN_MAX, global.ssl_fe_keys_max);
+	info[INF_SSL_FRONTEND_SESSION_REUSE_PCT] = mkf_u32(0, ssl_reuse);
+	info[INF_SSL_BACKEND_KEY_RATE]           = mkf_u32(FN_RATE, read_freq_ctr(&global.ssl_be_keys_per_sec));
+	info[INF_SSL_BACKEND_MAX_KEY_RATE]       = mkf_u32(FN_MAX, global.ssl_be_keys_max);
+	info[INF_SSL_CACHE_LOOKUPS]              = mkf_u32(FN_COUNTER, global.shctx_lookups);
+	info[INF_SSL_CACHE_MISSES]               = mkf_u32(FN_COUNTER, global.shctx_misses);
 #endif
-	             "CompressBpsIn: %u\n"
-	             "CompressBpsOut: %u\n"
-	             "CompressBpsRateLim: %u\n"
+	info[INF_COMPRESS_BPS_IN]                = mkf_u32(FN_RATE, read_freq_ctr(&global.comp_bps_in));
+	info[INF_COMPRESS_BPS_OUT]               = mkf_u32(FN_RATE, read_freq_ctr(&global.comp_bps_out));
+	info[INF_COMPRESS_BPS_RATE_LIM]          = mkf_u32(FO_CONFIG|FN_LIMIT, global.comp_rate_lim);
 #ifdef USE_ZLIB
-	             "ZlibMemUsage: %ld\n"
-	             "MaxZlibMemUsage: %ld\n"
+	info[INF_ZLIB_MEM_USAGE]                 = mkf_u32(0, zlib_used_memory);
+	info[INF_MAX_ZLIB_MEM_USAGE]             = mkf_u32(FO_CONFIG|FN_LIMIT, global.maxzlibmem);
 #endif
-	             "Tasks: %d\n"
-	             "Run_queue: %d\n"
-	             "Idle_pct: %d\n"
-	             "node: %s\n"
-	             "description: %s\n"
-	             "",
-	             global.nbproc,
-	             relative_pid,
-	             pid,
-	             up / 86400, (up % 86400) / 3600, (up % 3600) / 60, (up % 60),
-	             up,
-	             global.rlimit_memmax,
-	             global.rlimit_nofile,
-	             global.maxsock, global.maxconn, global.hardmaxconn,
-	             actconn, totalconn, global.req_count,
-#ifdef USE_OPENSSL
-		     global.maxsslconn, sslconns, totalsslconns,
-#endif
-		     global.maxpipes, pipes_used, pipes_free,
-	             read_freq_ctr(&global.conn_per_sec), global.cps_lim, global.cps_max,
-	             read_freq_ctr(&global.sess_per_sec), global.sps_lim, global.sps_max,
-#ifdef USE_OPENSSL
-	             ssl_sess_rate, global.ssl_lim, global.ssl_max,
-	             ssl_key_rate, global.ssl_fe_keys_max,
-	             ssl_reuse,
-	             read_freq_ctr(&global.ssl_be_keys_per_sec), global.ssl_be_keys_max,
-		     global.shctx_lookups, global.shctx_misses,
-#endif
-	             read_freq_ctr(&global.comp_bps_in), read_freq_ctr(&global.comp_bps_out),
-	             global.comp_rate_lim,
-#ifdef USE_ZLIB
-	             zlib_used_memory, global.maxzlibmem,
-#endif
-	             nb_tasks_cur, run_queue_cur, idle_pct,
-	             global.node, global.desc ? global.desc : ""
-	             );
+	info[INF_TASKS]                          = mkf_u32(0, nb_tasks_cur);
+	info[INF_RUN_QUEUE]                      = mkf_u32(0, run_queue_cur);
+	info[INF_IDLE_PCT]                       = mkf_u32(FN_AVG, idle_pct);
+	info[INF_NODE]                           = mkf_str(FO_CONFIG|FN_OUTPUT|FS_SERVICE, global.node);
+	if (global.desc)
+		info[INF_DESCRIPTION]            = mkf_str(FO_CONFIG|FN_OUTPUT|FS_SERVICE, global.desc);
+
+	return 1;
+}
+
+/* This function dumps information onto the stream interface's read buffer.
+ * It returns 0 as long as it does not complete, non-zero upon completion.
+ * No state is used.
+ */
+static int stats_dump_info_to_buffer(struct stream_interface *si)
+{
+	struct appctx *appctx = __objt_appctx(si->end);
+
+	if (!stats_fill_info(info, INF_TOTAL_FIELDS))
+		return 0;
+
+	chunk_reset(&trash);
+
+	if (appctx->ctx.stats.flags & STAT_FMT_TYPED)
+		stats_dump_typed_info_fields(&trash, info);
+	else
+		stats_dump_info_fields(&trash, info);
 
 	if (bi_putchk(si_ic(si), &trash) == -1) {
 		si_applet_cant_put(si);
 		return 0;
+	}
+
+	return 1;
+}
+
+/* dumps server state information into <buf> for all the servers found in <backend>
+ * These information are all the parameters which may change during HAProxy runtime.
+ * By default, we only export to the last known server state file format.
+ * These information can be used at next startup to recover same level of server state.
+ */
+static int dump_servers_state(struct stream_interface *si, struct chunk *buf)
+{
+	struct appctx *appctx = __objt_appctx(si->end);
+	struct server *srv;
+	char srv_addr[INET6_ADDRSTRLEN + 1];
+	time_t srv_time_since_last_change;
+	int bk_f_forced_id, srv_f_forced_id;
+
+
+	/* we don't want to report any state if the backend is not enabled on this process */
+	if (appctx->ctx.server_state.px->bind_proc && !(appctx->ctx.server_state.px->bind_proc & (1UL << (relative_pid - 1))))
+		return 1;
+
+	if (!appctx->ctx.server_state.sv)
+		appctx->ctx.server_state.sv = appctx->ctx.server_state.px->srv;
+
+	for (; appctx->ctx.server_state.sv != NULL; appctx->ctx.server_state.sv = srv->next) {
+		srv = appctx->ctx.server_state.sv;
+		srv_addr[0] = '\0';
+		srv_time_since_last_change = 0;
+		bk_f_forced_id = 0;
+		srv_f_forced_id = 0;
+
+		switch (srv->addr.ss_family) {
+			case AF_INET:
+				inet_ntop(srv->addr.ss_family, &((struct sockaddr_in *)&srv->addr)->sin_addr,
+					  srv_addr, INET_ADDRSTRLEN + 1);
+				break;
+			case AF_INET6:
+				inet_ntop(srv->addr.ss_family, &((struct sockaddr_in6 *)&srv->addr)->sin6_addr,
+					  srv_addr, INET6_ADDRSTRLEN + 1);
+				break;
+		}
+		srv_time_since_last_change = now.tv_sec - srv->last_change;
+		bk_f_forced_id = appctx->ctx.server_state.px->options & PR_O_FORCED_ID ? 1 : 0;
+		srv_f_forced_id = srv->flags & SRV_F_FORCED_ID ? 1 : 0;
+
+		chunk_appendf(buf,
+				"%d %s "
+				"%d %s %s "
+				"%d %d %d %d %ld "
+				"%d %d %d %d %d "
+				"%d %d"
+				"\n",
+				appctx->ctx.server_state.px->uuid, appctx->ctx.server_state.px->id,
+				srv->puid, srv->id, srv_addr,
+				srv->state, srv->admin, srv->uweight, srv->iweight, (long int)srv_time_since_last_change,
+				srv->check.status, srv->check.result, srv->check.health, srv->check.state, srv->agent.state,
+				bk_f_forced_id, srv_f_forced_id);
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si_applet_cant_put(si);
+			return 0;
+		}
+	}
+	return 1;
+}
+
+/* Parses backend list and simply report backend names */
+static int stats_dump_backend_to_buffer(struct stream_interface *si)
+{
+	struct appctx *appctx = __objt_appctx(si->end);
+	extern struct proxy *proxy;
+	struct proxy *curproxy;
+
+	chunk_reset(&trash);
+
+	if (!appctx->ctx.be.px) {
+		chunk_printf(&trash, "# name\n");
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si_applet_cant_put(si);
+			return 0;
+		}
+		appctx->ctx.be.px = proxy;
+	}
+
+	for (; appctx->ctx.be.px != NULL; appctx->ctx.be.px = curproxy->next) {
+		curproxy = appctx->ctx.be.px;
+
+		/* looking for backends only */
+		if (!(curproxy->cap & PR_CAP_BE))
+			continue;
+
+		/* we don't want to list a backend which is bound to this process */
+		if (curproxy->bind_proc && !(curproxy->bind_proc & (1UL << (relative_pid - 1))))
+			continue;
+
+		chunk_appendf(&trash, "%s\n", curproxy->id);
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si_applet_cant_put(si);
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
+/* Parses backend list or simply use backend name provided by the user to return
+ * states of servers to stdout.
+ */
+static int stats_dump_servers_state_to_buffer(struct stream_interface *si)
+{
+	struct appctx *appctx = __objt_appctx(si->end);
+	extern struct proxy *proxy;
+	struct proxy *curproxy;
+
+	chunk_reset(&trash);
+
+	if (!appctx->ctx.server_state.px) {
+		chunk_printf(&trash, "%d\n# %s\n", SRV_STATE_FILE_VERSION, SRV_STATE_FILE_FIELD_NAMES);
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si_applet_cant_put(si);
+			return 0;
+		}
+		appctx->ctx.server_state.px = proxy;
+	}
+
+	for (; appctx->ctx.server_state.px != NULL; appctx->ctx.server_state.px = curproxy->next) {
+		curproxy = appctx->ctx.server_state.px;
+		/* servers are only in backends */
+		if (curproxy->cap & PR_CAP_BE) {
+			if (!dump_servers_state(si, &trash))
+				return 0;
+
+			if (bi_putchk(si_ic(si), &trash) == -1) {
+				si_applet_cant_put(si);
+				return 0;
+			}
+		}
+		/* only the selected proxy is dumped */
+		if (appctx->ctx.server_state.iid)
+			break;
 	}
 
 	return 1;
@@ -2708,91 +3240,127 @@ static int stats_dump_pools_to_buffer(struct stream_interface *si)
 	return 1;
 }
 
-/* Dumps a frontend's line to the trash for the current proxy <px> and uses
- * the state from stream interface <si>. The caller is responsible for clearing
- * the trash if needed. Returns non-zero if it emits anything, zero otherwise.
- */
-static int stats_dump_fe_stats(struct stream_interface *si, struct proxy *px)
+/* Dump all fields from <stats> into <out> using CSV format */
+static int stats_dump_fields_csv(struct chunk *out, const struct field *stats)
 {
-	struct appctx *appctx = __objt_appctx(si->end);
-	int i;
+	int field;
 
-	if (!(px->cap & PR_CAP_FE))
-		return 0;
+	for (field = 0; field < ST_F_TOTAL_FIELDS; field++) {
+		if (!stats_emit_raw_data_field(out, &stats[field]))
+			return 0;
+		if (!chunk_strcat(out, ","))
+			return 0;
+	}
+	chunk_strcat(out, "\n");
+	return 1;
+}
 
-	if ((appctx->ctx.stats.flags & STAT_BOUND) && !(appctx->ctx.stats.type & (1 << STATS_TYPE_FE)))
-		return 0;
+/* Dump all fields from <stats> into <out> using a typed "field:desc:type:value" format */
+static int stats_dump_fields_typed(struct chunk *out, const struct field *stats)
+{
+	int field;
 
-	if (appctx->ctx.stats.flags & STAT_FMT_HTML) {
-		chunk_appendf(&trash,
+	for (field = 0; field < ST_F_TOTAL_FIELDS; field++) {
+		if (!stats[field].type)
+			continue;
+
+		chunk_appendf(out, "%c.%u.%u.%d.%s.%u:",
+		              stats[ST_F_TYPE].u.u32 == STATS_TYPE_FE ? 'F' :
+		              stats[ST_F_TYPE].u.u32 == STATS_TYPE_BE ? 'B' :
+		              stats[ST_F_TYPE].u.u32 == STATS_TYPE_SO ? 'L' :
+		              stats[ST_F_TYPE].u.u32 == STATS_TYPE_SV ? 'S' :
+		              '?',
+		              stats[ST_F_IID].u.u32, stats[ST_F_SID].u.u32,
+		              field, stat_field_names[field], stats[ST_F_PID].u.u32);
+
+		if (!stats_emit_field_tags(out, &stats[field], ':'))
+			return 0;
+		if (!stats_emit_typed_data_field(out, &stats[field]))
+			return 0;
+		if (!chunk_strcat(out, "\n"))
+			return 0;
+	}
+	return 1;
+}
+
+/* Dump all fields from <stats> into <out> using the HTML format. A column is
+ * reserved for the checkbox is ST_SHOWADMIN is set in <flags>. Some extra info
+ * are provided if ST_SHLGNDS is present in <flags>.
+ */
+static int stats_dump_fields_html(struct chunk *out, const struct field *stats, unsigned int flags)
+{
+	struct chunk src;
+
+	if (stats[ST_F_TYPE].u.u32 == STATS_TYPE_FE) {
+		chunk_appendf(out,
 		              /* name, queue */
 		              "<tr class=\"frontend\">");
 
-		if (px->cap & PR_CAP_BE && px->srv && (appctx->ctx.stats.flags & STAT_ADMIN)) {
+		if (flags & ST_SHOWADMIN) {
 			/* Column sub-heading for Enable or Disable server */
-			chunk_appendf(&trash, "<td></td>");
+			chunk_appendf(out, "<td></td>");
 		}
 
-		chunk_appendf(&trash,
+		chunk_appendf(out,
 		              "<td class=ac>"
 		              "<a name=\"%s/Frontend\"></a>"
 		              "<a class=lfsb href=\"#%s/Frontend\">Frontend</a></td>"
 		              "<td colspan=3></td>"
 		              "",
-		              px->id, px->id);
+		              field_str(stats, ST_F_PXNAME), field_str(stats, ST_F_PXNAME));
 
-		chunk_appendf(&trash,
+		chunk_appendf(out,
 		              /* sessions rate : current */
 		              "<td><u>%s<div class=tips><table class=det>"
 		              "<tr><th>Current connection rate:</th><td>%s/s</td></tr>"
 		              "<tr><th>Current session rate:</th><td>%s/s</td></tr>"
 		              "",
-		              U2H(read_freq_ctr(&px->fe_sess_per_sec)),
-		              U2H(read_freq_ctr(&px->fe_conn_per_sec)),
-		              U2H(read_freq_ctr(&px->fe_sess_per_sec)));
+		              U2H(stats[ST_F_RATE].u.u32),
+		              U2H(stats[ST_F_CONN_RATE].u.u32),
+		              U2H(stats[ST_F_RATE].u.u32));
 
-		if (px->mode == PR_MODE_HTTP)
-			chunk_appendf(&trash,
+		if (strcmp(field_str(stats, ST_F_MODE), "http") == 0)
+			chunk_appendf(out,
 			              "<tr><th>Current request rate:</th><td>%s/s</td></tr>",
-			              U2H(read_freq_ctr(&px->fe_req_per_sec)));
+			              U2H(stats[ST_F_REQ_RATE].u.u32));
 
-		chunk_appendf(&trash,
+		chunk_appendf(out,
 		              "</table></div></u></td>"
 		              /* sessions rate : max */
 		              "<td><u>%s<div class=tips><table class=det>"
 		              "<tr><th>Max connection rate:</th><td>%s/s</td></tr>"
 		              "<tr><th>Max session rate:</th><td>%s/s</td></tr>"
 		              "",
-		              U2H(px->fe_counters.sps_max),
-		              U2H(px->fe_counters.cps_max),
-		              U2H(px->fe_counters.sps_max));
+		              U2H(stats[ST_F_RATE_MAX].u.u32),
+		              U2H(stats[ST_F_CONN_RATE_MAX].u.u32),
+		              U2H(stats[ST_F_RATE_MAX].u.u32));
 
-		if (px->mode == PR_MODE_HTTP)
-			chunk_appendf(&trash,
+		if (strcmp(field_str(stats, ST_F_MODE), "http") == 0)
+			chunk_appendf(out,
 			              "<tr><th>Max request rate:</th><td>%s/s</td></tr>",
-			              U2H(px->fe_counters.p.http.rps_max));
+			              U2H(stats[ST_F_REQ_RATE_MAX].u.u32));
 
-		chunk_appendf(&trash,
+		chunk_appendf(out,
 		              "</table></div></u></td>"
 		              /* sessions rate : limit */
 		              "<td>%s</td>",
-		              LIM2A(px->fe_sps_lim, "-"));
+		              LIM2A(stats[ST_F_RATE_LIM].u.u32, "-"));
 
-		chunk_appendf(&trash,
+		chunk_appendf(out,
 		              /* sessions: current, max, limit, total */
 		              "<td>%s</td><td>%s</td><td>%s</td>"
 		              "<td><u>%s<div class=tips><table class=det>"
 		              "<tr><th>Cum. connections:</th><td>%s</td></tr>"
 		              "<tr><th>Cum. sessions:</th><td>%s</td></tr>"
 		              "",
-		              U2H(px->feconn), U2H(px->fe_counters.conn_max), U2H(px->maxconn),
-		              U2H(px->fe_counters.cum_sess),
-		              U2H(px->fe_counters.cum_conn),
-		              U2H(px->fe_counters.cum_sess));
+		              U2H(stats[ST_F_SCUR].u.u32), U2H(stats[ST_F_SMAX].u.u32), U2H(stats[ST_F_SLIM].u.u32),
+		              U2H(stats[ST_F_STOT].u.u64),
+		              U2H(stats[ST_F_CONN_TOT].u.u64),
+		              U2H(stats[ST_F_STOT].u.u64));
 
 		/* http response (via hover): 1xx, 2xx, 3xx, 4xx, 5xx, other */
-		if (px->mode == PR_MODE_HTTP) {
-			chunk_appendf(&trash,
+		if (strcmp(field_str(stats, ST_F_MODE), "http") == 0) {
+			chunk_appendf(out,
 			              "<tr><th>Cum. HTTP requests:</th><td>%s</td></tr>"
 			              "<tr><th>- HTTP 1xx responses:</th><td>%s</td></tr>"
 			              "<tr><th>- HTTP 2xx responses:</th><td>%s</td></tr>"
@@ -2803,29 +3371,29 @@ static int stats_dump_fe_stats(struct stream_interface *si, struct proxy *px)
 			              "<tr><th>- other responses:</th><td>%s</td></tr>"
 			              "<tr><th>Intercepted requests:</th><td>%s</td></tr>"
 			              "",
-			              U2H(px->fe_counters.p.http.cum_req),
-			              U2H(px->fe_counters.p.http.rsp[1]),
-			              U2H(px->fe_counters.p.http.rsp[2]),
-			              U2H(px->fe_counters.p.http.comp_rsp),
-			              px->fe_counters.p.http.rsp[2] ?
-			              (int)(100*px->fe_counters.p.http.comp_rsp/px->fe_counters.p.http.rsp[2]) : 0,
-			              U2H(px->fe_counters.p.http.rsp[3]),
-			              U2H(px->fe_counters.p.http.rsp[4]),
-			              U2H(px->fe_counters.p.http.rsp[5]),
-			              U2H(px->fe_counters.p.http.rsp[0]),
-			              U2H(px->fe_counters.intercepted_req));
+			              U2H(stats[ST_F_REQ_TOT].u.u64),
+			              U2H(stats[ST_F_HRSP_1XX].u.u64),
+			              U2H(stats[ST_F_HRSP_2XX].u.u64),
+			              U2H(stats[ST_F_COMP_RSP].u.u64),
+			              stats[ST_F_HRSP_2XX].u.u64 ?
+			              (int)(100 * stats[ST_F_COMP_RSP].u.u64 / stats[ST_F_HRSP_2XX].u.u64) : 0,
+			              U2H(stats[ST_F_HRSP_3XX].u.u64),
+			              U2H(stats[ST_F_HRSP_4XX].u.u64),
+			              U2H(stats[ST_F_HRSP_5XX].u.u64),
+			              U2H(stats[ST_F_HRSP_OTHER].u.u64),
+			              U2H(stats[ST_F_INTERCEPTED].u.u64));
 		}
 
-		chunk_appendf(&trash,
+		chunk_appendf(out,
 		              "</table></div></u></td>"
 		              /* sessions: lbtot, lastsess */
 		              "<td></td><td></td>"
 		              /* bytes : in */
 		              "<td>%s</td>"
 		              "",
-		              U2H(px->fe_counters.bytes_in));
+		              U2H(stats[ST_F_BIN].u.u64));
 
-		chunk_appendf(&trash,
+		chunk_appendf(out,
 			      /* bytes:out + compression stats (via hover): comp_in, comp_out, comp_byp */
 		              "<td>%s%s<div class=tips><table class=det>"
 			      "<tr><th>Response bytes in:</th><td>%s</td></tr>"
@@ -2834,18 +3402,18 @@ static int stats_dump_fe_stats(struct stream_interface *si, struct proxy *px)
 			      "<tr><th>Compression bypass:</th><td>%s</td></tr>"
 			      "<tr><th>Total bytes saved:</th><td>%s</td><td>(%d%%)</td></tr>"
 			      "</table></div>%s</td>",
-		              (px->fe_counters.comp_in || px->fe_counters.comp_byp) ? "<u>":"",
-		              U2H(px->fe_counters.bytes_out),
-		              U2H(px->fe_counters.bytes_out),
-		              U2H(px->fe_counters.comp_in),
-			      U2H(px->fe_counters.comp_out),
-			      px->fe_counters.comp_in ? (int)(px->fe_counters.comp_out * 100 / px->fe_counters.comp_in) : 0,
-			      U2H(px->fe_counters.comp_byp),
-			      U2H(px->fe_counters.comp_in - px->fe_counters.comp_out),
-			      px->fe_counters.bytes_out ? (int)((px->fe_counters.comp_in - px->fe_counters.comp_out) * 100 / px->fe_counters.bytes_out) : 0,
-		              (px->fe_counters.comp_in || px->fe_counters.comp_byp) ? "</u>":"");
+		              (stats[ST_F_COMP_IN].u.u64 || stats[ST_F_COMP_BYP].u.u64) ? "<u>":"",
+		              U2H(stats[ST_F_BOUT].u.u64),
+		              U2H(stats[ST_F_BOUT].u.u64),
+		              U2H(stats[ST_F_COMP_IN].u.u64),
+			      U2H(stats[ST_F_COMP_OUT].u.u64),
+			      stats[ST_F_COMP_IN].u.u64 ? (int)(stats[ST_F_COMP_OUT].u.u64 * 100 / stats[ST_F_COMP_IN].u.u64) : 0,
+			      U2H(stats[ST_F_COMP_BYP].u.u64),
+			      U2H(stats[ST_F_COMP_IN].u.u64 - stats[ST_F_COMP_OUT].u.u64),
+			      stats[ST_F_BOUT].u.u64 ? (int)((stats[ST_F_COMP_IN].u.u64 - stats[ST_F_COMP_OUT].u.u64) * 100 / stats[ST_F_BOUT].u.u64) : 0,
+		              (stats[ST_F_COMP_IN].u.u64 || stats[ST_F_COMP_BYP].u.u64) ? "</u>":"");
 
-		chunk_appendf(&trash,
+		chunk_appendf(out,
 		              /* denied: req, resp */
 		              "<td>%s</td><td>%s</td>"
 		              /* errors : request, connect, response */
@@ -2857,80 +3425,661 @@ static int stats_dump_fe_stats(struct stream_interface *si, struct proxy *px)
 		              /* rest of server: nothing */
 		              "<td class=ac colspan=8></td></tr>"
 		              "",
-		              U2H(px->fe_counters.denied_req), U2H(px->fe_counters.denied_resp),
-		              U2H(px->fe_counters.failed_req),
-		              px->state == PR_STREADY ? "OPEN" :
-		              px->state == PR_STFULL ? "FULL" : "STOP");
+		              U2H(stats[ST_F_DREQ].u.u64), U2H(stats[ST_F_DRESP].u.u64),
+		              U2H(stats[ST_F_EREQ].u.u64),
+		              field_str(stats, ST_F_STATUS));
 	}
-	else { /* CSV mode */
-		chunk_appendf(&trash,
-		              /* pxid, name, queue cur, queue max, */
-		              "%s,FRONTEND,,,"
-		              /* sessions : current, max, limit, total */
-		              "%d,%d,%d,%lld,"
-		              /* bytes : in, out */
-		              "%lld,%lld,"
-		              /* denied: req, resp */
-		              "%lld,%lld,"
-		              /* errors : request, connect, response */
-		              "%lld,,,"
-		              /* warnings: retries, redispatches */
-		              ",,"
-		              /* server status : reflect frontend status */
-		              "%s,"
-		              /* rest of server: nothing */
-		              ",,,,,,,,"
-		              /* pid, iid, sid, throttle, lbtot, tracked, type */
-		              "%d,%d,0,,,,%d,"
-		              /* rate, rate_lim, rate_max */
-		              "%u,%u,%u,"
-		              /* check_status, check_code, check_duration */
-		              ",,,",
-		              px->id,
-		              px->feconn, px->fe_counters.conn_max, px->maxconn, px->fe_counters.cum_sess,
-		              px->fe_counters.bytes_in, px->fe_counters.bytes_out,
-		              px->fe_counters.denied_req, px->fe_counters.denied_resp,
-		              px->fe_counters.failed_req,
-		              px->state == PR_STREADY ? "OPEN" :
-		              px->state == PR_STFULL ? "FULL" : "STOP",
-		              relative_pid, px->uuid, STATS_TYPE_FE,
-		              read_freq_ctr(&px->fe_sess_per_sec),
-		              px->fe_sps_lim, px->fe_counters.sps_max);
+	else if (stats[ST_F_TYPE].u.u32 == STATS_TYPE_SO) {
+		chunk_appendf(out, "<tr class=socket>");
+		if (flags & ST_SHOWADMIN) {
+			/* Column sub-heading for Enable or Disable server */
+			chunk_appendf(out, "<td></td>");
+		}
 
-		/* http response: 1xx, 2xx, 3xx, 4xx, 5xx, other */
-		if (px->mode == PR_MODE_HTTP) {
-			for (i=1; i<6; i++)
-				chunk_appendf(&trash, "%lld,", px->fe_counters.p.http.rsp[i]);
-			chunk_appendf(&trash, "%lld,", px->fe_counters.p.http.rsp[0]);
+		chunk_appendf(out,
+		              /* frontend name, listener name */
+		              "<td class=ac><a name=\"%s/+%s\"></a>%s"
+		              "<a class=lfsb href=\"#%s/+%s\">%s</a>"
+		              "",
+		              field_str(stats, ST_F_PXNAME), field_str(stats, ST_F_SVNAME),
+		              (flags & ST_SHLGNDS)?"<u>":"",
+		              field_str(stats, ST_F_PXNAME), field_str(stats, ST_F_SVNAME), field_str(stats, ST_F_SVNAME));
+
+		if (flags & ST_SHLGNDS) {
+			chunk_appendf(out, "<div class=tips>");
+
+			if (isdigit(*field_str(stats, ST_F_ADDR)))
+				chunk_appendf(out, "IPv4: %s, ", field_str(stats, ST_F_ADDR));
+			else if (*field_str(stats, ST_F_ADDR) == '[')
+				chunk_appendf(out, "IPv6: %s, ", field_str(stats, ST_F_ADDR));
+			else if (*field_str(stats, ST_F_ADDR))
+				chunk_appendf(out, "%s, ", field_str(stats, ST_F_ADDR));
+
+			/* id */
+			chunk_appendf(out, "id: %d</div>", stats[ST_F_SID].u.u32);
+		}
+
+		chunk_appendf(out,
+			      /* queue */
+		              "%s</td><td colspan=3></td>"
+		              /* sessions rate: current, max, limit */
+		              "<td colspan=3>&nbsp;</td>"
+		              /* sessions: current, max, limit, total, lbtot, lastsess */
+		              "<td>%s</td><td>%s</td><td>%s</td>"
+		              "<td>%s</td><td>&nbsp;</td><td>&nbsp;</td>"
+		              /* bytes: in, out */
+		              "<td>%s</td><td>%s</td>"
+		              "",
+		              (flags & ST_SHLGNDS)?"</u>":"",
+		              U2H(stats[ST_F_SCUR].u.u32), U2H(stats[ST_F_SMAX].u.u32), U2H(stats[ST_F_SLIM].u.u32),
+		              U2H(stats[ST_F_STOT].u.u64), U2H(stats[ST_F_BIN].u.u64), U2H(stats[ST_F_BOUT].u.u64));
+
+		chunk_appendf(out,
+		              /* denied: req, resp */
+		              "<td>%s</td><td>%s</td>"
+		              /* errors: request, connect, response */
+		              "<td>%s</td><td></td><td></td>"
+		              /* warnings: retries, redispatches */
+		              "<td></td><td></td>"
+		              /* server status: reflect listener status */
+		              "<td class=ac>%s</td>"
+		              /* rest of server: nothing */
+		              "<td class=ac colspan=8></td></tr>"
+		              "",
+		              U2H(stats[ST_F_DREQ].u.u64), U2H(stats[ST_F_DRESP].u.u64),
+		              U2H(stats[ST_F_EREQ].u.u64),
+		              field_str(stats, ST_F_STATUS));
+	}
+	else if (stats[ST_F_TYPE].u.u32 == STATS_TYPE_SV) {
+		const char *style;
+
+		/* determine the style to use depending on the server's state,
+		 * its health and weight. There isn't a 1-to-1 mapping between
+		 * state and styles for the cases where the server is (still)
+		 * up. The reason is that we don't want to report nolb and
+		 * drain with the same color.
+		 */
+
+		if (strcmp(field_str(stats, ST_F_STATUS), "DOWN") == 0 ||
+		    strcmp(field_str(stats, ST_F_STATUS), "DOWN (agent)") == 0) {
+			style = "down";
+		}
+		else if (strcmp(field_str(stats, ST_F_STATUS), "DOWN ") == 0) {
+			style = "going_up";
+		}
+		else if (strcmp(field_str(stats, ST_F_STATUS), "NOLB ") == 0) {
+			style = "going_down";
+		}
+		else if (strcmp(field_str(stats, ST_F_STATUS), "NOLB") == 0) {
+			style = "nolb";
+		}
+		else if (strcmp(field_str(stats, ST_F_STATUS), "no check") == 0) {
+			style = "no_check";
+		}
+		else if (!stats[ST_F_CHKFAIL].type ||
+			 stats[ST_F_CHECK_HEALTH].u.u32 == stats[ST_F_CHECK_RISE].u.u32 + stats[ST_F_CHECK_FALL].u.u32 - 1) {
+			/* no check or max health = UP */
+			if (stats[ST_F_WEIGHT].u.u32)
+				style = "up";
+			else
+				style = "draining";
+		}
+		else {
+			style = "going_down";
+		}
+
+		if (memcmp(field_str(stats, ST_F_STATUS), "MAINT", 5) == 0)
+			chunk_appendf(out, "<tr class=\"maintain\">");
+		else
+			chunk_appendf(out,
+			              "<tr class=\"%s_%s\">",
+			              (stats[ST_F_BCK].u.u32) ? "backup" : "active", style);
+
+
+		if (flags & ST_SHOWADMIN)
+			chunk_appendf(out,
+			              "<td><input type=\"checkbox\" name=\"s\" value=\"%s\"></td>",
+			              field_str(stats, ST_F_SVNAME));
+
+		chunk_appendf(out,
+		              "<td class=ac><a name=\"%s/%s\"></a>%s"
+		              "<a class=lfsb href=\"#%s/%s\">%s</a>"
+		              "",
+		              field_str(stats, ST_F_PXNAME), field_str(stats, ST_F_SVNAME),
+		              (flags & ST_SHLGNDS) ? "<u>" : "",
+		              field_str(stats, ST_F_PXNAME), field_str(stats, ST_F_SVNAME), field_str(stats, ST_F_SVNAME));
+
+		if (flags & ST_SHLGNDS) {
+			chunk_appendf(out, "<div class=tips>");
+
+			if (isdigit(*field_str(stats, ST_F_ADDR)))
+				chunk_appendf(out, "IPv4: %s, ", field_str(stats, ST_F_ADDR));
+			else if (*field_str(stats, ST_F_ADDR) == '[')
+				chunk_appendf(out, "IPv6: %s, ", field_str(stats, ST_F_ADDR));
+			else if (*field_str(stats, ST_F_ADDR))
+				chunk_appendf(out, "%s, ", field_str(stats, ST_F_ADDR));
+
+			/* id */
+			chunk_appendf(out, "id: %d", stats[ST_F_SID].u.u32);
+
+			/* cookie */
+			if (stats[ST_F_COOKIE].type) {
+				chunk_appendf(out, ", cookie: '");
+				chunk_initstr(&src, field_str(stats, ST_F_COOKIE));
+				chunk_htmlencode(out, &src);
+				chunk_appendf(out, "'");
+			}
+
+			chunk_appendf(out, "</div>");
+		}
+
+		chunk_appendf(out,
+		              /* queue : current, max, limit */
+		              "%s</td><td>%s</td><td>%s</td><td>%s</td>"
+		              /* sessions rate : current, max, limit */
+		              "<td>%s</td><td>%s</td><td></td>"
+		              "",
+		              (flags & ST_SHLGNDS) ? "</u>" : "",
+		              U2H(stats[ST_F_QCUR].u.u32), U2H(stats[ST_F_QMAX].u.u32), LIM2A(stats[ST_F_QLIMIT].u.u32, "-"),
+		              U2H(stats[ST_F_RATE].u.u32), U2H(stats[ST_F_RATE_MAX].u.u32));
+
+		chunk_appendf(out,
+		              /* sessions: current, max, limit, total */
+		              "<td>%s</td><td>%s</td><td>%s</td>"
+		              "<td><u>%s<div class=tips><table class=det>"
+		              "<tr><th>Cum. sessions:</th><td>%s</td></tr>"
+		              "",
+		              U2H(stats[ST_F_SCUR].u.u32), U2H(stats[ST_F_SMAX].u.u32), LIM2A(stats[ST_F_SLIM].u.u32, "-"),
+		              U2H(stats[ST_F_STOT].u.u64),
+		              U2H(stats[ST_F_STOT].u.u64));
+
+		/* http response (via hover): 1xx, 2xx, 3xx, 4xx, 5xx, other */
+		if (strcmp(field_str(stats, ST_F_MODE), "http") == 0) {
+			unsigned long long tot;
+
+			tot  = stats[ST_F_HRSP_OTHER].u.u64;
+			tot += stats[ST_F_HRSP_1XX].u.u64;
+			tot += stats[ST_F_HRSP_2XX].u.u64;
+			tot += stats[ST_F_HRSP_3XX].u.u64;
+			tot += stats[ST_F_HRSP_4XX].u.u64;
+			tot += stats[ST_F_HRSP_5XX].u.u64;
+
+			chunk_appendf(out,
+			              "<tr><th>Cum. HTTP responses:</th><td>%s</td></tr>"
+			              "<tr><th>- HTTP 1xx responses:</th><td>%s</td><td>(%d%%)</td></tr>"
+			              "<tr><th>- HTTP 2xx responses:</th><td>%s</td><td>(%d%%)</td></tr>"
+			              "<tr><th>- HTTP 3xx responses:</th><td>%s</td><td>(%d%%)</td></tr>"
+			              "<tr><th>- HTTP 4xx responses:</th><td>%s</td><td>(%d%%)</td></tr>"
+			              "<tr><th>- HTTP 5xx responses:</th><td>%s</td><td>(%d%%)</td></tr>"
+			              "<tr><th>- other responses:</th><td>%s</td><td>(%d%%)</td></tr>"
+			              "",
+			              U2H(tot),
+			              U2H(stats[ST_F_HRSP_1XX].u.u64), tot ? (int)(100 * stats[ST_F_HRSP_1XX].u.u64 / tot) : 0,
+			              U2H(stats[ST_F_HRSP_2XX].u.u64), tot ? (int)(100 * stats[ST_F_HRSP_2XX].u.u64 / tot) : 0,
+			              U2H(stats[ST_F_HRSP_3XX].u.u64), tot ? (int)(100 * stats[ST_F_HRSP_3XX].u.u64 / tot) : 0,
+			              U2H(stats[ST_F_HRSP_4XX].u.u64), tot ? (int)(100 * stats[ST_F_HRSP_4XX].u.u64 / tot) : 0,
+			              U2H(stats[ST_F_HRSP_5XX].u.u64), tot ? (int)(100 * stats[ST_F_HRSP_5XX].u.u64 / tot) : 0,
+			              U2H(stats[ST_F_HRSP_OTHER].u.u64), tot ? (int)(100 * stats[ST_F_HRSP_OTHER].u.u64 / tot) : 0);
+		}
+
+		chunk_appendf(out, "<tr><th colspan=3>Avg over last 1024 success. conn.</th></tr>");
+		chunk_appendf(out, "<tr><th>- Queue time:</th><td>%s</td><td>ms</td></tr>",   U2H(stats[ST_F_QTIME].u.u32));
+		chunk_appendf(out, "<tr><th>- Connect time:</th><td>%s</td><td>ms</td></tr>", U2H(stats[ST_F_CTIME].u.u32));
+		if (strcmp(field_str(stats, ST_F_MODE), "http") == 0)
+			chunk_appendf(out, "<tr><th>- Response time:</th><td>%s</td><td>ms</td></tr>", U2H(stats[ST_F_RTIME].u.u32));
+		chunk_appendf(out, "<tr><th>- Total time:</th><td>%s</td><td>ms</td></tr>",   U2H(stats[ST_F_TTIME].u.u32));
+
+		chunk_appendf(out,
+		              "</table></div></u></td>"
+		              /* sessions: lbtot, last */
+		              "<td>%s</td><td>%s</td>",
+		              U2H(stats[ST_F_LBTOT].u.u64),
+		              human_time(stats[ST_F_LASTSESS].u.s32, 1));
+
+		chunk_appendf(out,
+		              /* bytes : in, out */
+		              "<td>%s</td><td>%s</td>"
+		              /* denied: req, resp */
+		              "<td></td><td>%s</td>"
+		              /* errors : request, connect */
+		              "<td></td><td>%s</td>"
+		              /* errors : response */
+		              "<td><u>%s<div class=tips>Connection resets during transfers: %lld client, %lld server</div></u></td>"
+		              /* warnings: retries, redispatches */
+		              "<td>%lld</td><td>%lld</td>"
+		              "",
+		              U2H(stats[ST_F_BIN].u.u64), U2H(stats[ST_F_BOUT].u.u64),
+		              U2H(stats[ST_F_DRESP].u.u64),
+		              U2H(stats[ST_F_ECON].u.u64),
+		              U2H(stats[ST_F_ERESP].u.u64),
+		              (long long)stats[ST_F_CLI_ABRT].u.u64,
+		              (long long)stats[ST_F_SRV_ABRT].u.u64,
+		              (long long)stats[ST_F_WRETR].u.u64,
+			      (long long)stats[ST_F_WREDIS].u.u64);
+
+		/* status, last change */
+		chunk_appendf(out, "<td class=ac>");
+
+		/* FIXME!!!!
+		 *   LASTCHG should contain the last change for *this* server and must be computed
+		 * properly above, as was done below, ie: this server if maint, otherwise ref server
+		 * if tracking. Note that ref is either local or remote depending on tracking.
+		 */
+
+
+		if (memcmp(field_str(stats, ST_F_STATUS), "MAINT", 5) == 0) {
+			chunk_appendf(out, "%s MAINT", human_time(stats[ST_F_LASTCHG].u.u32, 1));
+		}
+		else if (memcmp(field_str(stats, ST_F_STATUS), "no check", 5) == 0) {
+			chunk_strcat(out, "<i>no check</i>");
+		}
+		else {
+			chunk_appendf(out, "%s %s", human_time(stats[ST_F_LASTCHG].u.u32, 1), field_str(stats, ST_F_STATUS));
+			if (memcmp(field_str(stats, ST_F_STATUS), "DOWN", 4) == 0) {
+				if (stats[ST_F_CHECK_HEALTH].u.u32)
+					chunk_strcat(out, " &uarr;");
+			}
+			else if (stats[ST_F_CHECK_HEALTH].u.u32 < stats[ST_F_CHECK_RISE].u.u32 + stats[ST_F_CHECK_FALL].u.u32 - 1)
+				chunk_strcat(out, " &darr;");
+		}
+
+		if (memcmp(field_str(stats, ST_F_STATUS), "DOWN", 4) == 0 &&
+		    stats[ST_F_AGENT_STATUS].type && !stats[ST_F_AGENT_HEALTH].u.u32) {
+			chunk_appendf(out,
+			              "</td><td class=ac><u> %s",
+			              field_str(stats, ST_F_AGENT_STATUS));
+
+			if (stats[ST_F_AGENT_CODE].type)
+				chunk_appendf(out, "/%d", stats[ST_F_AGENT_CODE].u.u32);
+
+			if (stats[ST_F_AGENT_DURATION].type && stats[ST_F_AGENT_DURATION].u.u64 >= 0)
+				chunk_appendf(out, " in %lums", (long)stats[ST_F_AGENT_DURATION].u.u64);
+
+			chunk_appendf(out, "<div class=tips>%s", field_str(stats, ST_F_AGENT_DESC));
+
+			if (*field_str(stats, ST_F_LAST_AGT)) {
+				chunk_appendf(out, ": ");
+				chunk_initstr(&src, field_str(stats, ST_F_LAST_AGT));
+				chunk_htmlencode(out, &src);
+			}
+			chunk_appendf(out, "</div></u>");
+		}
+		else if (stats[ST_F_CHECK_STATUS].type) {
+			chunk_appendf(out,
+			              "</td><td class=ac><u> %s",
+			              field_str(stats, ST_F_CHECK_STATUS));
+
+			if (stats[ST_F_CHECK_CODE].type)
+				chunk_appendf(out, "/%d", stats[ST_F_CHECK_CODE].u.u32);
+
+			if (stats[ST_F_CHECK_DURATION].type && stats[ST_F_CHECK_DURATION].u.u64 >= 0)
+				chunk_appendf(out, " in %lums", (long)stats[ST_F_CHECK_DURATION].u.u64);
+
+			chunk_appendf(out, "<div class=tips>%s", field_str(stats, ST_F_CHECK_DESC));
+
+			if (*field_str(stats, ST_F_LAST_CHK)) {
+				chunk_appendf(out, ": ");
+				chunk_initstr(&src, field_str(stats, ST_F_LAST_CHK));
+				chunk_htmlencode(out, &src);
+			}
+			chunk_appendf(out, "</div></u>");
 		}
 		else
-			chunk_appendf(&trash, ",,,,,,");
+			chunk_appendf(out, "</td><td>");
 
-		/* failed health analyses */
-		chunk_appendf(&trash, ",");
+		chunk_appendf(out,
+		              /* weight */
+		              "</td><td class=ac>%d</td>"
+		              /* act, bck */
+		              "<td class=ac>%s</td><td class=ac>%s</td>"
+		              "",
+		              stats[ST_F_WEIGHT].u.u32,
+		              stats[ST_F_BCK].u.u32 ? "-" : "Y",
+		              stats[ST_F_BCK].u.u32 ? "Y" : "-");
 
-		/* requests : req_rate, req_rate_max, req_tot, */
-		chunk_appendf(&trash, "%u,%u,%lld,",
-		              read_freq_ctr(&px->fe_req_per_sec),
-		              px->fe_counters.p.http.rps_max, px->fe_counters.p.http.cum_req);
+		/* check failures: unique, fatal, down time */
+		if (stats[ST_F_CHKFAIL].type) {
+			chunk_appendf(out, "<td><u>%lld", (long long)stats[ST_F_CHKFAIL].u.u64);
 
-		/* errors: cli_aborts, srv_aborts */
-		chunk_appendf(&trash, ",,");
+			if (stats[ST_F_HANAFAIL].type)
+				chunk_appendf(out, "/%lld", (long long)stats[ST_F_HANAFAIL].u.u64);
 
-		/* compression: in, out, bypassed */
-		chunk_appendf(&trash, "%lld,%lld,%lld,",
-		              px->fe_counters.comp_in, px->fe_counters.comp_out, px->fe_counters.comp_byp);
+			chunk_appendf(out,
+			              "<div class=tips>Failed Health Checks%s</div></u></td>"
+			              "<td>%lld</td><td>%s</td>"
+			              "",
+			              stats[ST_F_HANAFAIL].type ? "/Health Analyses" : "",
+			              (long long)stats[ST_F_CHKDOWN].u.u64, human_time(stats[ST_F_DOWNTIME].u.u32, 1));
+		}
+		else if (strcmp(field_str(stats, ST_F_STATUS), "MAINT") != 0 && field_format(stats, ST_F_TRACKED) == FF_STR) {
+			/* tracking a server (hence inherited maint would appear as "MAINT (via...)" */
+			chunk_appendf(out,
+			              "<td class=ac colspan=3><a class=lfsb href=\"#%s\">via %s</a></td>",
+			              field_str(stats, ST_F_TRACKED), field_str(stats, ST_F_TRACKED));
+		}
+		else
+			chunk_appendf(out, "<td colspan=3></td>");
 
-		/* compression: comp_rsp */
-		chunk_appendf(&trash, "%lld,",
-		              px->fe_counters.p.http.comp_rsp);
-
-		/* lastsess, last_chk, last_agt, qtime, ctime, rtime, ttime, */
-		chunk_appendf(&trash, ",,,,,,,");
-
-		/* finish with EOL */
-		chunk_appendf(&trash, "\n");
+		/* throttle */
+		if (stats[ST_F_THROTTLE].type)
+			chunk_appendf(out, "<td class=ac>%d %%</td></tr>\n", stats[ST_F_THROTTLE].u.u32);
+		else
+			chunk_appendf(out, "<td class=ac>-</td></tr>\n");
 	}
+	else if (stats[ST_F_TYPE].u.u32 == STATS_TYPE_BE) {
+		chunk_appendf(out, "<tr class=\"backend\">");
+		if (flags & ST_SHOWADMIN) {
+			/* Column sub-heading for Enable or Disable server */
+			chunk_appendf(out, "<td></td>");
+		}
+		chunk_appendf(out,
+		              "<td class=ac>"
+		              /* name */
+		              "%s<a name=\"%s/Backend\"></a>"
+		              "<a class=lfsb href=\"#%s/Backend\">Backend</a>"
+		              "",
+		              (flags & ST_SHLGNDS)?"<u>":"",
+		              field_str(stats, ST_F_PXNAME), field_str(stats, ST_F_PXNAME));
+
+		if (flags & ST_SHLGNDS) {
+			/* balancing */
+			chunk_appendf(out, "<div class=tips>balancing: %s",
+			              field_str(stats, ST_F_ALGO));
+
+			/* cookie */
+			if (stats[ST_F_COOKIE].type) {
+				chunk_appendf(out, ", cookie: '");
+				chunk_initstr(&src, field_str(stats, ST_F_COOKIE));
+				chunk_htmlencode(out, &src);
+				chunk_appendf(out, "'");
+			}
+			chunk_appendf(out, "</div>");
+		}
+
+		chunk_appendf(out,
+		              "%s</td>"
+		              /* queue : current, max */
+		              "<td>%s</td><td>%s</td><td></td>"
+		              /* sessions rate : current, max, limit */
+		              "<td>%s</td><td>%s</td><td></td>"
+		              "",
+		              (flags & ST_SHLGNDS)?"</u>":"",
+		              U2H(stats[ST_F_QCUR].u.u32), U2H(stats[ST_F_QMAX].u.u32),
+		              U2H(stats[ST_F_RATE].u.u32), U2H(stats[ST_F_RATE_MAX].u.u32));
+
+		chunk_appendf(out,
+		              /* sessions: current, max, limit, total */
+		              "<td>%s</td><td>%s</td><td>%s</td>"
+		              "<td><u>%s<div class=tips><table class=det>"
+		              "<tr><th>Cum. sessions:</th><td>%s</td></tr>"
+		              "",
+		              U2H(stats[ST_F_SCUR].u.u32), U2H(stats[ST_F_SCUR].u.u32), U2H(stats[ST_F_SLIM].u.u32),
+		              U2H(stats[ST_F_STOT].u.u64),
+		              U2H(stats[ST_F_STOT].u.u64));
+
+		/* http response (via hover): 1xx, 2xx, 3xx, 4xx, 5xx, other */
+		if (strcmp(field_str(stats, ST_F_MODE), "http") == 0) {
+			chunk_appendf(out,
+			              "<tr><th>Cum. HTTP requests:</th><td>%s</td></tr>"
+			              "<tr><th>- HTTP 1xx responses:</th><td>%s</td></tr>"
+			              "<tr><th>- HTTP 2xx responses:</th><td>%s</td></tr>"
+			              "<tr><th>&nbsp;&nbsp;Compressed 2xx:</th><td>%s</td><td>(%d%%)</td></tr>"
+			              "<tr><th>- HTTP 3xx responses:</th><td>%s</td></tr>"
+			              "<tr><th>- HTTP 4xx responses:</th><td>%s</td></tr>"
+			              "<tr><th>- HTTP 5xx responses:</th><td>%s</td></tr>"
+			              "<tr><th>- other responses:</th><td>%s</td></tr>"
+			              "<tr><th>Intercepted requests:</th><td>%s</td></tr>"
+				      "<tr><th colspan=3>Avg over last 1024 success. conn.</th></tr>"
+			              "",
+			              U2H(stats[ST_F_REQ_TOT].u.u64),
+			              U2H(stats[ST_F_HRSP_1XX].u.u64),
+			              U2H(stats[ST_F_HRSP_2XX].u.u64),
+			              U2H(stats[ST_F_COMP_RSP].u.u64),
+			              stats[ST_F_HRSP_2XX].u.u64 ?
+			              (int)(100 * stats[ST_F_COMP_RSP].u.u64 / stats[ST_F_HRSP_2XX].u.u64) : 0,
+			              U2H(stats[ST_F_HRSP_3XX].u.u64),
+			              U2H(stats[ST_F_HRSP_4XX].u.u64),
+			              U2H(stats[ST_F_HRSP_5XX].u.u64),
+			              U2H(stats[ST_F_HRSP_OTHER].u.u64),
+			              U2H(stats[ST_F_INTERCEPTED].u.u64));
+		}
+
+		chunk_appendf(out, "<tr><th>- Queue time:</th><td>%s</td><td>ms</td></tr>",   U2H(stats[ST_F_QTIME].u.u32));
+		chunk_appendf(out, "<tr><th>- Connect time:</th><td>%s</td><td>ms</td></tr>", U2H(stats[ST_F_QTIME].u.u32));
+		if (strcmp(field_str(stats, ST_F_MODE), "http") == 0)
+			chunk_appendf(out, "<tr><th>- Response time:</th><td>%s</td><td>ms</td></tr>", U2H(stats[ST_F_RTIME].u.u32));
+		chunk_appendf(out, "<tr><th>- Total time:</th><td>%s</td><td>ms</td></tr>",   U2H(stats[ST_F_TTIME].u.u32));
+
+		chunk_appendf(out,
+		              "</table></div></u></td>"
+		              /* sessions: lbtot, last */
+		              "<td>%s</td><td>%s</td>"
+		              /* bytes: in */
+		              "<td>%s</td>"
+		              "",
+		              U2H(stats[ST_F_LBTOT].u.u64),
+		              human_time(stats[ST_F_LASTSESS].u.s32, 1),
+		              U2H(stats[ST_F_BIN].u.u64));
+
+		chunk_appendf(out,
+			      /* bytes:out + compression stats (via hover): comp_in, comp_out, comp_byp */
+		              "<td>%s%s<div class=tips><table class=det>"
+			      "<tr><th>Response bytes in:</th><td>%s</td></tr>"
+			      "<tr><th>Compression in:</th><td>%s</td></tr>"
+			      "<tr><th>Compression out:</th><td>%s</td><td>(%d%%)</td></tr>"
+			      "<tr><th>Compression bypass:</th><td>%s</td></tr>"
+			      "<tr><th>Total bytes saved:</th><td>%s</td><td>(%d%%)</td></tr>"
+			      "</table></div>%s</td>",
+		              (stats[ST_F_COMP_IN].u.u64 || stats[ST_F_COMP_BYP].u.u64) ? "<u>":"",
+		              U2H(stats[ST_F_BOUT].u.u64),
+		              U2H(stats[ST_F_BOUT].u.u64),
+		              U2H(stats[ST_F_COMP_IN].u.u64),
+			      U2H(stats[ST_F_COMP_OUT].u.u64),
+			      stats[ST_F_COMP_IN].u.u64 ? (int)(stats[ST_F_COMP_OUT].u.u64 * 100 / stats[ST_F_COMP_IN].u.u64) : 0,
+			      U2H(stats[ST_F_COMP_BYP].u.u64),
+			      U2H(stats[ST_F_COMP_IN].u.u64 - stats[ST_F_COMP_OUT].u.u64),
+			      stats[ST_F_BOUT].u.u64 ? (int)((stats[ST_F_COMP_IN].u.u64 - stats[ST_F_COMP_OUT].u.u64) * 100 / stats[ST_F_BOUT].u.u64) : 0,
+		              (stats[ST_F_COMP_IN].u.u64 || stats[ST_F_COMP_BYP].u.u64) ? "</u>":"");
+
+		chunk_appendf(out,
+		              /* denied: req, resp */
+		              "<td>%s</td><td>%s</td>"
+		              /* errors : request, connect */
+		              "<td></td><td>%s</td>"
+		              /* errors : response */
+		              "<td><u>%s<div class=tips>Connection resets during transfers: %lld client, %lld server</div></u></td>"
+		              /* warnings: retries, redispatches */
+		              "<td>%lld</td><td>%lld</td>"
+		              /* backend status: reflect backend status (up/down): we display UP
+		               * if the backend has known working servers or if it has no server at
+		               * all (eg: for stats). Then we display the total weight, number of
+		               * active and backups. */
+		              "<td class=ac>%s %s</td><td class=ac>&nbsp;</td><td class=ac>%d</td>"
+		              "<td class=ac>%d</td><td class=ac>%d</td>"
+		              "",
+		              U2H(stats[ST_F_DREQ].u.u64), U2H(stats[ST_F_DRESP].u.u64),
+		              U2H(stats[ST_F_ECON].u.u64),
+		              U2H(stats[ST_F_ERESP].u.u64),
+		              (long long)stats[ST_F_CLI_ABRT].u.u64,
+		              (long long)stats[ST_F_SRV_ABRT].u.u64,
+		              (long long)stats[ST_F_WRETR].u.u64, (long long)stats[ST_F_WREDIS].u.u64,
+		              human_time(stats[ST_F_LASTCHG].u.u32, 1),
+		              strcmp(field_str(stats, ST_F_STATUS), "DOWN") ? field_str(stats, ST_F_STATUS) : "<font color=\"red\"><b>DOWN</b></font>",
+		              stats[ST_F_WEIGHT].u.u32,
+		              stats[ST_F_ACT].u.u32, stats[ST_F_BCK].u.u32);
+
+		chunk_appendf(out,
+		              /* rest of backend: nothing, down transitions, total downtime, throttle */
+		              "<td class=ac>&nbsp;</td><td>%d</td>"
+		              "<td>%s</td>"
+		              "<td></td>"
+		              "</tr>",
+		              stats[ST_F_CHKDOWN].u.u32,
+		              stats[ST_F_DOWNTIME].type ? human_time(stats[ST_F_DOWNTIME].u.u32, 1) : "&nbsp;");
+	}
+	return 1;
+}
+
+static int stats_dump_one_line(const struct field *stats, unsigned int flags, struct proxy *px, struct appctx *appctx)
+{
+	if ((px->cap & PR_CAP_BE) && px->srv && (appctx->ctx.stats.flags & STAT_ADMIN))
+		flags |= ST_SHOWADMIN;
+
+	if (appctx->ctx.stats.flags & STAT_FMT_HTML)
+		return stats_dump_fields_html(&trash, stats, flags);
+	else if (appctx->ctx.stats.flags & STAT_FMT_TYPED)
+		return stats_dump_fields_typed(&trash, stats);
+	else
+		return stats_dump_fields_csv(&trash, stats);
+}
+
+/* Fill <stats> with the frontend statistics. <stats> is
+ * preallocated array of length <len>. The length of the array
+ * must be at least ST_F_TOTAL_FIELDS. If this length is less then
+ * this value, the function returns 0, otherwise, it returns 1.
+ */
+int stats_fill_fe_stats(struct proxy *px, struct field *stats, int len)
+{
+	if (len < ST_F_TOTAL_FIELDS)
+		return 0;
+
+	memset(stats, 0, sizeof(*stats) * len);
+
+	stats[ST_F_PXNAME]   = mkf_str(FO_KEY|FN_NAME|FS_SERVICE, px->id);
+	stats[ST_F_SVNAME]   = mkf_str(FO_KEY|FN_NAME|FS_SERVICE, "FRONTEND");
+	stats[ST_F_MODE]     = mkf_str(FO_CONFIG|FS_SERVICE, proxy_mode_str(px->mode));
+	stats[ST_F_SCUR]     = mkf_u32(0, px->feconn);
+	stats[ST_F_SMAX]     = mkf_u32(FN_MAX, px->fe_counters.conn_max);
+	stats[ST_F_SLIM]     = mkf_u32(FO_CONFIG|FN_LIMIT, px->maxconn);
+	stats[ST_F_STOT]     = mkf_u64(FN_COUNTER, px->fe_counters.cum_sess);
+	stats[ST_F_BIN]      = mkf_u64(FN_COUNTER, px->fe_counters.bytes_in);
+	stats[ST_F_BOUT]     = mkf_u64(FN_COUNTER, px->fe_counters.bytes_out);
+	stats[ST_F_DREQ]     = mkf_u64(FN_COUNTER, px->fe_counters.denied_req);
+	stats[ST_F_DRESP]    = mkf_u64(FN_COUNTER, px->fe_counters.denied_resp);
+	stats[ST_F_EREQ]     = mkf_u64(FN_COUNTER, px->fe_counters.failed_req);
+	stats[ST_F_STATUS]   = mkf_str(FO_STATUS, px->state == PR_STREADY ? "OPEN" : px->state == PR_STFULL ? "FULL" : "STOP");
+	stats[ST_F_PID]      = mkf_u32(FO_KEY, relative_pid);
+	stats[ST_F_IID]      = mkf_u32(FO_KEY|FS_SERVICE, px->uuid);
+	stats[ST_F_SID]      = mkf_u32(FO_KEY|FS_SERVICE, 0);
+	stats[ST_F_TYPE]     = mkf_u32(FO_CONFIG|FS_SERVICE, STATS_TYPE_FE);
+	stats[ST_F_RATE]     = mkf_u32(FN_RATE, read_freq_ctr(&px->fe_sess_per_sec));
+	stats[ST_F_RATE_LIM] = mkf_u32(FO_CONFIG|FN_LIMIT, px->fe_sps_lim);
+	stats[ST_F_RATE_MAX] = mkf_u32(FN_MAX, px->fe_counters.sps_max);
+
+	/* http response: 1xx, 2xx, 3xx, 4xx, 5xx, other */
+	if (px->mode == PR_MODE_HTTP) {
+		stats[ST_F_HRSP_1XX]    = mkf_u64(FN_COUNTER, px->fe_counters.p.http.rsp[1]);
+		stats[ST_F_HRSP_2XX]    = mkf_u64(FN_COUNTER, px->fe_counters.p.http.rsp[2]);
+		stats[ST_F_HRSP_3XX]    = mkf_u64(FN_COUNTER, px->fe_counters.p.http.rsp[3]);
+		stats[ST_F_HRSP_4XX]    = mkf_u64(FN_COUNTER, px->fe_counters.p.http.rsp[4]);
+		stats[ST_F_HRSP_5XX]    = mkf_u64(FN_COUNTER, px->fe_counters.p.http.rsp[5]);
+		stats[ST_F_HRSP_OTHER]  = mkf_u64(FN_COUNTER, px->fe_counters.p.http.rsp[0]);
+		stats[ST_F_INTERCEPTED] = mkf_u64(FN_COUNTER, px->fe_counters.intercepted_req);
+	}
+
+	/* requests : req_rate, req_rate_max, req_tot, */
+	stats[ST_F_REQ_RATE]     = mkf_u32(FN_RATE, read_freq_ctr(&px->fe_req_per_sec));
+	stats[ST_F_REQ_RATE_MAX] = mkf_u32(FN_MAX, px->fe_counters.p.http.rps_max);
+	stats[ST_F_REQ_TOT]      = mkf_u64(FN_COUNTER, px->fe_counters.p.http.cum_req);
+
+	/* compression: in, out, bypassed, responses */
+	stats[ST_F_COMP_IN]      = mkf_u64(FN_COUNTER, px->fe_counters.comp_in);
+	stats[ST_F_COMP_OUT]     = mkf_u64(FN_COUNTER, px->fe_counters.comp_out);
+	stats[ST_F_COMP_BYP]     = mkf_u64(FN_COUNTER, px->fe_counters.comp_byp);
+	stats[ST_F_COMP_RSP]     = mkf_u64(FN_COUNTER, px->fe_counters.p.http.comp_rsp);
+
+	/* connections : conn_rate, conn_rate_max, conn_tot, conn_max */
+	stats[ST_F_CONN_RATE]     = mkf_u32(FN_RATE, read_freq_ctr(&px->fe_conn_per_sec));
+	stats[ST_F_CONN_RATE_MAX] = mkf_u32(FN_MAX, px->fe_counters.cps_max);
+	stats[ST_F_CONN_TOT]      = mkf_u64(FN_COUNTER, px->fe_counters.cum_conn);
+
+	return 1;
+}
+
+/* Dumps a frontend's line to the trash for the current proxy <px> and uses
+ * the state from stream interface <si>. The caller is responsible for clearing
+ * the trash if needed. Returns non-zero if it emits anything, zero otherwise.
+ */
+static int stats_dump_fe_stats(struct stream_interface *si, struct proxy *px)
+{
+	struct appctx *appctx = __objt_appctx(si->end);
+
+	if (!(px->cap & PR_CAP_FE))
+		return 0;
+
+	if ((appctx->ctx.stats.flags & STAT_BOUND) && !(appctx->ctx.stats.type & (1 << STATS_TYPE_FE)))
+		return 0;
+
+	if (!stats_fill_fe_stats(px, stats, ST_F_TOTAL_FIELDS))
+		return 0;
+
+	return stats_dump_one_line(stats, 0, px, appctx);
+}
+
+/* Fill <stats> with the listener statistics. <stats> is
+ * preallocated array of length <len>. The length of the array
+ * must be at least ST_F_TOTAL_FIELDS. If this length is less
+ * then this value, the function returns 0, otherwise, it
+ * returns 1. <flags> can take the value ST_SHLGNDS.
+ */
+int stats_fill_li_stats(struct proxy *px, struct listener *l, int flags,
+                        struct field *stats, int len)
+{
+	struct chunk *out = get_trash_chunk();
+
+	if (len < ST_F_TOTAL_FIELDS)
+		return 0;
+
+	if (!l->counters)
+		return 0;
+
+	chunk_reset(out);
+	memset(stats, 0, sizeof(*stats) * len);
+
+	stats[ST_F_PXNAME]   = mkf_str(FO_KEY|FN_NAME|FS_SERVICE, px->id);
+	stats[ST_F_SVNAME]   = mkf_str(FO_KEY|FN_NAME|FS_SERVICE, l->name);
+	stats[ST_F_MODE]     = mkf_str(FO_CONFIG|FS_SERVICE, proxy_mode_str(px->mode));
+	stats[ST_F_SCUR]     = mkf_u32(0, l->nbconn);
+	stats[ST_F_SMAX]     = mkf_u32(FN_MAX, l->counters->conn_max);
+	stats[ST_F_SLIM]     = mkf_u32(FO_CONFIG|FN_LIMIT, l->maxconn);
+	stats[ST_F_STOT]     = mkf_u64(FN_COUNTER, l->counters->cum_conn);
+	stats[ST_F_BIN]      = mkf_u64(FN_COUNTER, l->counters->bytes_in);
+	stats[ST_F_BOUT]     = mkf_u64(FN_COUNTER, l->counters->bytes_out);
+	stats[ST_F_DREQ]     = mkf_u64(FN_COUNTER, l->counters->denied_req);
+	stats[ST_F_DRESP]    = mkf_u64(FN_COUNTER, l->counters->denied_resp);
+	stats[ST_F_EREQ]     = mkf_u64(FN_COUNTER, l->counters->failed_req);
+	stats[ST_F_STATUS]   = mkf_str(FO_STATUS, (l->nbconn < l->maxconn) ? (l->state == LI_LIMITED) ? "WAITING" : "OPEN" : "FULL");
+	stats[ST_F_PID]      = mkf_u32(FO_KEY, relative_pid);
+	stats[ST_F_IID]      = mkf_u32(FO_KEY|FS_SERVICE, px->uuid);
+	stats[ST_F_SID]      = mkf_u32(FO_KEY|FS_SERVICE, l->luid);
+	stats[ST_F_TYPE]     = mkf_u32(FO_CONFIG|FS_SERVICE, STATS_TYPE_SO);
+
+	if (flags & ST_SHLGNDS) {
+		char str[INET6_ADDRSTRLEN];
+		int port;
+
+		port = get_host_port(&l->addr);
+		switch (addr_to_str(&l->addr, str, sizeof(str))) {
+		case AF_INET:
+			stats[ST_F_ADDR] = mkf_str(FO_CONFIG|FS_SERVICE, chunk_newstr(out));
+			chunk_appendf(out, "%s:%d", str, port);
+			break;
+		case AF_INET6:
+			stats[ST_F_ADDR] = mkf_str(FO_CONFIG|FS_SERVICE, chunk_newstr(out));
+			chunk_appendf(out, "[%s]:%d", str, port);
+			break;
+		case AF_UNIX:
+			stats[ST_F_ADDR] = mkf_str(FO_CONFIG|FS_SERVICE, "unix");
+			break;
+		case -1:
+			stats[ST_F_ADDR] = mkf_str(FO_CONFIG|FS_SERVICE, chunk_newstr(out));
+			chunk_strcat(out, strerror(errno));
+			break;
+		default: /* address family not supported */
+			break;
+		}
+	}
+
 	return 1;
 }
 
@@ -2943,125 +4092,10 @@ static int stats_dump_li_stats(struct stream_interface *si, struct proxy *px, st
 {
 	struct appctx *appctx = __objt_appctx(si->end);
 
-	if (appctx->ctx.stats.flags & STAT_FMT_HTML) {
-		chunk_appendf(&trash, "<tr class=socket>");
-		if (px->cap & PR_CAP_BE && px->srv && (appctx->ctx.stats.flags & STAT_ADMIN)) {
-			/* Column sub-heading for Enable or Disable server */
-			chunk_appendf(&trash, "<td></td>");
-		}
-		chunk_appendf(&trash,
-		              /* frontend name, listener name */
-		              "<td class=ac><a name=\"%s/+%s\"></a>%s"
-		              "<a class=lfsb href=\"#%s/+%s\">%s</a>"
-		              "",
-		              px->id, l->name,
-		              (flags & ST_SHLGNDS)?"<u>":"",
-		              px->id, l->name, l->name);
+	if (!stats_fill_li_stats(px, l, flags, stats, ST_F_TOTAL_FIELDS))
+		return 0;
 
-		if (flags & ST_SHLGNDS) {
-			char str[INET6_ADDRSTRLEN];
-			int port;
-
-			chunk_appendf(&trash, "<div class=tips>");
-
-			port = get_host_port(&l->addr);
-			switch (addr_to_str(&l->addr, str, sizeof(str))) {
-			case AF_INET:
-				chunk_appendf(&trash, "IPv4: %s:%d, ", str, port);
-				break;
-			case AF_INET6:
-				chunk_appendf(&trash, "IPv6: [%s]:%d, ", str, port);
-				break;
-			case AF_UNIX:
-				chunk_appendf(&trash, "unix, ");
-				break;
-			case -1:
-				chunk_appendf(&trash, "(%s), ", strerror(errno));
-				break;
-			}
-
-			/* id */
-			chunk_appendf(&trash, "id: %d</div>", l->luid);
-		}
-
-		chunk_appendf(&trash,
-			      /* queue */
-		              "%s</td><td colspan=3></td>"
-		              /* sessions rate: current, max, limit */
-		              "<td colspan=3>&nbsp;</td>"
-		              /* sessions: current, max, limit, total, lbtot, lastsess */
-		              "<td>%s</td><td>%s</td><td>%s</td>"
-		              "<td>%s</td><td>&nbsp;</td><td>&nbsp;</td>"
-		              /* bytes: in, out */
-		              "<td>%s</td><td>%s</td>"
-		              "",
-		              (flags & ST_SHLGNDS)?"</u>":"",
-		              U2H(l->nbconn), U2H(l->counters->conn_max), U2H(l->maxconn),
-		              U2H(l->counters->cum_conn), U2H(l->counters->bytes_in), U2H(l->counters->bytes_out));
-
-		chunk_appendf(&trash,
-		              /* denied: req, resp */
-		              "<td>%s</td><td>%s</td>"
-		              /* errors: request, connect, response */
-		              "<td>%s</td><td></td><td></td>"
-		              /* warnings: retries, redispatches */
-		              "<td></td><td></td>"
-		              /* server status: reflect listener status */
-		              "<td class=ac>%s</td>"
-		              /* rest of server: nothing */
-		              "<td class=ac colspan=8></td></tr>"
-		              "",
-		              U2H(l->counters->denied_req), U2H(l->counters->denied_resp),
-		              U2H(l->counters->failed_req),
-		              (l->nbconn < l->maxconn) ? (l->state == LI_LIMITED) ? "WAITING" : "OPEN" : "FULL");
-	}
-	else { /* CSV mode */
-		chunk_appendf(&trash,
-		              /* pxid, name, queue cur, queue max, */
-		              "%s,%s,,,"
-		              /* sessions: current, max, limit, total */
-		              "%d,%d,%d,%lld,"
-		              /* bytes: in, out */
-		              "%lld,%lld,"
-		              /* denied: req, resp */
-		              "%lld,%lld,"
-		              /* errors: request, connect, response */
-		              "%lld,,,"
-		              /* warnings: retries, redispatches */
-		              ",,"
-		              /* server status: reflect listener status */
-		              "%s,"
-		              /* rest of server: nothing */
-		              ",,,,,,,,"
-		              /* pid, iid, sid, throttle, lbtot, tracked, type */
-		              "%d,%d,%d,,,,%d,"
-		              /* rate, rate_lim, rate_max */
-		              ",,,"
-		              /* check_status, check_code, check_duration */
-		              ",,,"
-		              /* http response: 1xx, 2xx, 3xx, 4xx, 5xx, other */
-		              ",,,,,,"
-		              /* failed health analyses */
-		              ","
-		              /* requests : req_rate, req_rate_max, req_tot, */
-		              ",,,"
-		              /* errors: cli_aborts, srv_aborts */
-		              ",,"
-		              /* compression: in, out, bypassed, comp_rsp */
-		              ",,,,"
-			      /* lastsess, last_chk, last_agt, qtime, ctime, rtime, ttime, */
-			      ",,,,,,,"
-		              "\n",
-		              px->id, l->name,
-		              l->nbconn, l->counters->conn_max,
-		              l->maxconn, l->counters->cum_conn,
-		              l->counters->bytes_in, l->counters->bytes_out,
-		              l->counters->denied_req, l->counters->denied_resp,
-		              l->counters->failed_req,
-		              (l->nbconn < l->maxconn) ? "OPEN" : "FULL",
-		              relative_pid, px->uuid, l->luid, STATS_TYPE_SO);
-	}
-	return 1;
+	return stats_dump_one_line(stats, flags, px, appctx);
 }
 
 enum srv_stats_state {
@@ -3080,41 +4114,39 @@ enum srv_stats_state {
 	SRV_STATS_STATE_COUNT, /* Must be last */
 };
 
-enum srv_stats_colour {
-	SRV_STATS_COLOUR_DOWN = 0,
-	SRV_STATS_COLOUR_GOING_UP,
-	SRV_STATS_COLOUR_GOING_DOWN,
-	SRV_STATS_COLOUR_UP,
-	SRV_STATS_COLOUR_NOLB,
-	SRV_STATS_COLOUR_DRAINING,
-	SRV_STATS_COLOUR_NO_CHECK,
-
-	SRV_STATS_COLOUR_COUNT, /* Must be last */
+static const char *srv_hlt_st[SRV_STATS_STATE_COUNT] = {
+	[SRV_STATS_STATE_DOWN]			= "DOWN",
+	[SRV_STATS_STATE_DOWN_AGENT]		= "DOWN (agent)",
+	[SRV_STATS_STATE_GOING_UP]		= "DOWN %d/%d",
+	[SRV_STATS_STATE_UP_GOING_DOWN]		= "UP %d/%d",
+	[SRV_STATS_STATE_UP]			= "UP",
+	[SRV_STATS_STATE_NOLB_GOING_DOWN]	= "NOLB %d/%d",
+	[SRV_STATS_STATE_NOLB]			= "NOLB",
+	[SRV_STATS_STATE_DRAIN_GOING_DOWN]	= "DRAIN %d/%d",
+	[SRV_STATS_STATE_DRAIN]			= "DRAIN",
+	[SRV_STATS_STATE_DRAIN_AGENT]		= "DRAIN (agent)",
+	[SRV_STATS_STATE_NO_CHECK]		= "no check"
 };
 
-static const char *srv_stats_colour_st[SRV_STATS_COLOUR_COUNT] = {
-	[SRV_STATS_COLOUR_DOWN]		= "down",
-	[SRV_STATS_COLOUR_GOING_UP]	= "going_up",
-	[SRV_STATS_COLOUR_GOING_DOWN]	= "going_down",
-	[SRV_STATS_COLOUR_UP]		= "up",
-	[SRV_STATS_COLOUR_NOLB]		= "nolb",
-	[SRV_STATS_COLOUR_DRAINING]	= "draining",
-	[SRV_STATS_COLOUR_NO_CHECK]	= "no_check",
-};
-
-/* Dumps a line for server <sv> and proxy <px> to the trash and uses the state
- * from stream interface <si>, stats flags <flags>, and server state <state>.
- * The caller is responsible for clearing the trash if needed. Returns non-zero
- * if it emits anything, zero otherwise.
+/* Fill <stats> with the server statistics. <stats> is
+ * preallocated array of length <len>. The length of the array
+ * must be at least ST_F_TOTAL_FIELDS. If this length is less
+ * then this value, the function returns 0, otherwise, it
+ * returns 1. <flags> can take the value ST_SHLGNDS.
  */
-static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, int flags, struct server *sv,
-			       enum srv_stats_state state, enum srv_stats_colour colour)
+int stats_fill_sv_stats(struct proxy *px, struct server *sv, int flags,
+                        struct field *stats, int len)
 {
-	struct appctx *appctx = __objt_appctx(si->end);
 	struct server *via, *ref;
 	char str[INET6_ADDRSTRLEN];
-	struct chunk src;
-	int i;
+	struct chunk *out = get_trash_chunk();
+	enum srv_stats_state state;
+	char *fld_status;
+
+	if (len < ST_F_TOTAL_FIELDS)
+		return 0;
+
+	memset(stats, 0, sizeof(*stats) * len);
 
 	/* we have "via" which is the tracked server as described in the configuration,
 	 * and "ref" which is the checked server and the end of the chain.
@@ -3124,418 +4156,308 @@ static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, in
 	while (ref->track)
 		ref = ref->track;
 
-	if (appctx->ctx.stats.flags & STAT_FMT_HTML) {
-		static char *srv_hlt_st[SRV_STATS_STATE_COUNT] = {
-			[SRV_STATS_STATE_DOWN]			= "DOWN",
-			[SRV_STATS_STATE_DOWN_AGENT]		= "DOWN (agent)",
-			[SRV_STATS_STATE_GOING_UP]		= "DN %d/%d &uarr;",
-			[SRV_STATS_STATE_UP_GOING_DOWN]		= "UP %d/%d &darr;",
-			[SRV_STATS_STATE_UP]			= "UP",
-			[SRV_STATS_STATE_NOLB_GOING_DOWN]	= "NOLB %d/%d &darr;",
-			[SRV_STATS_STATE_NOLB]			= "NOLB",
-			[SRV_STATS_STATE_DRAIN_GOING_DOWN]	= "DRAIN %d/%d &darr;",
-			[SRV_STATS_STATE_DRAIN]			= "DRAIN",
-			[SRV_STATS_STATE_DRAIN_AGENT]		= "DRAIN (agent)",
-			[SRV_STATS_STATE_NO_CHECK]		= "<i>no check</i>",
-		};
-
-		if (sv->admin & SRV_ADMF_MAINT)
-			chunk_appendf(&trash, "<tr class=\"maintain\">");
-		else
-			chunk_appendf(&trash,
-			              "<tr class=\"%s_%s\">",
-			              (sv->flags & SRV_F_BACKUP) ? "backup" : "active", srv_stats_colour_st[colour]);
-
-		if ((px->cap & PR_CAP_BE) && px->srv && (appctx->ctx.stats.flags & STAT_ADMIN))
-			chunk_appendf(&trash,
-			              "<td><input type=\"checkbox\" name=\"s\" value=\"%s\"></td>",
-			              sv->id);
-
-		chunk_appendf(&trash,
-		              "<td class=ac><a name=\"%s/%s\"></a>%s"
-		              "<a class=lfsb href=\"#%s/%s\">%s</a>"
-			      "",
-		              px->id, sv->id,
-		              (flags & ST_SHLGNDS) ? "<u>" : "",
-		              px->id, sv->id, sv->id);
-
-		if (flags & ST_SHLGNDS) {
-			chunk_appendf(&trash, "<div class=tips>");
-
-			switch (addr_to_str(&sv->addr, str, sizeof(str))) {
-			case AF_INET:
-				chunk_appendf(&trash, "IPv4: %s:%d, ", str, get_host_port(&sv->addr));
-				break;
-			case AF_INET6:
-				chunk_appendf(&trash, "IPv6: [%s]:%d, ", str, get_host_port(&sv->addr));
-				break;
-			case AF_UNIX:
-				chunk_appendf(&trash, "unix, ");
-				break;
-			case -1:
-				chunk_appendf(&trash, "(%s), ", strerror(errno));
-				break;
-			default: /* address family not supported */
-				break;
-			}
-
-			/* id */
-			chunk_appendf(&trash, "id: %d", sv->puid);
-
-			/* cookie */
-			if (sv->cookie) {
-				chunk_appendf(&trash, ", cookie: '");
-
-				chunk_initlen(&src, sv->cookie, 0, strlen(sv->cookie));
-				chunk_htmlencode(&trash, &src);
-
-				chunk_appendf(&trash, "'");
-			}
-
-			chunk_appendf(&trash, "</div>");
+	if (sv->state == SRV_ST_RUNNING || sv->state == SRV_ST_STARTING) {
+		if ((ref->check.state & CHK_ST_ENABLED) &&
+		    (ref->check.health < ref->check.rise + ref->check.fall - 1)) {
+			state = SRV_STATS_STATE_UP_GOING_DOWN;
+		} else {
+			state = SRV_STATS_STATE_UP;
 		}
 
-		chunk_appendf(&trash,
-		              /* queue : current, max, limit */
-		              "%s</td><td>%s</td><td>%s</td><td>%s</td>"
-		              /* sessions rate : current, max, limit */
-		              "<td>%s</td><td>%s</td><td></td>"
-		              "",
-		              (flags & ST_SHLGNDS) ? "</u>" : "",
-		              U2H(sv->nbpend), U2H(sv->counters.nbpend_max), LIM2A(sv->maxqueue, "-"),
-		              U2H(read_freq_ctr(&sv->sess_per_sec)), U2H(sv->counters.sps_max));
-
-
-		chunk_appendf(&trash,
-		              /* sessions: current, max, limit, total */
-		              "<td>%s</td><td>%s</td><td>%s</td>"
-		              "<td><u>%s<div class=tips><table class=det>"
-		              "<tr><th>Cum. sessions:</th><td>%s</td></tr>"
-		              "",
-		              U2H(sv->cur_sess), U2H(sv->counters.cur_sess_max), LIM2A(sv->maxconn, "-"),
-		              U2H(sv->counters.cum_sess),
-		              U2H(sv->counters.cum_sess));
-
-		/* http response (via hover): 1xx, 2xx, 3xx, 4xx, 5xx, other */
-		if (px->mode == PR_MODE_HTTP) {
-			unsigned long long tot;
-			for (tot = i = 0; i < 6; i++)
-				tot += sv->counters.p.http.rsp[i];
-
-			chunk_appendf(&trash,
-			              "<tr><th>Cum. HTTP responses:</th><td>%s</td></tr>"
-			              "<tr><th>- HTTP 1xx responses:</th><td>%s</td><td>(%d%%)</td></tr>"
-			              "<tr><th>- HTTP 2xx responses:</th><td>%s</td><td>(%d%%)</td></tr>"
-			              "<tr><th>- HTTP 3xx responses:</th><td>%s</td><td>(%d%%)</td></tr>"
-			              "<tr><th>- HTTP 4xx responses:</th><td>%s</td><td>(%d%%)</td></tr>"
-			              "<tr><th>- HTTP 5xx responses:</th><td>%s</td><td>(%d%%)</td></tr>"
-			              "<tr><th>- other responses:</th><td>%s</td><td>(%d%%)</td></tr>"
-			              "",
-			              U2H(tot),
-			              U2H(sv->counters.p.http.rsp[1]), tot ? (int)(100*sv->counters.p.http.rsp[1] / tot) : 0,
-			              U2H(sv->counters.p.http.rsp[2]), tot ? (int)(100*sv->counters.p.http.rsp[2] / tot) : 0,
-			              U2H(sv->counters.p.http.rsp[3]), tot ? (int)(100*sv->counters.p.http.rsp[3] / tot) : 0,
-			              U2H(sv->counters.p.http.rsp[4]), tot ? (int)(100*sv->counters.p.http.rsp[4] / tot) : 0,
-			              U2H(sv->counters.p.http.rsp[5]), tot ? (int)(100*sv->counters.p.http.rsp[5] / tot) : 0,
-			              U2H(sv->counters.p.http.rsp[0]), tot ? (int)(100*sv->counters.p.http.rsp[0] / tot) : 0);
-		}
-
-		chunk_appendf(&trash, "<tr><th colspan=3>Avg over last 1024 success. conn.</th></tr>");
-		chunk_appendf(&trash, "<tr><th>- Queue time:</th><td>%s</td><td>ms</td></tr>",   U2H(swrate_avg(sv->counters.q_time, TIME_STATS_SAMPLES)));
-		chunk_appendf(&trash, "<tr><th>- Connect time:</th><td>%s</td><td>ms</td></tr>", U2H(swrate_avg(sv->counters.c_time, TIME_STATS_SAMPLES)));
-		if (px->mode == PR_MODE_HTTP)
-			chunk_appendf(&trash, "<tr><th>- Response time:</th><td>%s</td><td>ms</td></tr>", U2H(swrate_avg(sv->counters.d_time, TIME_STATS_SAMPLES)));
-		chunk_appendf(&trash, "<tr><th>- Total time:</th><td>%s</td><td>ms</td></tr>",   U2H(swrate_avg(sv->counters.t_time, TIME_STATS_SAMPLES)));
-
-		chunk_appendf(&trash,
-		              "</table></div></u></td>"
-		              /* sessions: lbtot, last */
-		              "<td>%s</td><td>%s</td>",
-		              U2H(sv->counters.cum_lbconn),
-		              human_time(srv_lastsession(sv), 1));
-
-		chunk_appendf(&trash,
-		              /* bytes : in, out */
-		              "<td>%s</td><td>%s</td>"
-		              /* denied: req, resp */
-		              "<td></td><td>%s</td>"
-		              /* errors : request, connect */
-		              "<td></td><td>%s</td>"
-		              /* errors : response */
-		              "<td><u>%s<div class=tips>Connection resets during transfers: %lld client, %lld server</div></u></td>"
-		              /* warnings: retries, redispatches */
-		              "<td>%lld</td><td>%lld</td>"
-		              "",
-		              U2H(sv->counters.bytes_in), U2H(sv->counters.bytes_out),
-		              U2H(sv->counters.failed_secu),
-		              U2H(sv->counters.failed_conns),
-		              U2H(sv->counters.failed_resp),
-		              sv->counters.cli_aborts,
-		              sv->counters.srv_aborts,
-		              sv->counters.retries, sv->counters.redispatches);
-
-		/* status, lest check */
-		chunk_appendf(&trash, "<td class=ac>");
-
-		if (sv->admin & SRV_ADMF_MAINT) {
-			chunk_appendf(&trash, "%s ", human_time(now.tv_sec - sv->last_change, 1));
-			chunk_appendf(&trash, "MAINT");
-		}
-		else if ((ref->agent.state & CHK_ST_ENABLED) && !(sv->agent.health) && (ref->state == SRV_ST_STOPPED)) {
-			chunk_appendf(&trash, "%s ", human_time(now.tv_sec - ref->last_change, 1));
-			/* DOWN (agent) */
-			chunk_appendf(&trash, srv_hlt_st[1], "GCC: your -Werror=format-security is bogus, annoying, and hides real bugs, I don't thank you, really!");
-		}
-		else if (ref->check.state & CHK_ST_ENABLED) {
-			chunk_appendf(&trash, "%s ", human_time(now.tv_sec - ref->last_change, 1));
-			chunk_appendf(&trash,
-			              srv_hlt_st[state],
-			              (ref->state != SRV_ST_STOPPED) ? (ref->check.health - ref->check.rise + 1) : (ref->check.health),
-			              (ref->state != SRV_ST_STOPPED) ? (ref->check.fall) : (ref->check.rise));
-		}
-
-		if ((sv->state == SRV_ST_STOPPED) &&
-		    ((sv->agent.state & (CHK_ST_ENABLED|CHK_ST_PAUSED)) == CHK_ST_ENABLED) && !(sv->agent.health)) {
-			chunk_appendf(&trash,
-			              "</td><td class=ac><u> %s%s",
-			              (sv->agent.state & CHK_ST_INPROGRESS) ? "* " : "",
-			              get_check_status_info(sv->agent.status));
-
-			if (sv->agent.status >= HCHK_STATUS_L57DATA)
-				chunk_appendf(&trash, "/%d", sv->agent.code);
-
-			if (sv->agent.status >= HCHK_STATUS_CHECKED && sv->agent.duration >= 0)
-				chunk_appendf(&trash, " in %lums", sv->agent.duration);
-
-			chunk_appendf(&trash, "<div class=tips>%s",
-				      get_check_status_description(sv->agent.status));
-			if (*sv->agent.desc) {
-				chunk_appendf(&trash, ": ");
-				chunk_initlen(&src, sv->agent.desc, 0, strlen(sv->agent.desc));
-				chunk_htmlencode(&trash, &src);
-			}
-			chunk_appendf(&trash, "</div></u>");
-		}
-		else if ((sv->check.state & (CHK_ST_ENABLED|CHK_ST_PAUSED)) == CHK_ST_ENABLED) {
-			chunk_appendf(&trash,
-			              "</td><td class=ac><u> %s%s",
-			              (sv->check.state & CHK_ST_INPROGRESS) ? "* " : "",
-			              get_check_status_info(sv->check.status));
-
-			if (sv->check.status >= HCHK_STATUS_L57DATA)
-				chunk_appendf(&trash, "/%d", sv->check.code);
-
-			if (sv->check.status >= HCHK_STATUS_CHECKED && sv->check.duration >= 0)
-				chunk_appendf(&trash, " in %lums", sv->check.duration);
-
-			chunk_appendf(&trash, "<div class=tips>%s",
-				      get_check_status_description(sv->check.status));
-			if (*sv->check.desc) {
-				chunk_appendf(&trash, ": ");
-				chunk_initlen(&src, sv->check.desc, 0, strlen(sv->check.desc));
-				chunk_htmlencode(&trash, &src);
-			}
-			chunk_appendf(&trash, "</div></u>");
-		}
-		else
-			chunk_appendf(&trash, "</td><td>");
-
-		chunk_appendf(&trash,
-		              /* weight */
-		              "</td><td class=ac>%d</td>"
-		              /* act, bck */
-		              "<td class=ac>%s</td><td class=ac>%s</td>"
-		              "",
-		              (sv->eweight * px->lbprm.wmult + px->lbprm.wdiv - 1) / px->lbprm.wdiv,
-		              (sv->flags & SRV_F_BACKUP) ? "-" : "Y",
-		              (sv->flags & SRV_F_BACKUP) ? "Y" : "-");
-
-		/* check failures: unique, fatal, down time */
-		if (sv->check.state & CHK_ST_ENABLED) {
-			chunk_appendf(&trash, "<td><u>%lld", ref->counters.failed_checks);
-
-			if (ref->observe)
-				chunk_appendf(&trash, "/%lld", ref->counters.failed_hana);
-
-			chunk_appendf(&trash,
-			              "<div class=tips>Failed Health Checks%s</div></u></td>"
-			              "<td>%lld</td><td>%s</td>"
-			              "",
-			              ref->observe ? "/Health Analyses" : "",
-			              ref->counters.down_trans, human_time(srv_downtime(sv), 1));
-		}
-		else if (!(sv->admin & SRV_ADMF_FMAINT) && sv != ref) {
-			/* tracking a server */
-			chunk_appendf(&trash,
-			              "<td class=ac colspan=3><a class=lfsb href=\"#%s/%s\">via %s/%s</a></td>",
-			              via->proxy->id, via->id, via->proxy->id, via->id);
-		}
-		else
-			chunk_appendf(&trash, "<td colspan=3></td>");
-
-		/* throttle */
-		if (sv->state == SRV_ST_STARTING && !server_is_draining(sv))
-			chunk_appendf(&trash, "<td class=ac>%d %%</td></tr>\n", server_throttle_rate(sv));
-		else
-			chunk_appendf(&trash, "<td class=ac>-</td></tr>\n");
-	}
-	else { /* CSV mode */
-		struct chunk *out = get_trash_chunk();
-		static char *srv_hlt_st[SRV_STATS_STATE_COUNT] = {
-			[SRV_STATS_STATE_DOWN]			= "DOWN,",
-			[SRV_STATS_STATE_DOWN_AGENT]		= "DOWN (agent),",
-			[SRV_STATS_STATE_GOING_UP]		= "DOWN %d/%d,",
-			[SRV_STATS_STATE_UP_GOING_DOWN]		= "UP %d/%d,",
-			[SRV_STATS_STATE_UP]			= "UP,",
-			[SRV_STATS_STATE_NOLB_GOING_DOWN]	= "NOLB %d/%d,",
-			[SRV_STATS_STATE_NOLB]			= "NOLB,",
-			[SRV_STATS_STATE_DRAIN_GOING_DOWN]	= "DRAIN %d/%d,",
-			[SRV_STATS_STATE_DRAIN]			= "DRAIN,",
-			[SRV_STATS_STATE_DRAIN_AGENT]		= "DRAIN (agent)",
-			[SRV_STATS_STATE_NO_CHECK]		= "no check,"
-		};
-
-		chunk_appendf(&trash,
-		              /* pxid, name */
-		              "%s,%s,"
-		              /* queue : current, max */
-		              "%d,%d,"
-		              /* sessions : current, max, limit, total */
-		              "%d,%d,%s,%lld,"
-		              /* bytes : in, out */
-		              "%lld,%lld,"
-		              /* denied: req, resp */
-		              ",%lld,"
-		              /* errors : request, connect, response */
-		              ",%lld,%lld,"
-		              /* warnings: retries, redispatches */
-		              "%lld,%lld,"
-		              "",
-		              px->id, sv->id,
-		              sv->nbpend, sv->counters.nbpend_max,
-		              sv->cur_sess, sv->counters.cur_sess_max, LIM2A(sv->maxconn, ""), sv->counters.cum_sess,
-		              sv->counters.bytes_in, sv->counters.bytes_out,
-		              sv->counters.failed_secu,
-		              sv->counters.failed_conns, sv->counters.failed_resp,
-		              sv->counters.retries, sv->counters.redispatches);
-
-		/* status */
-		if (sv->admin & SRV_ADMF_IMAINT)
-			chunk_appendf(&trash, "MAINT (via %s/%s),", via->proxy->id, via->id);
-		else if (sv->admin & SRV_ADMF_MAINT)
-			chunk_appendf(&trash, "MAINT,");
-		else
-			chunk_appendf(&trash,
-			              srv_hlt_st[state],
-			              (ref->state != SRV_ST_STOPPED) ? (ref->check.health - ref->check.rise + 1) : (ref->check.health),
-			              (ref->state != SRV_ST_STOPPED) ? (ref->check.fall) : (ref->check.rise));
-
-		chunk_appendf(&trash,
-		              /* weight, active, backup */
-		              "%d,%d,%d,"
-		              "",
-		              (sv->eweight * px->lbprm.wmult + px->lbprm.wdiv - 1) / px->lbprm.wdiv,
-		              (sv->flags & SRV_F_BACKUP) ? 0 : 1,
-		              (sv->flags & SRV_F_BACKUP) ? 1 : 0);
-
-		/* check failures: unique, fatal; last change, total downtime */
-		if (sv->check.state & CHK_ST_ENABLED)
-			chunk_appendf(&trash,
-			              "%lld,%lld,%d,%d,",
-			              sv->counters.failed_checks, sv->counters.down_trans,
-			              (int)(now.tv_sec - sv->last_change), srv_downtime(sv));
-		else
-			chunk_appendf(&trash, ",,,,");
-
-		/* queue limit, pid, iid, sid, */
-		chunk_appendf(&trash,
-		              "%s,"
-		              "%d,%d,%d,",
-		              LIM2A(sv->maxqueue, ""),
-		              relative_pid, px->uuid, sv->puid);
-
-		/* throttle */
-		if (sv->state == SRV_ST_STARTING && !server_is_draining(sv))
-			chunk_appendf(&trash, "%d", server_throttle_rate(sv));
-
-		/* sessions: lbtot */
-		chunk_appendf(&trash, ",%lld,", sv->counters.cum_lbconn);
-
-		/* tracked */
-		if (sv->track)
-			chunk_appendf(&trash, "%s/%s,",
-			              sv->track->proxy->id, sv->track->id);
-		else
-			chunk_appendf(&trash, ",");
-
-		/* type */
-		chunk_appendf(&trash, "%d,", STATS_TYPE_SV);
-
-		/* rate */
-		chunk_appendf(&trash, "%u,,%u,",
-		              read_freq_ctr(&sv->sess_per_sec),
-		              sv->counters.sps_max);
-
-		if (sv->check.state & CHK_ST_ENABLED) {
-			/* check_status */
-			chunk_appendf(&trash, "%s,", csv_enc(get_check_status_info(sv->check.status), 1, out));
-
-			/* check_code */
-			if (sv->check.status >= HCHK_STATUS_L57DATA)
-				chunk_appendf(&trash, "%u,", sv->check.code);
+		if (sv->admin & SRV_ADMF_DRAIN) {
+			if (ref->agent.state & CHK_ST_ENABLED)
+				state = SRV_STATS_STATE_DRAIN_AGENT;
+			else if (state == SRV_STATS_STATE_UP_GOING_DOWN)
+				state = SRV_STATS_STATE_DRAIN_GOING_DOWN;
 			else
-				chunk_appendf(&trash, ",");
-
-			/* check_duration */
-			if (sv->check.status >= HCHK_STATUS_CHECKED)
-				chunk_appendf(&trash, "%lu,", sv->check.duration);
-			else
-				chunk_appendf(&trash, ",");
-
+				state = SRV_STATS_STATE_DRAIN;
 		}
-		else
-			chunk_appendf(&trash, ",,,");
 
-		/* http response: 1xx, 2xx, 3xx, 4xx, 5xx, other */
-		if (px->mode == PR_MODE_HTTP) {
-			for (i=1; i<6; i++)
-				chunk_appendf(&trash, "%lld,", sv->counters.p.http.rsp[i]);
-
-			chunk_appendf(&trash, "%lld,", sv->counters.p.http.rsp[0]);
+		if (state == SRV_STATS_STATE_UP && !(ref->check.state & CHK_ST_ENABLED)) {
+			state = SRV_STATS_STATE_NO_CHECK;
 		}
-		else
-			chunk_appendf(&trash, ",,,,,,");
-
-		/* failed health analyses */
-		chunk_appendf(&trash, "%lld,",  sv->counters.failed_hana);
-
-		/* requests : req_rate, req_rate_max, req_tot, */
-		chunk_appendf(&trash, ",,,");
-
-		/* errors: cli_aborts, srv_aborts */
-		chunk_appendf(&trash, "%lld,%lld,",
-		              sv->counters.cli_aborts, sv->counters.srv_aborts);
-
-		/* compression: in, out, bypassed, comp_rsp */
-		chunk_appendf(&trash, ",,,,");
-
-		/* lastsess */
-		chunk_appendf(&trash, "%d,", srv_lastsession(sv));
-
-		/* capture of last check and agent statuses */
-		chunk_appendf(&trash, "%s,", ((sv->check.state & (CHK_ST_ENABLED|CHK_ST_PAUSED)) == CHK_ST_ENABLED) ? csv_enc(cstr(sv->check.desc), 1, out) : "");
-		chunk_appendf(&trash, "%s,", ((sv->agent.state & (CHK_ST_ENABLED|CHK_ST_PAUSED)) == CHK_ST_ENABLED) ? csv_enc(cstr(sv->agent.desc), 1, out) : "");
-
-		/* qtime, ctime, rtime, ttime, */
-		chunk_appendf(&trash, "%u,%u,%u,%u,",
-		              swrate_avg(sv->counters.q_time, TIME_STATS_SAMPLES),
-		              swrate_avg(sv->counters.c_time, TIME_STATS_SAMPLES),
-		              swrate_avg(sv->counters.d_time, TIME_STATS_SAMPLES),
-		              swrate_avg(sv->counters.t_time, TIME_STATS_SAMPLES));
-
-		/* finish with EOL */
-		chunk_appendf(&trash, "\n");
 	}
+	else if (sv->state == SRV_ST_STOPPING) {
+		if ((!(sv->check.state & CHK_ST_ENABLED) && !sv->track) ||
+		    (ref->check.health == ref->check.rise + ref->check.fall - 1)) {
+			state = SRV_STATS_STATE_NOLB;
+		} else {
+			state = SRV_STATS_STATE_NOLB_GOING_DOWN;
+		}
+	}
+	else {	/* stopped */
+		if ((ref->agent.state & CHK_ST_ENABLED) && !ref->agent.health) {
+			state = SRV_STATS_STATE_DOWN_AGENT;
+		} else if ((ref->check.state & CHK_ST_ENABLED) && !ref->check.health) {
+			state = SRV_STATS_STATE_DOWN; /* DOWN */
+		} else if ((ref->agent.state & CHK_ST_ENABLED) || (ref->check.state & CHK_ST_ENABLED)) {
+			state = SRV_STATS_STATE_GOING_UP;
+		} else {
+			state = SRV_STATS_STATE_DOWN; /* DOWN, unchecked */
+		}
+	}
+
+	chunk_reset(out);
+
+	stats[ST_F_PXNAME]   = mkf_str(FO_KEY|FN_NAME|FS_SERVICE, px->id);
+	stats[ST_F_SVNAME]   = mkf_str(FO_KEY|FN_NAME|FS_SERVICE, sv->id);
+	stats[ST_F_MODE]     = mkf_str(FO_CONFIG|FS_SERVICE, proxy_mode_str(px->mode));
+	stats[ST_F_QCUR]     = mkf_u32(0, sv->nbpend);
+	stats[ST_F_QMAX]     = mkf_u32(FN_MAX, sv->counters.nbpend_max);
+	stats[ST_F_SCUR]     = mkf_u32(0, sv->cur_sess);
+	stats[ST_F_SMAX]     = mkf_u32(FN_MAX, sv->counters.cur_sess_max);
+
+	if (sv->maxconn)
+		stats[ST_F_SLIM] = mkf_u32(FO_CONFIG|FN_LIMIT, sv->maxconn);
+
+	stats[ST_F_STOT]     = mkf_u64(FN_COUNTER, sv->counters.cum_sess);
+	stats[ST_F_BIN]      = mkf_u64(FN_COUNTER, sv->counters.bytes_in);
+	stats[ST_F_BOUT]     = mkf_u64(FN_COUNTER, sv->counters.bytes_out);
+	stats[ST_F_DRESP]    = mkf_u64(FN_COUNTER, sv->counters.failed_secu);
+	stats[ST_F_ECON]     = mkf_u64(FN_COUNTER, sv->counters.failed_conns);
+	stats[ST_F_ERESP]    = mkf_u64(FN_COUNTER, sv->counters.failed_resp);
+	stats[ST_F_WRETR]    = mkf_u64(FN_COUNTER, sv->counters.retries);
+	stats[ST_F_WREDIS]   = mkf_u64(FN_COUNTER, sv->counters.redispatches);
+
+	/* status */
+	fld_status = chunk_newstr(out);
+	if (sv->admin & SRV_ADMF_IMAINT)
+		chunk_appendf(out, "MAINT (via %s/%s)", via->proxy->id, via->id);
+	else if (sv->admin & SRV_ADMF_MAINT)
+		chunk_appendf(out, "MAINT");
+	else
+		chunk_appendf(out,
+			      srv_hlt_st[state],
+			      (ref->state != SRV_ST_STOPPED) ? (ref->check.health - ref->check.rise + 1) : (ref->check.health),
+			      (ref->state != SRV_ST_STOPPED) ? (ref->check.fall) : (ref->check.rise));
+
+	stats[ST_F_STATUS]   = mkf_str(FO_STATUS, fld_status);
+	stats[ST_F_LASTCHG]  = mkf_u32(FN_AGE, now.tv_sec - sv->last_change);
+	stats[ST_F_WEIGHT]   = mkf_u32(FN_AVG, (sv->eweight * px->lbprm.wmult + px->lbprm.wdiv - 1) / px->lbprm.wdiv);
+	stats[ST_F_ACT]      = mkf_u32(FO_STATUS, (sv->flags & SRV_F_BACKUP) ? 0 : 1);
+	stats[ST_F_BCK]      = mkf_u32(FO_STATUS, (sv->flags & SRV_F_BACKUP) ? 1 : 0);
+
+	/* check failures: unique, fatal; last change, total downtime */
+	if (sv->check.state & CHK_ST_ENABLED) {
+		stats[ST_F_CHKFAIL]  = mkf_u64(FN_COUNTER, sv->counters.failed_checks);
+		stats[ST_F_CHKDOWN]  = mkf_u64(FN_COUNTER, sv->counters.down_trans);
+		stats[ST_F_DOWNTIME] = mkf_u32(FN_COUNTER, srv_downtime(sv));
+	}
+
+	if (sv->maxqueue)
+		stats[ST_F_QLIMIT]   = mkf_u32(FO_CONFIG|FS_SERVICE, sv->maxqueue);
+
+	stats[ST_F_PID]      = mkf_u32(FO_KEY, relative_pid);
+	stats[ST_F_IID]      = mkf_u32(FO_KEY|FS_SERVICE, px->uuid);
+	stats[ST_F_SID]      = mkf_u32(FO_KEY|FS_SERVICE, sv->puid);
+
+	if (sv->state == SRV_ST_STARTING && !server_is_draining(sv))
+		stats[ST_F_THROTTLE] = mkf_u32(FN_AVG, server_throttle_rate(sv));
+
+	stats[ST_F_LBTOT]    = mkf_u64(FN_COUNTER, sv->counters.cum_lbconn);
+
+	if (sv->track) {
+		char *fld_track = chunk_newstr(out);
+
+		chunk_appendf(out, "%s/%s", sv->track->proxy->id, sv->track->id);
+		stats[ST_F_TRACKED] = mkf_str(FO_CONFIG|FN_NAME|FS_SERVICE, fld_track);
+	}
+
+	stats[ST_F_TYPE]     = mkf_u32(FO_CONFIG|FS_SERVICE, STATS_TYPE_SV);
+	stats[ST_F_RATE]     = mkf_u32(FN_RATE, read_freq_ctr(&sv->sess_per_sec));
+	stats[ST_F_RATE_MAX] = mkf_u32(FN_MAX, sv->counters.sps_max);
+
+	if ((sv->check.state & (CHK_ST_ENABLED|CHK_ST_PAUSED)) == CHK_ST_ENABLED) {
+		const char *fld_chksts;
+
+		fld_chksts = chunk_newstr(out);
+		chunk_strcat(out, "* "); // for check in progress
+		chunk_strcat(out, get_check_status_info(sv->check.status));
+		if (!(sv->check.state & CHK_ST_INPROGRESS))
+			fld_chksts += 2; // skip "* "
+		stats[ST_F_CHECK_STATUS] = mkf_str(FN_OUTPUT, fld_chksts);
+
+		if (sv->check.status >= HCHK_STATUS_L57DATA)
+			stats[ST_F_CHECK_CODE] = mkf_u32(FN_OUTPUT, sv->check.code);
+
+		if (sv->check.status >= HCHK_STATUS_CHECKED)
+			stats[ST_F_CHECK_DURATION] = mkf_u64(FN_DURATION, sv->check.duration);
+
+		stats[ST_F_CHECK_DESC] = mkf_str(FN_OUTPUT, get_check_status_description(sv->check.status));
+		stats[ST_F_LAST_CHK] = mkf_str(FN_OUTPUT, sv->check.desc);
+		stats[ST_F_CHECK_RISE]   = mkf_u32(FO_CONFIG|FS_SERVICE, ref->check.rise);
+		stats[ST_F_CHECK_FALL]   = mkf_u32(FO_CONFIG|FS_SERVICE, ref->check.fall);
+		stats[ST_F_CHECK_HEALTH] = mkf_u32(FO_CONFIG|FS_SERVICE, ref->check.health);
+	}
+
+	if ((sv->agent.state & (CHK_ST_ENABLED|CHK_ST_PAUSED)) == CHK_ST_ENABLED) {
+		const char *fld_chksts;
+
+		fld_chksts = chunk_newstr(out);
+		chunk_strcat(out, "* "); // for check in progress
+		chunk_strcat(out, get_check_status_info(sv->agent.status));
+		if (!(sv->agent.state & CHK_ST_INPROGRESS))
+			fld_chksts += 2; // skip "* "
+		stats[ST_F_AGENT_STATUS] = mkf_str(FN_OUTPUT, fld_chksts);
+
+		if (sv->agent.status >= HCHK_STATUS_L57DATA)
+			stats[ST_F_AGENT_CODE] = mkf_u32(FN_OUTPUT, sv->agent.code);
+
+		if (sv->agent.status >= HCHK_STATUS_CHECKED)
+			stats[ST_F_AGENT_DURATION] = mkf_u64(FN_DURATION, sv->agent.duration);
+
+		stats[ST_F_AGENT_DESC] = mkf_str(FN_OUTPUT, get_check_status_description(sv->agent.status));
+		stats[ST_F_LAST_AGT] = mkf_str(FN_OUTPUT, sv->agent.desc);
+		stats[ST_F_AGENT_RISE]   = mkf_u32(FO_CONFIG|FS_SERVICE, sv->agent.rise);
+		stats[ST_F_AGENT_FALL]   = mkf_u32(FO_CONFIG|FS_SERVICE, sv->agent.fall);
+		stats[ST_F_AGENT_HEALTH] = mkf_u32(FO_CONFIG|FS_SERVICE, sv->agent.health);
+	}
+
+	/* http response: 1xx, 2xx, 3xx, 4xx, 5xx, other */
+	if (px->mode == PR_MODE_HTTP) {
+		stats[ST_F_HRSP_1XX]   = mkf_u64(FN_COUNTER, sv->counters.p.http.rsp[1]);
+		stats[ST_F_HRSP_2XX]   = mkf_u64(FN_COUNTER, sv->counters.p.http.rsp[2]);
+		stats[ST_F_HRSP_3XX]   = mkf_u64(FN_COUNTER, sv->counters.p.http.rsp[3]);
+		stats[ST_F_HRSP_4XX]   = mkf_u64(FN_COUNTER, sv->counters.p.http.rsp[4]);
+		stats[ST_F_HRSP_5XX]   = mkf_u64(FN_COUNTER, sv->counters.p.http.rsp[5]);
+		stats[ST_F_HRSP_OTHER] = mkf_u64(FN_COUNTER, sv->counters.p.http.rsp[0]);
+	}
+
+	if (ref->observe)
+		stats[ST_F_HANAFAIL] = mkf_u64(FN_COUNTER, sv->counters.failed_hana);
+
+	stats[ST_F_CLI_ABRT] = mkf_u64(FN_COUNTER, sv->counters.cli_aborts);
+	stats[ST_F_SRV_ABRT] = mkf_u64(FN_COUNTER, sv->counters.srv_aborts);
+	stats[ST_F_LASTSESS] = mkf_s32(FN_AGE, srv_lastsession(sv));
+
+	stats[ST_F_QTIME] = mkf_u32(FN_AVG, swrate_avg(sv->counters.q_time, TIME_STATS_SAMPLES));
+	stats[ST_F_CTIME] = mkf_u32(FN_AVG, swrate_avg(sv->counters.c_time, TIME_STATS_SAMPLES));
+	stats[ST_F_RTIME] = mkf_u32(FN_AVG, swrate_avg(sv->counters.d_time, TIME_STATS_SAMPLES));
+	stats[ST_F_TTIME] = mkf_u32(FN_AVG, swrate_avg(sv->counters.t_time, TIME_STATS_SAMPLES));
+
+	if (flags & ST_SHLGNDS) {
+		switch (addr_to_str(&sv->addr, str, sizeof(str))) {
+		case AF_INET:
+			stats[ST_F_ADDR] = mkf_str(FO_CONFIG|FS_SERVICE, chunk_newstr(out));
+			chunk_appendf(out, "%s:%d", str, get_host_port(&sv->addr));
+			break;
+		case AF_INET6:
+			stats[ST_F_ADDR] = mkf_str(FO_CONFIG|FS_SERVICE, chunk_newstr(out));
+			chunk_appendf(out, "[%s]:%d", str, get_host_port(&sv->addr));
+			break;
+		case AF_UNIX:
+			stats[ST_F_ADDR] = mkf_str(FO_CONFIG|FS_SERVICE, "unix");
+			break;
+		case -1:
+			stats[ST_F_ADDR] = mkf_str(FO_CONFIG|FS_SERVICE, chunk_newstr(out));
+			chunk_strcat(out, strerror(errno));
+			break;
+		default: /* address family not supported */
+			break;
+		}
+
+		if (sv->cookie)
+			stats[ST_F_COOKIE] = mkf_str(FO_CONFIG|FN_NAME|FS_SERVICE, sv->cookie);
+	}
+
+	return 1;
+}
+
+/* Dumps a line for server <sv> and proxy <px> to the trash and uses the state
+ * from stream interface <si>, stats flags <flags>, and server state <state>.
+ * The caller is responsible for clearing the trash if needed. Returns non-zero
+ * if it emits anything, zero otherwise.
+ */
+static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, int flags, struct server *sv)
+{
+	struct appctx *appctx = __objt_appctx(si->end);
+
+	if (!stats_fill_sv_stats(px, sv, flags, stats, ST_F_TOTAL_FIELDS))
+		return 0;
+
+	return stats_dump_one_line(stats, flags, px, appctx);
+}
+
+/* Fill <stats> with the backend statistics. <stats> is
+ * preallocated array of length <len>. The length of the array
+ * must be at least ST_F_TOTAL_FIELDS. If this length is less
+ * then this value, the function returns 0, otherwise, it
+ * returns 1. <flags> can take the value ST_SHLGNDS.
+ */
+int stats_fill_be_stats(struct proxy *px, int flags, struct field *stats, int len)
+{
+	if (len < ST_F_TOTAL_FIELDS)
+		return 0;
+
+	memset(stats, 0, sizeof(*stats) * len);
+
+	stats[ST_F_PXNAME]   = mkf_str(FO_KEY|FN_NAME|FS_SERVICE, px->id);
+	stats[ST_F_SVNAME]   = mkf_str(FO_KEY|FN_NAME|FS_SERVICE, "BACKEND");
+	stats[ST_F_MODE]     = mkf_str(FO_CONFIG|FS_SERVICE, proxy_mode_str(px->mode));
+	stats[ST_F_QCUR]     = mkf_u32(0, px->nbpend);
+	stats[ST_F_QMAX]     = mkf_u32(FN_MAX, px->be_counters.nbpend_max);
+	stats[ST_F_SCUR]     = mkf_u32(FO_CONFIG|FN_LIMIT, px->beconn);
+	stats[ST_F_SMAX]     = mkf_u32(FN_MAX, px->be_counters.conn_max);
+	stats[ST_F_SLIM]     = mkf_u32(FO_CONFIG|FN_LIMIT, px->fullconn);
+	stats[ST_F_STOT]     = mkf_u64(FN_COUNTER, px->be_counters.cum_conn);
+	stats[ST_F_BIN]      = mkf_u64(FN_COUNTER, px->be_counters.bytes_in);
+	stats[ST_F_BOUT]     = mkf_u64(FN_COUNTER, px->be_counters.bytes_out);
+	stats[ST_F_DREQ]     = mkf_u64(FN_COUNTER, px->be_counters.denied_req);
+	stats[ST_F_DRESP]    = mkf_u64(FN_COUNTER, px->be_counters.denied_resp);
+	stats[ST_F_ECON]     = mkf_u64(FN_COUNTER, px->be_counters.failed_conns);
+	stats[ST_F_ERESP]    = mkf_u64(FN_COUNTER, px->be_counters.failed_resp);
+	stats[ST_F_WRETR]    = mkf_u64(FN_COUNTER, px->be_counters.retries);
+	stats[ST_F_WREDIS]   = mkf_u64(FN_COUNTER, px->be_counters.redispatches);
+	stats[ST_F_STATUS]   = mkf_str(FO_STATUS, (px->lbprm.tot_weight > 0 || !px->srv) ? "UP" : "DOWN");
+	stats[ST_F_WEIGHT]   = mkf_u32(FN_AVG, (px->lbprm.tot_weight * px->lbprm.wmult + px->lbprm.wdiv - 1) / px->lbprm.wdiv);
+	stats[ST_F_ACT]      = mkf_u32(0, px->srv_act);
+	stats[ST_F_BCK]      = mkf_u32(0, px->srv_bck);
+	stats[ST_F_CHKDOWN]  = mkf_u64(FN_COUNTER, px->down_trans);
+	stats[ST_F_LASTCHG]  = mkf_u32(FN_AGE, now.tv_sec - px->last_change);
+	if (px->srv)
+		stats[ST_F_DOWNTIME] = mkf_u32(FN_COUNTER, be_downtime(px));
+
+	stats[ST_F_PID]      = mkf_u32(FO_KEY, relative_pid);
+	stats[ST_F_IID]      = mkf_u32(FO_KEY|FS_SERVICE, px->uuid);
+	stats[ST_F_SID]      = mkf_u32(FO_KEY|FS_SERVICE, 0);
+	stats[ST_F_LBTOT]    = mkf_u64(FN_COUNTER, px->be_counters.cum_lbconn);
+	stats[ST_F_TYPE]     = mkf_u32(FO_CONFIG|FS_SERVICE, STATS_TYPE_BE);
+	stats[ST_F_RATE]     = mkf_u32(0, read_freq_ctr(&px->be_sess_per_sec));
+	stats[ST_F_RATE_MAX] = mkf_u32(0, px->be_counters.sps_max);
+
+	if (flags & ST_SHLGNDS) {
+		if (px->cookie_name)
+			stats[ST_F_COOKIE] = mkf_str(FO_CONFIG|FN_NAME|FS_SERVICE, px->cookie_name);
+		stats[ST_F_ALGO] = mkf_str(FO_CONFIG|FS_SERVICE, backend_lb_algo_str(px->lbprm.algo & BE_LB_ALGO));
+	}
+
+	/* http response: 1xx, 2xx, 3xx, 4xx, 5xx, other */
+	if (px->mode == PR_MODE_HTTP) {
+		stats[ST_F_REQ_TOT]     = mkf_u64(FN_COUNTER, px->be_counters.p.http.cum_req);
+		stats[ST_F_HRSP_1XX]    = mkf_u64(FN_COUNTER, px->be_counters.p.http.rsp[1]);
+		stats[ST_F_HRSP_2XX]    = mkf_u64(FN_COUNTER, px->be_counters.p.http.rsp[2]);
+		stats[ST_F_HRSP_3XX]    = mkf_u64(FN_COUNTER, px->be_counters.p.http.rsp[3]);
+		stats[ST_F_HRSP_4XX]    = mkf_u64(FN_COUNTER, px->be_counters.p.http.rsp[4]);
+		stats[ST_F_HRSP_5XX]    = mkf_u64(FN_COUNTER, px->be_counters.p.http.rsp[5]);
+		stats[ST_F_HRSP_OTHER]  = mkf_u64(FN_COUNTER, px->be_counters.p.http.rsp[0]);
+		stats[ST_F_INTERCEPTED] = mkf_u64(FN_COUNTER, px->be_counters.intercepted_req);
+	}
+
+	stats[ST_F_CLI_ABRT]     = mkf_u64(FN_COUNTER, px->be_counters.cli_aborts);
+	stats[ST_F_SRV_ABRT]     = mkf_u64(FN_COUNTER, px->be_counters.srv_aborts);
+
+	/* compression: in, out, bypassed, responses */
+	stats[ST_F_COMP_IN]      = mkf_u64(FN_COUNTER, px->be_counters.comp_in);
+	stats[ST_F_COMP_OUT]     = mkf_u64(FN_COUNTER, px->be_counters.comp_out);
+	stats[ST_F_COMP_BYP]     = mkf_u64(FN_COUNTER, px->be_counters.comp_byp);
+	stats[ST_F_COMP_RSP]     = mkf_u64(FN_COUNTER, px->be_counters.p.http.comp_rsp);
+	stats[ST_F_LASTSESS]     = mkf_s32(FN_AGE, be_lastsession(px));
+
+	stats[ST_F_QTIME]        = mkf_u32(FN_AVG, swrate_avg(px->be_counters.q_time, TIME_STATS_SAMPLES));
+	stats[ST_F_CTIME]        = mkf_u32(FN_AVG, swrate_avg(px->be_counters.c_time, TIME_STATS_SAMPLES));
+	stats[ST_F_RTIME]        = mkf_u32(FN_AVG, swrate_avg(px->be_counters.d_time, TIME_STATS_SAMPLES));
+	stats[ST_F_TTIME]        = mkf_u32(FN_AVG, swrate_avg(px->be_counters.t_time, TIME_STATS_SAMPLES));
+
 	return 1;
 }
 
@@ -3546,8 +4468,6 @@ static int stats_dump_sv_stats(struct stream_interface *si, struct proxy *px, in
 static int stats_dump_be_stats(struct stream_interface *si, struct proxy *px, int flags)
 {
 	struct appctx *appctx = __objt_appctx(si->end);
-	struct chunk src;
-	int i;
 
 	if (!(px->cap & PR_CAP_BE))
 		return 0;
@@ -3555,245 +4475,10 @@ static int stats_dump_be_stats(struct stream_interface *si, struct proxy *px, in
 	if ((appctx->ctx.stats.flags & STAT_BOUND) && !(appctx->ctx.stats.type & (1 << STATS_TYPE_BE)))
 		return 0;
 
-	if (appctx->ctx.stats.flags & STAT_FMT_HTML) {
-		chunk_appendf(&trash, "<tr class=\"backend\">");
-		if (px->srv && (appctx->ctx.stats.flags & STAT_ADMIN)) {
-			/* Column sub-heading for Enable or Disable server */
-			chunk_appendf(&trash, "<td></td>");
-		}
-		chunk_appendf(&trash,
-		              "<td class=ac>"
-		              /* name */
-		              "%s<a name=\"%s/Backend\"></a>"
-		              "<a class=lfsb href=\"#%s/Backend\">Backend</a>"
-		              "",
-		              (flags & ST_SHLGNDS)?"<u>":"",
-		              px->id, px->id);
+	if (!stats_fill_be_stats(px, flags, stats, ST_F_TOTAL_FIELDS))
+		return 0;
 
-		if (flags & ST_SHLGNDS) {
-			/* balancing */
-			chunk_appendf(&trash, "<div class=tips>balancing: %s",
-			              backend_lb_algo_str(px->lbprm.algo & BE_LB_ALGO));
-
-			/* cookie */
-			if (px->cookie_name) {
-				chunk_appendf(&trash, ", cookie: '");
-				chunk_initlen(&src, px->cookie_name, 0, strlen(px->cookie_name));
-				chunk_htmlencode(&trash, &src);
-				chunk_appendf(&trash, "'");
-			}
-			chunk_appendf(&trash, "</div>");
-		}
-
-		chunk_appendf(&trash,
-		              "%s</td>"
-		              /* queue : current, max */
-		              "<td>%s</td><td>%s</td><td></td>"
-		              /* sessions rate : current, max, limit */
-		              "<td>%s</td><td>%s</td><td></td>"
-		              "",
-		              (flags & ST_SHLGNDS)?"</u>":"",
-		              U2H(px->nbpend) /* or px->totpend ? */, U2H(px->be_counters.nbpend_max),
-		              U2H(read_freq_ctr(&px->be_sess_per_sec)), U2H(px->be_counters.sps_max));
-
-		chunk_appendf(&trash,
-		              /* sessions: current, max, limit, total */
-		              "<td>%s</td><td>%s</td><td>%s</td>"
-		              "<td><u>%s<div class=tips><table class=det>"
-		              "<tr><th>Cum. sessions:</th><td>%s</td></tr>"
-		              "",
-		              U2H(px->beconn), U2H(px->be_counters.conn_max), U2H(px->fullconn),
-		              U2H(px->be_counters.cum_conn),
-		              U2H(px->be_counters.cum_conn));
-
-		/* http response (via hover): 1xx, 2xx, 3xx, 4xx, 5xx, other */
-		if (px->mode == PR_MODE_HTTP) {
-			chunk_appendf(&trash,
-			              "<tr><th>Cum. HTTP requests:</th><td>%s</td></tr>"
-			              "<tr><th>- HTTP 1xx responses:</th><td>%s</td></tr>"
-			              "<tr><th>- HTTP 2xx responses:</th><td>%s</td></tr>"
-			              "<tr><th>&nbsp;&nbsp;Compressed 2xx:</th><td>%s</td><td>(%d%%)</td></tr>"
-			              "<tr><th>- HTTP 3xx responses:</th><td>%s</td></tr>"
-			              "<tr><th>- HTTP 4xx responses:</th><td>%s</td></tr>"
-			              "<tr><th>- HTTP 5xx responses:</th><td>%s</td></tr>"
-			              "<tr><th>- other responses:</th><td>%s</td></tr>"
-			              "<tr><th>Intercepted requests:</th><td>%s</td></tr>"
-				      "<tr><th colspan=3>Avg over last 1024 success. conn.</th></tr>"
-			              "",
-			              U2H(px->be_counters.p.http.cum_req),
-			              U2H(px->be_counters.p.http.rsp[1]),
-			              U2H(px->be_counters.p.http.rsp[2]),
-			              U2H(px->be_counters.p.http.comp_rsp),
-			              px->be_counters.p.http.rsp[2] ?
-			              (int)(100*px->be_counters.p.http.comp_rsp/px->be_counters.p.http.rsp[2]) : 0,
-			              U2H(px->be_counters.p.http.rsp[3]),
-			              U2H(px->be_counters.p.http.rsp[4]),
-			              U2H(px->be_counters.p.http.rsp[5]),
-			              U2H(px->be_counters.p.http.rsp[0]),
-			              U2H(px->be_counters.intercepted_req));
-		}
-
-		chunk_appendf(&trash, "<tr><th>- Queue time:</th><td>%s</td><td>ms</td></tr>",   U2H(swrate_avg(px->be_counters.q_time, TIME_STATS_SAMPLES)));
-		chunk_appendf(&trash, "<tr><th>- Connect time:</th><td>%s</td><td>ms</td></tr>", U2H(swrate_avg(px->be_counters.c_time, TIME_STATS_SAMPLES)));
-		if (px->mode == PR_MODE_HTTP)
-			chunk_appendf(&trash, "<tr><th>- Response time:</th><td>%s</td><td>ms</td></tr>", U2H(swrate_avg(px->be_counters.d_time, TIME_STATS_SAMPLES)));
-		chunk_appendf(&trash, "<tr><th>- Total time:</th><td>%s</td><td>ms</td></tr>",   U2H(swrate_avg(px->be_counters.t_time, TIME_STATS_SAMPLES)));
-
-		chunk_appendf(&trash,
-		              "</table></div></u></td>"
-		              /* sessions: lbtot, last */
-		              "<td>%s</td><td>%s</td>"
-		              /* bytes: in */
-		              "<td>%s</td>"
-		              "",
-		              U2H(px->be_counters.cum_lbconn),
-		              human_time(be_lastsession(px), 1),
-		              U2H(px->be_counters.bytes_in));
-
-		chunk_appendf(&trash,
-			      /* bytes:out + compression stats (via hover): comp_in, comp_out, comp_byp */
-		              "<td>%s%s<div class=tips><table class=det>"
-			      "<tr><th>Response bytes in:</th><td>%s</td></tr>"
-			      "<tr><th>Compression in:</th><td>%s</td></tr>"
-			      "<tr><th>Compression out:</th><td>%s</td><td>(%d%%)</td></tr>"
-			      "<tr><th>Compression bypass:</th><td>%s</td></tr>"
-			      "<tr><th>Total bytes saved:</th><td>%s</td><td>(%d%%)</td></tr>"
-			      "</table></div>%s</td>",
-		              (px->be_counters.comp_in || px->be_counters.comp_byp) ? "<u>":"",
-		              U2H(px->be_counters.bytes_out),
-		              U2H(px->be_counters.bytes_out),
-		              U2H(px->be_counters.comp_in),
-			      U2H(px->be_counters.comp_out),
-			      px->be_counters.comp_in ? (int)(px->be_counters.comp_out * 100 / px->be_counters.comp_in) : 0,
-			      U2H(px->be_counters.comp_byp),
-			      U2H(px->be_counters.comp_in - px->be_counters.comp_out),
-			      px->be_counters.bytes_out ? (int)((px->be_counters.comp_in - px->be_counters.comp_out) * 100 / px->be_counters.bytes_out) : 0,
-		              (px->be_counters.comp_in || px->be_counters.comp_byp) ? "</u>":"");
-
-		chunk_appendf(&trash,
-		              /* denied: req, resp */
-		              "<td>%s</td><td>%s</td>"
-		              /* errors : request, connect */
-		              "<td></td><td>%s</td>"
-		              /* errors : response */
-		              "<td><u>%s<div class=tips>Connection resets during transfers: %lld client, %lld server</div></u></td>"
-		              /* warnings: retries, redispatches */
-		              "<td>%lld</td><td>%lld</td>"
-		              /* backend status: reflect backend status (up/down): we display UP
-		               * if the backend has known working servers or if it has no server at
-		               * all (eg: for stats). Then we display the total weight, number of
-		               * active and backups. */
-		              "<td class=ac>%s %s</td><td class=ac>&nbsp;</td><td class=ac>%d</td>"
-		              "<td class=ac>%d</td><td class=ac>%d</td>"
-		              "",
-		              U2H(px->be_counters.denied_req), U2H(px->be_counters.denied_resp),
-		              U2H(px->be_counters.failed_conns),
-		              U2H(px->be_counters.failed_resp),
-		              px->be_counters.cli_aborts,
-		              px->be_counters.srv_aborts,
-		              px->be_counters.retries, px->be_counters.redispatches,
-		              human_time(now.tv_sec - px->last_change, 1),
-		              (px->lbprm.tot_weight > 0 || !px->srv) ? "UP" :
-		              "<font color=\"red\"><b>DOWN</b></font>",
-		              (px->lbprm.tot_weight * px->lbprm.wmult + px->lbprm.wdiv - 1) / px->lbprm.wdiv,
-		              px->srv_act, px->srv_bck);
-
-		chunk_appendf(&trash,
-		              /* rest of backend: nothing, down transitions, total downtime, throttle */
-		              "<td class=ac>&nbsp;</td><td>%d</td>"
-		              "<td>%s</td>"
-		              "<td></td>"
-		              "</tr>",
-		              px->down_trans,
-		              px->srv?human_time(be_downtime(px), 1):"&nbsp;");
-	}
-	else { /* CSV mode */
-		chunk_appendf(&trash,
-		              /* pxid, name */
-		              "%s,BACKEND,"
-		              /* queue : current, max */
-		              "%d,%d,"
-		              /* sessions : current, max, limit, total */
-		              "%d,%d,%d,%lld,"
-		              /* bytes : in, out */
-		              "%lld,%lld,"
-		              /* denied: req, resp */
-		              "%lld,%lld,"
-		              /* errors : request, connect, response */
-		              ",%lld,%lld,"
-		              /* warnings: retries, redispatches */
-		              "%lld,%lld,"
-		              /* backend status: reflect backend status (up/down): we display UP
-		               * if the backend has known working servers or if it has no server at
-		               * all (eg: for stats). Then we display the total weight, number of
-		               * active and backups. */
-		              "%s,"
-		              "%d,%d,%d,"
-		              /* rest of backend: nothing, down transitions, last change, total downtime */
-		              ",%d,%d,%d,,"
-		              /* pid, iid, sid, throttle, lbtot, tracked, type */
-		              "%d,%d,0,,%lld,,%d,"
-		              /* rate, rate_lim, rate_max, */
-		              "%u,,%u,"
-		              /* check_status, check_code, check_duration */
-		              ",,,",
-		              px->id,
-		              px->nbpend /* or px->totpend ? */, px->be_counters.nbpend_max,
-		              px->beconn, px->be_counters.conn_max, px->fullconn, px->be_counters.cum_conn,
-		              px->be_counters.bytes_in, px->be_counters.bytes_out,
-		              px->be_counters.denied_req, px->be_counters.denied_resp,
-		              px->be_counters.failed_conns, px->be_counters.failed_resp,
-		              px->be_counters.retries, px->be_counters.redispatches,
-		              (px->lbprm.tot_weight > 0 || !px->srv) ? "UP" : "DOWN",
-		              (px->lbprm.tot_weight * px->lbprm.wmult + px->lbprm.wdiv - 1) / px->lbprm.wdiv,
-		              px->srv_act, px->srv_bck,
-		              px->down_trans, (int)(now.tv_sec - px->last_change),
-		              px->srv?be_downtime(px):0,
-		              relative_pid, px->uuid,
-		              px->be_counters.cum_lbconn, STATS_TYPE_BE,
-		              read_freq_ctr(&px->be_sess_per_sec),
-		              px->be_counters.sps_max);
-
-		/* http response: 1xx, 2xx, 3xx, 4xx, 5xx, other */
-		if (px->mode == PR_MODE_HTTP) {
-			for (i=1; i<6; i++)
-				chunk_appendf(&trash, "%lld,", px->be_counters.p.http.rsp[i]);
-			chunk_appendf(&trash, "%lld,", px->be_counters.p.http.rsp[0]);
-		}
-		else
-			chunk_appendf(&trash, ",,,,,,");
-
-		/* failed health analyses */
-		chunk_appendf(&trash, ",");
-
-		/* requests : req_rate, req_rate_max, req_tot, */
-		chunk_appendf(&trash, ",,,");
-
-		/* errors: cli_aborts, srv_aborts */
-		chunk_appendf(&trash, "%lld,%lld,",
-			      px->be_counters.cli_aborts, px->be_counters.srv_aborts);
-
-		/* compression: in, out, bypassed */
-		chunk_appendf(&trash, "%lld,%lld,%lld,",
-			      px->be_counters.comp_in, px->be_counters.comp_out, px->be_counters.comp_byp);
-
-		/* compression: comp_rsp */
-		chunk_appendf(&trash, "%lld,", px->be_counters.p.http.comp_rsp);
-
-		/* lastsess, last_chk, last_agt, */
-		chunk_appendf(&trash, "%d,,,", be_lastsession(px));
-
-		/* qtime, ctime, rtime, ttime, */
-		chunk_appendf(&trash, "%u,%u,%u,%u,",
-		              swrate_avg(px->be_counters.q_time, TIME_STATS_SAMPLES),
-		              swrate_avg(px->be_counters.c_time, TIME_STATS_SAMPLES),
-		              swrate_avg(px->be_counters.d_time, TIME_STATS_SAMPLES),
-		              swrate_avg(px->be_counters.t_time, TIME_STATS_SAMPLES));
-
-		/* finish with EOL */
-		chunk_appendf(&trash, "\n");
-	}
-	return 1;
+	return stats_dump_one_line(stats, flags, px, appctx);
 }
 
 /* Dumps the HTML table header for proxy <px> to the trash for and uses the state from
@@ -3927,6 +4612,14 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 	struct channel *rep = si_ic(si);
 	struct server *sv, *svs;	/* server and server-state, server-state=server or server->track */
 	struct listener *l;
+	unsigned int flags;
+
+	if (uri)
+		flags = uri->flags;
+	else if (strm_li(s)->bind_conf->level >= ACCESS_LVL_OPER)
+		flags = ST_SHLGNDS | ST_SHNODE | ST_SHDESC;
+	else
+		flags = ST_SHNODE | ST_SHDESC;
 
 	chunk_reset(&trash);
 
@@ -4018,7 +4711,7 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 			}
 
 			/* print the frontend */
-			if (stats_dump_li_stats(si, px, l, uri ? uri->flags : 0)) {
+			if (stats_dump_li_stats(si, px, l, flags)) {
 				if (bi_putchk(rep, &trash) == -1) {
 					si_applet_cant_put(si);
 					return 0;
@@ -4033,9 +4726,6 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 	case STAT_PX_ST_SV:
 		/* stats.sv has been initialized above */
 		for (; appctx->ctx.stats.sv != NULL; appctx->ctx.stats.sv = sv->next) {
-			enum srv_stats_state sv_state;
-			enum srv_stats_colour sv_colour;
-
 			if (buffer_almost_full(rep->buf)) {
 				si_applet_cant_put(si);
 				return 0;
@@ -4055,66 +4745,17 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 			while (svs->track)
 				svs = svs->track;
 
-			if (sv->state == SRV_ST_RUNNING || sv->state == SRV_ST_STARTING) {
-				if ((svs->check.state & CHK_ST_ENABLED) &&
-				    (svs->check.health < svs->check.rise + svs->check.fall - 1)) {
-					sv_state = SRV_STATS_STATE_UP_GOING_DOWN;
-					sv_colour = SRV_STATS_COLOUR_GOING_DOWN;
-				} else {
-					sv_state = SRV_STATS_STATE_UP;
-					sv_colour = SRV_STATS_COLOUR_UP;
-				}
-
-				if (sv_state == SRV_STATS_STATE_UP && !svs->uweight)
-					sv_colour = SRV_STATS_COLOUR_DRAINING;
-
-				if (sv->admin & SRV_ADMF_DRAIN) {
-					if (svs->agent.state & CHK_ST_ENABLED)
-						sv_state = SRV_STATS_STATE_DRAIN_AGENT;
-					else if (sv_state == SRV_STATS_STATE_UP_GOING_DOWN)
-						sv_state = SRV_STATS_STATE_DRAIN_GOING_DOWN;
-					else
-						sv_state = SRV_STATS_STATE_DRAIN;
-				}
-
-				if (sv_state == SRV_STATS_STATE_UP && !(svs->check.state & CHK_ST_ENABLED)) {
-					sv_state = SRV_STATS_STATE_NO_CHECK;
-					sv_colour = SRV_STATS_COLOUR_NO_CHECK;
-				}
-			}
-			else if (sv->state == SRV_ST_STOPPING) {
-				if ((!(sv->check.state & CHK_ST_ENABLED) && !sv->track) ||
-				    (svs->check.health == svs->check.rise + svs->check.fall - 1)) {
-					sv_state = SRV_STATS_STATE_NOLB;
-					sv_colour = SRV_STATS_COLOUR_NOLB;
-				} else {
-					sv_state = SRV_STATS_STATE_NOLB_GOING_DOWN;
-					sv_colour = SRV_STATS_COLOUR_GOING_DOWN;
-				}
-			}
-			else {	/* stopped */
-				if ((svs->agent.state & CHK_ST_ENABLED) && !svs->agent.health) {
-					sv_state = SRV_STATS_STATE_DOWN_AGENT;
-					sv_colour = SRV_STATS_COLOUR_DOWN;
-				} else if ((svs->check.state & CHK_ST_ENABLED) && !svs->check.health) {
-					sv_state = SRV_STATS_STATE_DOWN; /* DOWN */
-					sv_colour = SRV_STATS_COLOUR_DOWN;
-				} else if ((svs->agent.state & CHK_ST_ENABLED) || (svs->check.state & CHK_ST_ENABLED)) {
-					sv_state = SRV_STATS_STATE_GOING_UP;
-					sv_colour = SRV_STATS_COLOUR_GOING_UP;
-				} else {
-					sv_state = SRV_STATS_STATE_DOWN; /* DOWN, unchecked */
-					sv_colour = SRV_STATS_COLOUR_DOWN;
-				}
-			}
-
-			if (((sv_state <= 1) || (sv->admin & SRV_ADMF_MAINT)) && (appctx->ctx.stats.flags & STAT_HIDE_DOWN)) {
-				/* do not report servers which are DOWN */
-				appctx->ctx.stats.sv = sv->next;
+			/* do not report servers which are DOWN and not changing state */
+			if ((appctx->ctx.stats.flags & STAT_HIDE_DOWN) &&
+			    ((sv->admin & SRV_ADMF_MAINT) || /* server is in maintenance */
+			     (sv->state == SRV_ST_STOPPED && /* server is down */
+			      (!((svs->agent.state | svs->check.state) & CHK_ST_ENABLED) ||
+			       ((svs->agent.state & CHK_ST_ENABLED) && !svs->agent.health) ||
+			       ((svs->check.state & CHK_ST_ENABLED) && !svs->check.health))))) {
 				continue;
 			}
 
-			if (stats_dump_sv_stats(si, px, uri ? uri->flags : 0, sv, sv_state, sv_colour)) {
+			if (stats_dump_sv_stats(si, px, flags, sv)) {
 				if (bi_putchk(rep, &trash) == -1) {
 					si_applet_cant_put(si);
 					return 0;
@@ -4127,7 +4768,7 @@ static int stats_dump_proxy_to_buffer(struct stream_interface *si, struct proxy 
 
 	case STAT_PX_ST_BE:
 		/* print the backend */
-		if (stats_dump_be_stats(si, px, uri ? uri->flags : 0)) {
+		if (stats_dump_be_stats(si, px, flags)) {
 			if (bi_putchk(rep, &trash) == -1) {
 				si_applet_cant_put(si);
 				return 0;
@@ -4530,7 +5171,7 @@ static int stats_dump_stat_to_buffer(struct stream_interface *si, struct uri_aut
 	case STAT_ST_HEAD:
 		if (appctx->ctx.stats.flags & STAT_FMT_HTML)
 			stats_dump_html_head(uri);
-		else
+		else if (!(appctx->ctx.stats.flags & STAT_FMT_TYPED))
 			stats_dump_csv_header();
 
 		if (bi_putchk(rep, &trash) == -1) {
@@ -4983,6 +5624,7 @@ static int stats_send_http_redirect(struct stream_interface *si)
 		     "Content-Type: text/plain\r\n"
 		     "Connection: close\r\n"
 		     "Location: %s;st=%s%s%s%s\r\n"
+		     "Content-length: 0\r\n"
 		     "\r\n",
 		     uri->uri_prefix,
 		     ((appctx->ctx.stats.st_code > STAT_STATUS_INIT) &&
@@ -5398,7 +6040,7 @@ static int stats_dump_full_sess_to_buffer(struct stream_interface *si, struct st
 			              obj_base_ptr(conn->target));
 
 			chunk_appendf(&trash,
-			              "      flags=0x%08x fd=%d fd_spec_e=%02x fd_spec_p=%d updt=%d\n",
+			              "      flags=0x%08x fd=%d fd.state=%02x fd.cache=%d updt=%d\n",
 			              conn->flags,
 			              conn->t.sock.fd,
 			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].state : 0,
@@ -5489,6 +6131,7 @@ static int stats_dump_full_sess_to_buffer(struct stream_interface *si, struct st
 #if (defined SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB && TLS_TICKETS_NO > 0)
 static int stats_tlskeys_list(struct stream_interface *si) {
 	struct appctx *appctx = __objt_appctx(si->end);
+	struct tls_keys_ref *ref;
 
 	switch (appctx->st2) {
 	case STAT_ST_INIT:
@@ -5497,30 +6140,57 @@ static int stats_tlskeys_list(struct stream_interface *si) {
 		 * later and restart at the state "STAT_ST_INIT".
 		 */
 		chunk_reset(&trash);
-		chunk_appendf(&trash, "# id (file)\n");
+
+		if (appctx->st0 == STAT_CLI_O_TLSK_ENT)
+			chunk_appendf(&trash, "# id secret\n");
+		else
+			chunk_appendf(&trash, "# id (file)\n");
+
 		if (bi_putchk(si_ic(si), &trash) == -1) {
 			si_applet_cant_put(si);
 			return 0;
 		}
 
+		ref = appctx->ctx.tlskeys.ref;
+
 		/* Now, we start the browsing of the references lists.
 		 * Note that the following call to LIST_ELEM return bad pointer. The only
-		 * avalaible field of this pointer is <list>. It is used with the function
-		 * tlskeys_list_get_next() for retruning the first avalaible entry
+		 * available field of this pointer is <list>. It is used with the function
+		 * tlskeys_list_get_next() for retruning the first available entry
 		 */
-		appctx->ctx.tlskeys.ref = LIST_ELEM(&tlskeys_reference, struct tls_keys_ref *, list);
-		appctx->ctx.tlskeys.ref = tlskeys_list_get_next(appctx->ctx.tlskeys.ref, &tlskeys_reference);
+		if (ref == NULL) {
+			ref = LIST_ELEM(&tlskeys_reference, struct tls_keys_ref *, list);
+			ref = tlskeys_list_get_next(ref, &tlskeys_reference);
+		}
 
 		appctx->st2 = STAT_ST_LIST;
 		/* fall through */
 
 	case STAT_ST_LIST:
-		while (appctx->ctx.tlskeys.ref) {
+		while (ref) {
+			int i;
+			int head = ref->tls_ticket_enc_index;
+
 			chunk_reset(&trash);
+			if (appctx->st0 == STAT_CLI_O_TLSK_ENT)
+				chunk_appendf(&trash, "# ");
+			chunk_appendf(&trash, "%d (%s)\n", ref->unique_id,
+			              ref->filename);
 
-			chunk_appendf(&trash, "%d (%s)\n", appctx->ctx.tlskeys.ref->unique_id,
-			              appctx->ctx.tlskeys.ref->filename);
+			if (appctx->st0 == STAT_CLI_O_TLSK_ENT) {
+				for (i = 0; i < TLS_TICKETS_NO; i++) {
+					struct chunk *t2 = get_trash_chunk();
+					int b64_len;
 
+					chunk_reset(t2);
+					b64_len = a2base64((char *)(ref->tlskeys + (head + 2 + i) % TLS_TICKETS_NO),
+					                   sizeof(struct tls_sess_key), t2->str, t2->size);
+					if (b64_len < 0)
+						return 0;
+					t2->len = b64_len;
+					chunk_appendf(&trash, "%d.%d %s\n", ref->unique_id, i, t2->str);
+				}
+			}
 			if (bi_putchk(si_ic(si), &trash) == -1) {
 				/* let's try again later from this stream. We add ourselves into
 				 * this stream's users so that it can remove us upon termination.
@@ -5529,8 +6199,12 @@ static int stats_tlskeys_list(struct stream_interface *si) {
 				return 0;
 			}
 
+			if (appctx->ctx.tlskeys.ref) /* don't display everything if don't null */
+				break;
+
 			/* get next list entry and check the end of the list */
-			appctx->ctx.tlskeys.ref = tlskeys_list_get_next(appctx->ctx.tlskeys.ref, &tlskeys_reference);
+			ref = tlskeys_list_get_next(ref, &tlskeys_reference);
+
 		}
 
 		appctx->st2 = STAT_ST_FIN;
@@ -5563,8 +6237,8 @@ static int stats_pats_list(struct stream_interface *si)
 
 		/* Now, we start the browsing of the references lists.
 		 * Note that the following call to LIST_ELEM return bad pointer. The only
-		 * avalaible field of this pointer is <list>. It is used with the function
-		 * pat_list_get_next() for retruning the first avalaible entry
+		 * available field of this pointer is <list>. It is used with the function
+		 * pat_list_get_next() for retruning the first available entry
 		 */
 		appctx->ctx.map.ref = LIST_ELEM(&pattern_reference, struct pat_ref *, list);
 		appctx->ctx.map.ref = pat_list_get_next(appctx->ctx.map.ref, &pattern_reference,
@@ -5628,10 +6302,10 @@ static int stats_map_lookup(struct stream_interface *si)
 			chunk_reset(&trash);
 
 			/* execute pattern matching */
-			sample.type = SMP_T_STR;
-			sample.flags |= SMP_F_CONST;
-			sample.data.str.len = appctx->ctx.map.chunk.len;
-			sample.data.str.str = appctx->ctx.map.chunk.str;
+			sample.data.type = SMP_T_STR;
+			sample.flags = SMP_F_CONST;
+			sample.data.u.str.len = appctx->ctx.map.chunk.len;
+			sample.data.u.str.str = appctx->ctx.map.chunk.str;
 			if (appctx->ctx.map.expr->pat_head->match &&
 			    sample_convert(&sample, appctx->ctx.map.expr->pat_head->expect_type))
 				pat = appctx->ctx.map.expr->pat_head->match(&sample, appctx->ctx.map.expr, 1);
@@ -5691,9 +6365,9 @@ static int stats_map_lookup(struct stream_interface *si)
 
 				/* display return value */
 				if (appctx->ctx.map.display_flags == PAT_REF_MAP) {
-					if (pat->smp && pat->ref && pat->ref->sample)
-						chunk_appendf(&trash, ", value=\"%s\", type=\"%s\"",
-						              pat->ref->sample, smp_to_type[pat->smp->type]);
+					if (pat->data && pat->ref && pat->ref->sample)
+						chunk_appendf(&trash, ", value=\"%s\", type=\"%s\"", pat->ref->sample,
+						              smp_to_type[pat->data->type]);
 					else
 						chunk_appendf(&trash, ", value=none");
 				}
@@ -5853,8 +6527,7 @@ static int stats_dump_sess_to_buffer(struct stream_interface *si)
 			chunk_appendf(&trash,
 				     "%p: proto=%s",
 				     curr_sess,
-				     strm_li(curr_sess)->proto->name);
-
+				     strm_li(curr_sess) ? strm_li(curr_sess)->proto->name : "?");
 
 			conn = objt_conn(strm_orig(curr_sess));
 			switch (conn ? addr_to_str(&conn->addr.from, pn, sizeof(pn)) : AF_UNSPEC) {
@@ -6009,9 +6682,11 @@ static void cli_release_handler(struct appctx *appctx)
 	}
 	else if (appctx->st0 == STAT_CLI_PRINT_FREE) {
 		free(appctx->ctx.cli.err);
+		appctx->ctx.cli.err = NULL;
 	}
 	else if (appctx->st0 == STAT_CLI_O_MLOOK) {
 		free(appctx->ctx.map.chunk.str);
+		appctx->ctx.map.chunk.str = NULL;
 	}
 }
 
@@ -6250,23 +6925,33 @@ static int stats_dump_resolvers_to_buffer(struct stream_interface *si)
 		/* fall through */
 
 	case STAT_ST_LIST:
-		presolvers = appctx->ctx.resolvers.ptr;
-		chunk_appendf(&trash, "Resolvers section %s\n", presolvers->id);
-		list_for_each_entry(pnameserver, &presolvers->nameserver_list, list) {
-			chunk_appendf(&trash, " nameserver %s:\n", pnameserver->id);
-			chunk_appendf(&trash, "  sent: %ld\n", pnameserver->counters.sent);
-			chunk_appendf(&trash, "  valid: %ld\n", pnameserver->counters.valid);
-			chunk_appendf(&trash, "  update: %ld\n", pnameserver->counters.update);
-			chunk_appendf(&trash, "  cname: %ld\n", pnameserver->counters.cname);
-			chunk_appendf(&trash, "  cname_error: %ld\n", pnameserver->counters.cname_error);
-			chunk_appendf(&trash, "  any_err: %ld\n", pnameserver->counters.any_err);
-			chunk_appendf(&trash, "  nx: %ld\n", pnameserver->counters.nx);
-			chunk_appendf(&trash, "  timeout: %ld\n", pnameserver->counters.timeout);
-			chunk_appendf(&trash, "  refused: %ld\n", pnameserver->counters.refused);
-			chunk_appendf(&trash, "  other: %ld\n", pnameserver->counters.other);
-			chunk_appendf(&trash, "  invalid: %ld\n", pnameserver->counters.invalid);
-			chunk_appendf(&trash, "  too_big: %ld\n", pnameserver->counters.too_big);
-			chunk_appendf(&trash, "  outdated: %ld\n", pnameserver->counters.outdated);
+		if (LIST_ISEMPTY(&dns_resolvers)) {
+			chunk_appendf(&trash, "No resolvers found\n");
+		}
+		else {
+			list_for_each_entry(presolvers, &dns_resolvers, list) {
+				if (appctx->ctx.resolvers.ptr != NULL && appctx->ctx.resolvers.ptr != presolvers)
+					continue;
+
+				chunk_appendf(&trash, "Resolvers section %s\n", presolvers->id);
+				list_for_each_entry(pnameserver, &presolvers->nameserver_list, list) {
+					chunk_appendf(&trash, " nameserver %s:\n", pnameserver->id);
+					chunk_appendf(&trash, "  sent: %ld\n", pnameserver->counters.sent);
+					chunk_appendf(&trash, "  valid: %ld\n", pnameserver->counters.valid);
+					chunk_appendf(&trash, "  update: %ld\n", pnameserver->counters.update);
+					chunk_appendf(&trash, "  cname: %ld\n", pnameserver->counters.cname);
+					chunk_appendf(&trash, "  cname_error: %ld\n", pnameserver->counters.cname_error);
+					chunk_appendf(&trash, "  any_err: %ld\n", pnameserver->counters.any_err);
+					chunk_appendf(&trash, "  nx: %ld\n", pnameserver->counters.nx);
+					chunk_appendf(&trash, "  timeout: %ld\n", pnameserver->counters.timeout);
+					chunk_appendf(&trash, "  refused: %ld\n", pnameserver->counters.refused);
+					chunk_appendf(&trash, "  other: %ld\n", pnameserver->counters.other);
+					chunk_appendf(&trash, "  invalid: %ld\n", pnameserver->counters.invalid);
+					chunk_appendf(&trash, "  too_big: %ld\n", pnameserver->counters.too_big);
+					chunk_appendf(&trash, "  truncated: %ld\n", pnameserver->counters.truncated);
+					chunk_appendf(&trash, "  outdated: %ld\n", pnameserver->counters.outdated);
+				}
+			}
 		}
 
 		/* display response */
@@ -6419,12 +7104,12 @@ static int stats_dump_errors_to_buffer(struct stream_interface *si)
 		}
 
 		/* OK, ptr >= 0, so we have to dump the current line */
-		while (appctx->ctx.errors.ptr < es->len && appctx->ctx.errors.ptr < sizeof(es->buf)) {
+		while (es->buf && appctx->ctx.errors.ptr < es->len && appctx->ctx.errors.ptr < global.tune.bufsize) {
 			int newptr;
 			int newline;
 
 			newline = appctx->ctx.errors.bol;
-			newptr = dump_text_line(&trash, es->buf, sizeof(es->buf), es->len, &newline, appctx->ctx.errors.ptr);
+			newptr = dump_text_line(&trash, es->buf, global.tune.bufsize, es->len, &newline, appctx->ctx.errors.ptr);
 			if (newptr == appctx->ctx.errors.ptr)
 				return 0;
 
@@ -6444,6 +7129,38 @@ static int stats_dump_errors_to_buffer(struct stream_interface *si)
 			appctx->ctx.errors.buf = 0;
 			appctx->ctx.errors.px = appctx->ctx.errors.px->next;
 		}
+	}
+
+	/* dump complete */
+	return 1;
+}
+
+/* This function dumps all environmnent variables to the buffer. It returns 0
+ * if the output buffer is full and it needs to be called again, otherwise
+ * non-zero. Dumps only one entry if st2 == STAT_ST_END.
+ */
+static int stats_dump_env_to_buffer(struct stream_interface *si)
+{
+	struct appctx *appctx = __objt_appctx(si->end);
+
+	if (unlikely(si_ic(si)->flags & (CF_WRITE_ERROR|CF_SHUTW)))
+		return 1;
+
+	chunk_reset(&trash);
+
+	/* we have two inner loops here, one for the proxy, the other one for
+	 * the buffer.
+	 */
+	while (*appctx->ctx.env.var) {
+		chunk_printf(&trash, "%s\n", *appctx->ctx.env.var);
+
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si_applet_cant_put(si);
+			return 0;
+		}
+		if (appctx->st2 == STAT_ST_END)
+			break;
+		appctx->ctx.env.var++;
 	}
 
 	/* dump complete */

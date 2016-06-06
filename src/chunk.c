@@ -66,6 +66,17 @@ int alloc_trash_buffers(int bufsize)
 }
 
 /*
+ * free the trash buffers
+ */
+void free_trash_buffers(void)
+{
+	free(trash_buf2);
+	free(trash_buf1);
+	trash_buf2 = NULL;
+	trash_buf1 = NULL;
+}
+
+/*
  * Does an snprintf() at the beginning of chunk <chk>, respecting the limit of
  * at most chk->size chars. If the chk->len is over, nothing is added. Returns
  * the new chunk size, or < 0 in case of failure.
@@ -100,7 +111,7 @@ int chunk_appendf(struct chunk *chk, const char *fmt, ...)
 	va_list argp;
 	int ret;
 
-	if (!chk->str || !chk->size)
+	if (chk->len < 0 || !chk->str || !chk->size)
 		return 0;
 
 	va_start(argp, fmt);
@@ -124,6 +135,9 @@ int chunk_htmlencode(struct chunk *dst, struct chunk *src)
 	int i, l;
 	int olen, free;
 	char c;
+
+	if (dst->len < 0)
+		return dst->len;
 
 	olen = dst->len;
 
@@ -165,6 +179,9 @@ int chunk_asciiencode(struct chunk *dst, struct chunk *src, char qc)
 	int i, l;
 	int olen, free;
 	char c;
+
+	if (dst->len < 0)
+		return dst->len;
 
 	olen = dst->len;
 
