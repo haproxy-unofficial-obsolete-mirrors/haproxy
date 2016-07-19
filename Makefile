@@ -49,6 +49,7 @@
 #   ARCH may be useful to force build of 32-bit binary on 64-bit systems
 #   CFLAGS is automatically set for the specified CPU and may be overridden.
 #   LDFLAGS is automatically set to -g and may be overridden.
+#   DEP may be cleared to ignore changes to include files during development
 #   SMALL_OPTS may be used to specify some options to shrink memory usage.
 #   DEBUG may be used to set some internal debugging options.
 #   ADDINC may be used to complete the include path in the form -Ipath.
@@ -767,6 +768,13 @@ WRAPPER_OBJS = src/haproxy-systemd-wrapper.o
 # Not used right now
 LIB_EBTREE = $(EBTREE_DIR)/libebtree.a
 
+# Used only for forced dependency checking. May be cleared during development.
+INCLUDES = $(wildcard include/*/*.h ebtree/*.h)
+DEP = $(INCLUDES) .build_opts
+
+# Used only to force a rebuild if some build options change
+.build_opts: $(shell rm -f .build_opts.new; echo \'$(TARGET) $(BUILD_OPTIONS) $(VERBOSE_CFLAGS)\' > .build_opts.new; if cmp -s .build_opts .build_opts.new; then rm -f .build_opts.new; else mv -f .build_opts.new .build_opts; fi)
+
 haproxy: $(OBJS) $(OPTIONS_OBJS) $(EBTREE_OBJS)
 	$(LD) $(LDFLAGS) -o $@ $^ $(LDOPTS)
 
@@ -779,13 +787,13 @@ $(LIB_EBTREE): $(EBTREE_OBJS)
 objsize: haproxy
 	@objdump -t $^|grep ' g '|grep -F '.text'|awk '{print $$5 FS $$6}'|sort
 
-%.o:	%.c
+%.o:	%.c $(DEP)
 	$(CC) $(COPTS) -c -o $@ $<
 
-src/trace.o: src/trace.c
+src/trace.o: src/trace.c $(DEP)
 	$(CC) $(TRACE_COPTS) -c -o $@ $<
 
-src/haproxy.o:	src/haproxy.c
+src/haproxy.o:	src/haproxy.c $(DEP)
 	$(CC) $(COPTS) \
 	      -DBUILD_TARGET='"$(strip $(TARGET))"' \
 	      -DBUILD_ARCH='"$(strip $(ARCH))"' \
@@ -795,12 +803,12 @@ src/haproxy.o:	src/haproxy.c
 	      -DBUILD_OPTIONS='"$(strip $(BUILD_OPTIONS))"' \
 	       -c -o $@ $<
 
-src/haproxy-systemd-wrapper.o:	src/haproxy-systemd-wrapper.c
+src/haproxy-systemd-wrapper.o:	src/haproxy-systemd-wrapper.c $(DEP)
 	$(CC) $(COPTS) \
 	      -DSBINDIR='"$(strip $(SBINDIR))"' \
 	       -c -o $@ $<
 
-src/dlmalloc.o: $(DLMALLOC_SRC)
+src/dlmalloc.o: $(DLMALLOC_SRC) $(DEP)
 	$(CC) $(COPTS) -DDEFAULT_MMAP_THRESHOLD=$(DLMALLOC_THRES) -c -o $@ $<
 
 install-man:
@@ -816,7 +824,13 @@ install-doc:
 		install -m 644 doc/$$x.txt "$(DESTDIR)$(DOCDIR)" ; \
 	done
 
-install-bin: haproxy $(EXTRA)
+install-bin:
+	@for i in haproxy $(EXTRA); do \
+		if ! [ -e "$$i" ]; then \
+			echo "Please run 'make' before 'make install'."; \
+			exit 1; \
+		fi; \
+	done
 	install -d "$(DESTDIR)$(SBINDIR)"
 	install haproxy $(EXTRA) "$(DESTDIR)$(SBINDIR)"
 
@@ -832,7 +846,7 @@ uninstall:
 	rm -f "$(DESTDIR)$(SBINDIR)"/haproxy-systemd-wrapper
 
 clean:
-	rm -f *.[oas] src/*.[oas] ebtree/*.[oas] haproxy test
+	rm -f *.[oas] src/*.[oas] ebtree/*.[oas] haproxy test .build_opts .build_opts.new
 	for dir in . src include/* doc ebtree; do rm -f $$dir/*~ $$dir/*.rej $$dir/core; done
 	rm -f haproxy-$(VERSION).tar.gz haproxy-$(VERSION)$(SUBVERS).tar.gz
 	rm -f haproxy-$(VERSION) haproxy-$(VERSION)$(SUBVERS) nohup.out gmon.out

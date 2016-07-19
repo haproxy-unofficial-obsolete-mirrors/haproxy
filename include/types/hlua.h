@@ -31,9 +31,12 @@ struct stream;
 #define HLUA_WAKEREQWR 0x00000008
 #define HLUA_EXIT      0x00000010
 #define HLUA_MUST_GC   0x00000020
+#define HLUA_STOP      0x00000040
 
 #define HLUA_F_AS_STRING    0x01
 #define HLUA_F_MAY_USE_HTTP 0x02
+
+#define HLUA_TXN_NOTERM 0x00000001
 
 #define HLUA_CONCAT_BLOCSZ 2048
 
@@ -109,6 +112,7 @@ struct hlua_txn {
 	struct stream *s;
 	struct proxy *p;
 	int dir;                /* SMP_OPT_DIR_{REQ,RES} */
+	int flags;
 };
 
 /* This struct contains the applet context. */

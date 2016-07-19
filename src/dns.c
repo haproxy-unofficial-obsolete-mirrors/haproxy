@@ -757,11 +757,11 @@ int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
 				continue;
 
 			if ((rec[i].type == AF_INET &&
-			     in_net_ipv4((struct in_addr *)rec[i].ip,
+			     in_net_ipv4(rec[i].ip,
 			                 &resol->opts->pref_net[j].mask.in4,
 			                 &resol->opts->pref_net[j].addr.in4)) ||
 			    (rec[i].type == AF_INET6 &&
-			     in_net_ipv6((struct in6_addr *)rec[i].ip,
+			     in_net_ipv6(rec[i].ip,
 			                 &resol->opts->pref_net[j].mask.in6,
 			                 &resol->opts->pref_net[j].addr.in6))) {
 				score += 2;
@@ -772,7 +772,7 @@ int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
 		/* Check for current ip matching. */
 		if (rec[i].type == currentip_sin_family &&
 		    ((currentip_sin_family == AF_INET &&
-		      *(uint32_t *)rec[i].ip == *(uint32_t *)currentip) ||
+		      memcmp(rec[i].ip, currentip, 4) == 0) ||
 		     (currentip_sin_family == AF_INET6 &&
 		      memcmp(rec[i].ip, currentip, 16) == 0))) {
 			score += 1;
@@ -988,14 +988,7 @@ int dns_build_query(int query_id, int query_type, char *hostname_dn, int hostnam
 	/* set dns query headers */
 	dns = (struct dns_header *)ptr;
 	dns->id = (unsigned short) htons(query_id);
-	dns->qr = 0;			/* query */
-	dns->opcode = 0;
-	dns->aa = 0;
-	dns->tc = 0;
-	dns->rd = 1;			/* recursion desired */
-	dns->ra = 0;
-	dns->z = 0;
-	dns->rcode = 0;
+	dns->flags = htons(0x0100); /* qr=0, opcode=0, aa=0, tc=0, rd=1, ra=0, z=0, rcode=0 */
 	dns->qdcount = htons(1);	/* 1 question */
 	dns->ancount = 0;
 	dns->nscount = 0;

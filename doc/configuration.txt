@@ -3512,7 +3512,8 @@ http-check send-state
 
   See also : "option httpchk", "http-check disable-on-404"
 
-http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
+http-request { allow | tarpit | auth [realm <realm>] | redirect <rule> |
+              deny [deny_status <status>] |
               add-header <name> <fmt> | set-header <name> <fmt> |
               capture <sample> [ len <length> | id <id> ] |
               del-header <name> | set-nice <nice> | set-log-level <level> |
@@ -3547,8 +3548,10 @@ http-request { allow | deny | tarpit | auth [realm <realm>] | redirect <rule> |
       pass the check. No further "http-request" rules are evaluated.
 
     - "deny" : this stops the evaluation of the rules and immediately rejects
-      the request and emits an HTTP 403 error. No further "http-request" rules
-      are evaluated.
+      the request and emits an HTTP 403 error, or optionally the status code
+      specified as an argument to "deny_status". The list of permitted status
+      codes is limited to those that can be overridden by the "errorfile"
+      directive. No further "http-request" rules are evaluated.
 
     - "tarpit" : this stops the evaluation of the rules and immediately blocks
       the request without responding for a delay specified by "timeout tarpit"
@@ -8652,6 +8655,15 @@ tcp-request connection <action> [{if | unless} <condition>]
         of load balancers are passed through by traffic coming from public
         hosts.
 
+    - expect-netscaler-cip layer4 :
+        configures the client-facing connection to receive a NetScaler Client
+        IP insertion protocol header before any byte is read from the socket.
+        This is equivalent to having the "accept-netscaler-cip" keyword on the
+        "bind" line, except that using the TCP rule allows the PROXY protocol
+        to be accepted only for certain IP address ranges using an ACL. This
+        is convenient when multiple layers of load balancers are passed
+        through by traffic coming from public hosts.
+
     - capture <sample> len <length> :
         This only applies to "tcp-request content" rules. It captures sample
         expression <sample> from the request buffer, and converts it to a
@@ -9736,6 +9748,20 @@ provided immediately after the setting name.
 
 The currently supported settings are the following ones.
 
+accept-netscaler-cip <magic number>
+  Enforces the use of the NetScaler Client IP insertion protocol over any
+  connection accepted by any of the TCP sockets declared on the same line. The
+  NetScaler Client IP insertion protocol dictates the layer 3/4 addresses of
+  the incoming connection to be used everywhere an address is used, with the
+  only exception of "tcp-request connection" rules which will only see the
+  real connection address. Logs will reflect the addresses indicated in the
+  protocol, unless it is violated, in which case the real  address will still
+  be used. This keyword combined with support from external components can be
+  used as an efficient and reliable alternative to the X-Forwarded-For
+  mechanism which is not always reliable and not even always usable. See also
+  "tcp-request connection expect-netscaler-cip" for a finer-grained setting of
+  which client is allowed to use the protocol.
+
 accept-proxy
   Enforces the use of the PROXY protocol over any connection accepted by any of
   the sockets declared on the same line. Versions 1 and 2 of the PROXY protocol
@@ -9932,8 +9958,8 @@ crt-list <file>
   the 'strict-sni' option may be used.
 
   Multi-cert bundling (see "crt") is supported with crt-list, as long as only
-  the base name is given in the crt-list. Due to the nature of bundling, all SNI
-  filters given to a multi-cert bundle entry are ignored.
+  the base name is given in the crt-list. SNI filter will do the same work on
+  all bundled certificates.
 
 defer-accept
   Is an optional keyword which is supported only on certain Linux kernels. It
@@ -10794,16 +10820,18 @@ send-proxy
   connection established to this server. The PROXY protocol informs the other
   end about the layer 3/4 addresses of the incoming connection, so that it can
   know the client's address or the public address it accessed to, whatever the
-  upper layer protocol. For connections accepted by an "accept-proxy" listener,
-  the advertised address will be used. Only TCPv4 and TCPv6 address families
-  are supported. Other families such as Unix sockets, will report an UNKNOWN
-  family. Servers using this option can fully be chained to another instance of
-  haproxy listening with an "accept-proxy" setting. This setting must not be
-  used if the server isn't aware of the protocol. When health checks are sent
-  to the server, the PROXY protocol is automatically used when this option is
-  set, unless there is an explicit "port" or "addr" directive, in which case an
-  explicit "check-send-proxy" directive would also be needed to use the PROXY
-  protocol. See also the "accept-proxy" option of the "bind" keyword.
+  upper layer protocol. For connections accepted by an "accept-proxy" or
+  "accept-netscaler-cip" listener, the advertised address will be used. Only
+  TCPv4 and TCPv6 address families are supported. Other families such as
+  Unix sockets, will report an UNKNOWN family. Servers using this option can
+  fully be chained to another instance of haproxy listening with an
+  "accept-proxy" setting. This setting must not be used if the server isn't
+  aware of the protocol. When health checks are sent to the server, the PROXY
+  protocol is automatically used when this option is set, unless there is an
+  explicit "port" or "addr" directive, in which case an explicit
+  "check-send-proxy" directive would also be needed to use the PROXY protocol.
+  See also the "accept-proxy" and "accept-netscaler-cip" option of the "bind"
+  keyword.
 
   Supported in default-server: No
 
@@ -12904,9 +12932,10 @@ src : ip
   IP and works on both IPv4 and IPv6 tables. On IPv6 tables, IPv4 addresses are
   mapped to their IPv6 equivalent, according to RFC 4291. Note that it is the
   TCP-level source address which is used, and not the address of a client
-  behind a proxy. However if the "accept-proxy" bind directive is used, it can
-  be the address of a client behind another PROXY-protocol compatible component
-  for all rule sets except "tcp-request connection" which sees the real address.
+  behind a proxy. However if the "accept-proxy" or "accept-netscaler-cip" bind
+  directive is used, it can be the address of a client behind another
+  PROXY-protocol compatible component for all rule sets except
+  "tcp-request connection" which sees the real address.
 
   Example:
        # add an HTTP header in requests with the originating address' country
@@ -14137,6 +14166,18 @@ urlp_val([<name>[,<delim>])] : integer
   and converts it to an integer value. This can be used for session stickiness
   based on a user ID for example, or with ACLs to match a page number or price.
 
+url32 : integer
+  This returns a 32-bit hash of the value obtained by concatenating the first
+  Host header and the whole URL including parameters (not only the path part of
+  the request, as in the "base32" fetch above). This is useful to track per-URL
+  activity. A shorter hash is stored, saving a lot of memory. The output type
+  is an unsigned integer.
+
+url32+src : binary
+  This returns the concatenation of the "url32" fetch and the "src" fetch. The
+  resulting type is of type binary, with a size of 8 or 20 bytes depending on
+  the source address family. This can be used to track per-IP, per-URL counters.
+
 
 7.4. Pre-defined ACLs
 ---------------------
@@ -14350,8 +14391,9 @@ Detailed fields description :
     connection to haproxy. If the connection was accepted on a UNIX socket
     instead, the IP address would be replaced with the word "unix". Note that
     when the connection is accepted on a socket configured with "accept-proxy"
-    and the PROXY protocol is correctly used, then the logs will reflect the
-    forwarded connection's information.
+    and the PROXY protocol is correctly used, or with a "accept-netscaler-cip"
+    and the NetScaler Client IP insetion protocol is correctly used, then the
+    logs will reflect the forwarded connection's information.
 
   - "client_port" is the TCP port of the client which initiated the connection.
     If the connection was accepted on a UNIX socket instead, the port would be
@@ -14530,8 +14572,9 @@ Detailed fields description :
     connection to haproxy. If the connection was accepted on a UNIX socket
     instead, the IP address would be replaced with the word "unix". Note that
     when the connection is accepted on a socket configured with "accept-proxy"
-    and the PROXY protocol is correctly used, then the logs will reflect the
-    forwarded connection's information.
+    and the PROXY protocol is correctly used, or with a "accept-netscaler-cip"
+    and the NetScaler Client IP insetion protocol is correctly used, then the
+    logs will reflect the forwarded connection's information.
 
   - "client_port" is the TCP port of the client which initiated the connection.
     If the connection was accepted on a UNIX socket instead, the port would be

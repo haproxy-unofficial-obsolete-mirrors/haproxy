@@ -106,6 +106,8 @@ struct appctx {
 		} map;
 #if (defined SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB && TLS_TICKETS_NO > 0)
 		struct {
+			int dump_all;
+			int dump_keys_index;
 			struct tls_keys_ref *ref;
 		} tlskeys;
 #endif

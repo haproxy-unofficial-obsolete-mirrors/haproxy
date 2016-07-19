@@ -1446,8 +1446,10 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 		}
 		else if (strcmp(args[1], "tls-keys") == 0) {
 #if (defined SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB && TLS_TICKETS_NO > 0)
+			appctx->ctx.tlskeys.dump_all = 0;
 			/* no parameter, shows only file list */
 			if (!*args[2]) {
+				appctx->ctx.tlskeys.dump_all = 1;
 				appctx->st2 = STAT_ST_INIT;
 				appctx->st0 = STAT_CLI_O_TLSK;
 				return 1;
@@ -1456,6 +1458,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			if (args[2][0] == '*') {
 				/* list every TLS ticket keys */
 				appctx->ctx.tlskeys.ref = NULL;
+				appctx->ctx.tlskeys.dump_all = 1;
 			} else {
 				appctx->ctx.tlskeys.ref = tlskeys_ref_lookup_ref(args[2]);
 				if(!appctx->ctx.tlskeys.ref) {
@@ -3197,15 +3200,22 @@ static int stats_dump_servers_state_to_buffer(struct stream_interface *si)
 
 	chunk_reset(&trash);
 
-	if (!appctx->ctx.server_state.px) {
+	if (appctx->st2 == STAT_ST_INIT) {
+		if (!appctx->ctx.server_state.px)
+			appctx->ctx.server_state.px = proxy;
+		appctx->st2 = STAT_ST_HEAD;
+	}
+
+	if (appctx->st2 == STAT_ST_HEAD) {
 		chunk_printf(&trash, "%d\n# %s\n", SRV_STATE_FILE_VERSION, SRV_STATE_FILE_FIELD_NAMES);
 		if (bi_putchk(si_ic(si), &trash) == -1) {
 			si_applet_cant_put(si);
 			return 0;
 		}
-		appctx->ctx.server_state.px = proxy;
+		appctx->st2 = STAT_ST_INFO;
 	}
 
+	/* STAT_ST_INFO */
 	for (; appctx->ctx.server_state.px != NULL; appctx->ctx.server_state.px = curproxy->next) {
 		curproxy = appctx->ctx.server_state.px;
 		/* servers are only in backends */
@@ -3692,7 +3702,7 @@ static int stats_dump_fields_html(struct chunk *out, const struct field *stats, 
 			if (stats[ST_F_AGENT_CODE].type)
 				chunk_appendf(out, "/%d", stats[ST_F_AGENT_CODE].u.u32);
 
-			if (stats[ST_F_AGENT_DURATION].type && stats[ST_F_AGENT_DURATION].u.u64 >= 0)
+			if (stats[ST_F_AGENT_DURATION].type)
 				chunk_appendf(out, " in %lums", (long)stats[ST_F_AGENT_DURATION].u.u64);
 
 			chunk_appendf(out, "<div class=tips>%s", field_str(stats, ST_F_AGENT_DESC));
@@ -3712,7 +3722,7 @@ static int stats_dump_fields_html(struct chunk *out, const struct field *stats, 
 			if (stats[ST_F_CHECK_CODE].type)
 				chunk_appendf(out, "/%d", stats[ST_F_CHECK_CODE].u.u32);
 
-			if (stats[ST_F_CHECK_DURATION].type && stats[ST_F_CHECK_DURATION].u.u64 >= 0)
+			if (stats[ST_F_CHECK_DURATION].type)
 				chunk_appendf(out, " in %lums", (long)stats[ST_F_CHECK_DURATION].u.u64);
 
 			chunk_appendf(out, "<div class=tips>%s", field_str(stats, ST_F_CHECK_DESC));
@@ -6131,7 +6141,6 @@ static int stats_dump_full_sess_to_buffer(struct stream_interface *si, struct st
 #if (defined SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB && TLS_TICKETS_NO > 0)
 static int stats_tlskeys_list(struct stream_interface *si) {
 	struct appctx *appctx = __objt_appctx(si->end);
-	struct tls_keys_ref *ref;
 
 	switch (appctx->st2) {
 	case STAT_ST_INIT:
@@ -6151,45 +6160,51 @@ static int stats_tlskeys_list(struct stream_interface *si) {
 			return 0;
 		}
 
-		ref = appctx->ctx.tlskeys.ref;
+		appctx->ctx.tlskeys.dump_keys_index = 0;
 
 		/* Now, we start the browsing of the references lists.
 		 * Note that the following call to LIST_ELEM return bad pointer. The only
 		 * available field of this pointer is <list>. It is used with the function
 		 * tlskeys_list_get_next() for retruning the first available entry
 		 */
-		if (ref == NULL) {
-			ref = LIST_ELEM(&tlskeys_reference, struct tls_keys_ref *, list);
-			ref = tlskeys_list_get_next(ref, &tlskeys_reference);
+		if (appctx->ctx.tlskeys.ref == NULL) {
+			appctx->ctx.tlskeys.ref = LIST_ELEM(&tlskeys_reference, struct tls_keys_ref *, list);
+			appctx->ctx.tlskeys.ref = tlskeys_list_get_next(appctx->ctx.tlskeys.ref, &tlskeys_reference);
 		}
 
 		appctx->st2 = STAT_ST_LIST;
 		/* fall through */
 
 	case STAT_ST_LIST:
-		while (ref) {
-			int i;
-			int head = ref->tls_ticket_enc_index;
+		while (appctx->ctx.tlskeys.ref) {
+			int head = appctx->ctx.tlskeys.ref->tls_ticket_enc_index;
 
 			chunk_reset(&trash);
-			if (appctx->st0 == STAT_CLI_O_TLSK_ENT)
+			if (appctx->st0 == STAT_CLI_O_TLSK_ENT && appctx->ctx.tlskeys.dump_keys_index == 0)
 				chunk_appendf(&trash, "# ");
-			chunk_appendf(&trash, "%d (%s)\n", ref->unique_id,
-			              ref->filename);
-
+			if (appctx->ctx.tlskeys.dump_keys_index == 0)
+				chunk_appendf(&trash, "%d (%s)\n", appctx->ctx.tlskeys.ref->unique_id,
+				              appctx->ctx.tlskeys.ref->filename);
 			if (appctx->st0 == STAT_CLI_O_TLSK_ENT) {
-				for (i = 0; i < TLS_TICKETS_NO; i++) {
+				while (appctx->ctx.tlskeys.dump_keys_index < TLS_TICKETS_NO) {
 					struct chunk *t2 = get_trash_chunk();
-					int b64_len;
 
 					chunk_reset(t2);
-					b64_len = a2base64((char *)(ref->tlskeys + (head + 2 + i) % TLS_TICKETS_NO),
+					/* should never fail here because we dump only a key in the t2 buffer */
+					t2->len = a2base64((char *)(appctx->ctx.tlskeys.ref->tlskeys + (head + 2 + appctx->ctx.tlskeys.dump_keys_index) % TLS_TICKETS_NO),
 					                   sizeof(struct tls_sess_key), t2->str, t2->size);
-					if (b64_len < 0)
+					chunk_appendf(&trash, "%d.%d %s\n", appctx->ctx.tlskeys.ref->unique_id, appctx->ctx.tlskeys.dump_keys_index, t2->str);
+
+					if (bi_putchk(si_ic(si), &trash) == -1) {
+						/* let's try again later from this stream. We add ourselves into
+						 * this stream's users so that it can remove us upon termination.
+						 */
+						si_applet_cant_put(si);
 						return 0;
-					t2->len = b64_len;
-					chunk_appendf(&trash, "%d.%d %s\n", ref->unique_id, i, t2->str);
+					}
+					appctx->ctx.tlskeys.dump_keys_index++;
 				}
+				appctx->ctx.tlskeys.dump_keys_index = 0;
 			}
 			if (bi_putchk(si_ic(si), &trash) == -1) {
 				/* let's try again later from this stream. We add ourselves into
@@ -6199,11 +6214,11 @@ static int stats_tlskeys_list(struct stream_interface *si) {
 				return 0;
 			}
 
-			if (appctx->ctx.tlskeys.ref) /* don't display everything if don't null */
+			if (appctx->ctx.tlskeys.dump_all == 0) /* don't display everything if not necessary */
 				break;
 
 			/* get next list entry and check the end of the list */
-			ref = tlskeys_list_get_next(ref, &tlskeys_reference);
+			appctx->ctx.tlskeys.ref = tlskeys_list_get_next(appctx->ctx.tlskeys.ref, &tlskeys_reference);
 
 		}
 

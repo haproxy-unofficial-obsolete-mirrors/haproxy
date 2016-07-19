@@ -843,10 +843,10 @@ void len2mask4(int len, struct in_addr *addr);
 void len2mask6(int len, struct in6_addr *addr);
 
 /* Return true if IPv4 address is part of the network */
-extern int in_net_ipv4(struct in_addr *addr, struct in_addr *mask, struct in_addr *net);
+extern int in_net_ipv4(const void *addr, const struct in_addr *mask, const struct in_addr *net);
 
 /* Return true if IPv6 address is part of the network */
-extern int in_net_ipv6(struct in6_addr *addr, struct in6_addr *mask, struct in6_addr *net);
+extern int in_net_ipv6(const void *addr, const struct in6_addr *mask, const struct in6_addr *net);
 
 /* Map IPv4 adress on IPv6 address, as specified in RFC 3513. */
 extern void v4tov6(struct in6_addr *sin6_addr, struct in_addr *sin_addr);
@@ -1092,5 +1092,16 @@ static inline unsigned long long rdtsc()
  */
 struct list;
 int list_append_word(struct list *li, const char *str, char **err);
+
+/* same as realloc() except that ptr is also freed upon failure */
+static inline void *my_realloc2(void *ptr, size_t size)
+{
+	void *ret;
+
+	ret = realloc(ptr, size);
+	if (!ret && size)
+		free(ptr);
+	return ret;
+}
 
 #endif /* _COMMON_STANDARD_H */

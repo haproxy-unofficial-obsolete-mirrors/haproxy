@@ -3290,6 +3290,7 @@ http_req_get_intercept_rule(struct proxy *px, struct list *rules, struct stream 
 	struct hdr_ctx ctx;
 	const char *auth_realm;
 	int act_flags = 0;
+	int len;
 
 	/* If "the current_rule_list" match the executed rule list, we are in
 	 * resume condition. If a resume is needed it is always in the action
@@ -3401,12 +3402,18 @@ resume_execution:
 
 		case ACT_HTTP_SET_HDR:
 		case ACT_HTTP_ADD_HDR:
-			chunk_printf(&trash, "%s: ", rule->arg.hdr_add.name);
+			/* The scope of the trash buffer must be limited to this function. The
+			 * build_logline() function can execute a lot of other function which
+			 * can use the trash buffer. So for limiting the scope of this global
+			 * buffer, we build first the header value using build_logline, and
+			 * after we store the header name.
+			 */
+			len = rule->arg.hdr_add.name_len + 2,
+			len += build_logline(s, trash.str + len, trash.size - len, &rule->arg.hdr_add.fmt);
 			memcpy(trash.str, rule->arg.hdr_add.name, rule->arg.hdr_add.name_len);
-			trash.len = rule->arg.hdr_add.name_len;
-			trash.str[trash.len++] = ':';
-			trash.str[trash.len++] = ' ';
-			trash.len += build_logline(s, trash.str + trash.len, trash.size - trash.len, &rule->arg.hdr_add.fmt);
+			trash.str[rule->arg.hdr_add.name_len] = ':';
+			trash.str[rule->arg.hdr_add.name_len + 1] = ' ';
+			trash.len = len;
 
 			if (rule->action == ACT_HTTP_SET_HDR) {
 				/* remove all occurrences of the header */
@@ -6843,8 +6850,10 @@ http_msg_forward_body(struct stream *s, struct http_msg *msg)
 			       /* on_error    */ goto error);
 	b_adv(chn->buf, ret);
 	msg->next -= ret;
+	if (unlikely(!(chn->flags & CF_WROTE_DATA) || msg->sov > 0))
+		msg->sov -= ret;
 	if (msg->next)
-		goto missing_data_or_waiting;
+		goto waiting;
 
 	FLT_STRM_DATA_CB(s, chn, flt_http_end(s, msg),
 			 /* default_ret */ 1,
@@ -6957,8 +6966,10 @@ http_msg_forward_chunked_body(struct stream *s, struct http_msg *msg)
 			  /* on_error    */ goto error);
 	b_adv(chn->buf, ret);
 	msg->next -= ret;
+	if (unlikely(!(chn->flags & CF_WROTE_DATA) || msg->sov > 0))
+		msg->sov -= ret;
 	if (msg->next)
-		goto missing_data_or_waiting;
+		goto waiting;
 
 	FLT_STRM_DATA_CB(s, chn, flt_http_end(s, msg),
 		    /* default_ret */ 1,
@@ -9329,7 +9340,7 @@ struct act_rule *parse_http_res_cond(const char **args, const char *file, int li
 		}
 		if (strcmp(args[cur_arg], "silent") == 0)
 			rule->arg.loglevel = -1;
-		else if ((rule->arg.loglevel = get_log_level(args[cur_arg] + 1)) == 0)
+		else if ((rule->arg.loglevel = get_log_level(args[cur_arg]) + 1) == 0)
 			goto bad_log_level;
 		cur_arg++;
 	} else if (strcmp(args[0], "add-header") == 0 || strcmp(args[0], "set-header") == 0) {
@@ -11646,17 +11657,16 @@ smp_fetch_url32_src(const struct arg *args, struct sample *smp, const char *kw, 
 {
 	struct chunk *temp;
 	struct connection *cli_conn = objt_conn(smp->sess->origin);
-	unsigned int hash;
+
+	if (!cli_conn)
+		return 0;
 
 	if (!smp_fetch_url32(args, smp, kw, private))
 		return 0;
 
-	/* The returned hash is a 32 bytes integer. */
-	hash = smp->data.u.sint;
-
 	temp = get_trash_chunk();
-	memcpy(temp->str + temp->len, &hash, sizeof(hash));
-	temp->len += sizeof(hash);
+	*(unsigned int *)temp->str = htonl(smp->data.u.sint);
+	temp->len += sizeof(unsigned int);
 
 	switch (cli_conn->addr.from.ss_family) {
 	case AF_INET:
@@ -12511,7 +12521,7 @@ enum act_parse_ret parse_http_res_capture(const char **args, int *orig_arg, stru
 			break;
 
 	if (cur_arg < *orig_arg + 3) {
-		memprintf(err, "expects <expression> [ 'len' <length> | id <idx> ]");
+		memprintf(err, "expects <expression> id <idx>");
 		return ACT_RET_PRS_ERR;
 	}
 
@@ -12529,7 +12539,7 @@ enum act_parse_ret parse_http_res_capture(const char **args, int *orig_arg, stru
 	}
 
 	if (!args[cur_arg] || !*args[cur_arg]) {
-		memprintf(err, "expects 'len or 'id'");
+		memprintf(err, "expects 'id'");
 		free(expr);
 		return ACT_RET_PRS_ERR;
 	}
