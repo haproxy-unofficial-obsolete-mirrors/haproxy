@@ -42,6 +42,10 @@ int stktable_init(struct stktable *t);
 int stktable_parse_type(char **args, int *idx, unsigned long *type, size_t *key_size);
 struct stksess *stktable_get_entry(struct stktable *table, struct stktable_key *key);
 struct stksess *stktable_store(struct stktable *t, struct stksess *ts, int local);
+struct stksess *stktable_store_with_exp(struct stktable *t, struct stksess *ts,
+                                        int local, int expire);
+struct stksess *stktable_touch_with_exp(struct stktable *t, struct stksess *ts,
+                                        int local, int expire);
 struct stksess *stktable_touch(struct stktable *t, struct stksess *ts, int local);
 struct stksess *stktable_lookup(struct stktable *t, struct stksess *ts);
 struct stksess *stktable_lookup_key(struct stktable *t, struct stktable_key *key);
@@ -50,6 +54,8 @@ struct stktable_key *smp_to_stkey(struct sample *smp, struct stktable *t);
 struct stktable_key *stktable_fetch_key(struct stktable *t, struct proxy *px, struct session *sess,
                                         struct stream *strm, unsigned int opt,
                                         struct sample_expr *expr, struct sample *smp);
+struct stkctr *smp_fetch_sc_stkctr(struct session *sess, struct stream *strm, const struct arg *args, const char *kw);
+struct stkctr *smp_create_src_stkctr(struct session *sess, struct stream *strm, const struct arg *args, const char *kw);
 int stktable_compatible_sample(struct sample_expr *expr, unsigned long table_type);
 int stktable_register_data_store(int idx, const char *name, int std_type, int arg_type);
 int stktable_get_data_type(char *name);

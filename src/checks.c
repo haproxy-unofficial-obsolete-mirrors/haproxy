@@ -39,6 +39,7 @@
 #include <types/global.h>
 #include <types/mailers.h>
 #include <types/dns.h>
+#include <types/stats.h>
 
 #ifdef USE_OPENSSL
 #include <types/ssl_sock.h>
@@ -47,7 +48,7 @@
 
 #include <proto/backend.h>
 #include <proto/checks.h>
-#include <proto/dumpstats.h>
+#include <proto/stats.h>
 #include <proto/fd.h>
 #include <proto/log.h>
 #include <proto/queue.h>
@@ -677,6 +678,12 @@ static void chk_report_conn_err(struct connection *conn, int errno_bck, int expi
 		else {
 			err_msg = chk->str;
 		}
+	}
+
+       if (check->state & CHK_ST_PORT_MISS) {
+		/* NOTE: this is reported after <fall> tries */
+		chunk_printf(chk, "No port available for the TCP connection");
+		set_server_check_status(check, HCHK_STATUS_SOCKERR, err_msg);
 	}
 
 	if ((conn->flags & (CO_FL_CONNECTED|CO_FL_WAIT_L4_CONN)) == CO_FL_WAIT_L4_CONN) {
@@ -1311,6 +1318,26 @@ static void event_srv_chk_r(struct connection *conn)
 		}
 		break;
 
+	case PR_O2_SPOP_CHK: {
+		unsigned int framesz;
+		char	     err[HCHK_DESC_LEN];
+
+		if (!done && check->bi->i < 4)
+			goto wait_more_data;
+
+		memcpy(&framesz, check->bi->data, 4);
+		framesz = ntohl(framesz);
+
+		if (!done && check->bi->i < (4+framesz))
+		    goto wait_more_data;
+
+		if (!handle_spoe_healthcheck_response(check->bi->data+4, framesz, err, HCHK_DESC_LEN-1))
+			set_server_check_status(check, HCHK_STATUS_L7OKD, "SPOA server is ok");
+		else
+			set_server_check_status(check, HCHK_STATUS_L7STS, err);
+		break;
+	}
+
 	default:
 		/* for other checks (eg: pure TCP), delegate to the main task */
 		break;
@@ -1388,6 +1415,7 @@ struct data_cb check_conn_cb = {
 	.recv = event_srv_chk_r,
 	.send = event_srv_chk_w,
 	.wake = wake_srv_chk,
+	.name = "CHCK",
 };
 
 /*
@@ -1430,7 +1458,8 @@ static struct task *server_warmup(struct task *t)
  *  - SF_ERR_PRXCOND if the connection has been limited by the proxy (maxconn)
  *  - SF_ERR_RESOURCE if a system resource is lacking (eg: fd limits, ports, ...)
  *  - SF_ERR_INTERNAL for any other purely internal errors
- * Additionnally, in the case of SF_ERR_RESOURCE, an emergency log will be emitted.
+ *  - SF_ERR_CHK_PORT if no port could be found to run a health check on an AF_INET* socket
+ * Additionally, in the case of SF_ERR_RESOURCE, an emergency log will be emitted.
  * Note that we try to prevent the network stack from sending the ACK during the
  * connect() when a pure TCP check is used (without PROXY protocol).
  */
@@ -1491,8 +1520,16 @@ static int connect_conn_chk(struct task *t)
 		conn->addr.to = s->addr;
 	}
 
-	if (check->port) {
-		set_host_port(&conn->addr.to, check->port);
+       if ((conn->addr.to.ss_family == AF_INET) || (conn->addr.to.ss_family == AF_INET6)) {
+		int i = 0;
+
+		i = srv_check_healthcheck_port(check);
+		if (i == 0) {
+			conn->owner = check;
+			return SF_ERR_CHK_PORT;
+		}
+
+		set_host_port(&conn->addr.to, i);
 	}
 
 	proto = protocol_by_family(conn->addr.to.ss_family);
@@ -1804,7 +1841,7 @@ err:
  *  - SF_ERR_PRXCOND if the connection has been limited by the proxy (maxconn)
  *  - SF_ERR_RESOURCE if a system resource is lacking (eg: fd limits, ports, ...)
  *  - SF_ERR_INTERNAL for any other purely internal errors
- * Additionnally, in the case of SF_ERR_RESOURCE, an emergency log will be emitted.
+ * Additionally, in the case of SF_ERR_RESOURCE, an emergency log will be emitted.
  *
  * Blocks and then unblocks SIGCHLD
  */
@@ -2072,6 +2109,9 @@ static struct task *process_chk_conn(struct task *t)
 			conn->flags |= CO_FL_ERROR;
 			chk_report_conn_err(conn, errno, 0);
 			break;
+		/* should share same code than cases below */
+		case SF_ERR_CHK_PORT:
+			check->state |= CHK_ST_PORT_MISS;
 		case SF_ERR_PRXCOND:
 		case SF_ERR_RESOURCE:
 		case SF_ERR_INTERNAL:
@@ -2727,7 +2767,7 @@ static void tcpcheck_main(struct connection *conn)
 			 *  - SF_ERR_PRXCOND if the connection has been limited by the proxy (maxconn)
 			 *  - SF_ERR_RESOURCE if a system resource is lacking (eg: fd limits, ports, ...)
 			 *  - SF_ERR_INTERNAL for any other purely internal errors
-			 * Additionnally, in the case of SF_ERR_RESOURCE, an emergency log will be emitted.
+			 * Additionally, in the case of SF_ERR_RESOURCE, an emergency log will be emitted.
 			 * Note that we try to prevent the network stack from sending the ACK during the
 			 * connect() when a pure TCP check is used (without PROXY protocol).
 			 */
@@ -3177,6 +3217,8 @@ static int add_tcpcheck_expect_str(struct list *list, const char *str)
 static int add_tcpcheck_send_strs(struct list *list, const char * const *strs)
 {
 	struct tcpcheck_rule *tcpcheck;
+	const char *in;
+	char *dst;
 	int i;
 
 	tcpcheck = calloc(1, sizeof *tcpcheck);
@@ -3194,10 +3236,11 @@ static int add_tcpcheck_send_strs(struct list *list, const char * const *strs)
 		free(tcpcheck);
 		return 0;
 	}
-	tcpcheck->string[0] = '\0';
 
+	dst = tcpcheck->string;
 	for (i = 0; strs[i]; i++)
-		strcat(tcpcheck->string, strs[i]);
+		for (in = strs[i]; (*dst = *in++); dst++);
+	*dst = 0;
 
 	LIST_ADDQ(list, &tcpcheck->list);
 	return 1;
@@ -3363,6 +3406,53 @@ void send_email_alert(struct server *s, int level, const char *format, ...)
 	}
 
 	enqueue_email_alert(p, buf);
+}
+
+/*
+ * Return value:
+ *   the port to be used for the health check
+ *   0 in case no port could be found for the check
+ */
+int srv_check_healthcheck_port(struct check *chk)
+{
+	int i = 0;
+	struct server *srv = NULL;
+
+	srv = chk->server;
+
+	/* If neither a port nor an addr was specified and no check transport
+	 * layer is forced, then the transport layer used by the checks is the
+	 * same as for the production traffic. Otherwise we use raw_sock by
+	 * default, unless one is specified.
+	 */
+	if (!chk->port && !is_addr(&chk->addr)) {
+#ifdef USE_OPENSSL
+		chk->use_ssl |= (srv->use_ssl || (srv->proxy->options & PR_O_TCPCHK_SSL));
+#endif
+		chk->send_proxy |= (srv->pp_opts);
+	}
+
+	/* by default, we use the health check port ocnfigured */
+	if (chk->port > 0)
+		return chk->port;
+
+	/* try to get the port from check_core.addr if check.port not set */
+	i = get_host_port(&chk->addr);
+	if (i > 0)
+		return i;
+
+	/* try to get the port from server address */
+	/* prevent MAPPORTS from working at this point, since checks could
+	 * not be performed in such case (MAPPORTS impose a relative ports
+	 * based on live traffic)
+	 */
+	if (srv->flags & SRV_F_MAPPORTS)
+		return 0;
+	i = get_host_port(&srv->addr); /* by default */
+	if (i > 0)
+		return i;
+
+	return 0;
 }
 
 

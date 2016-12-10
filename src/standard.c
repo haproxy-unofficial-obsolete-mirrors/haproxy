@@ -11,12 +11,14 @@
  */
 
 #include <ctype.h>
+#include <errno.h>
 #include <netdb.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
@@ -623,13 +625,14 @@ const char *invalid_domainchar(const char *name) {
  * all other fields remain zero. The string is not supposed to be modified.
  * The IPv6 '::' address is IN6ADDR_ANY. If <resolve> is non-zero, the hostname
  * is resolved, otherwise only IP addresses are resolved, and anything else
- * returns NULL.
+ * returns NULL. If the address contains a port, this one is preserved.
  */
 struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, int resolve)
 {
 	struct hostent *he;
 	/* max IPv6 length, including brackets and terminating NULL */
 	char tmpip[48];
+	int port = get_host_port(sa);
 
 	/* check IPv6 with square brackets */
 	if (str[0] == '[') {
@@ -662,6 +665,7 @@ struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, i
 			sa->ss_family = AF_INET6;
 		else if (sa->ss_family != AF_INET6)
 			goto fail;
+		set_host_port(sa, port);
 		return sa;
 	}
 
@@ -669,6 +673,7 @@ struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, i
 	if (!str[0] || (str[0] == '*' && !str[1])) {
 		if (!sa->ss_family || sa->ss_family == AF_UNSPEC)
 			sa->ss_family = AF_INET;
+		set_host_port(sa, port);
 		return sa;
 	}
 
@@ -676,6 +681,7 @@ struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, i
 	if ((!sa->ss_family || sa->ss_family == AF_UNSPEC || sa->ss_family == AF_INET6) &&
 	    inet_pton(AF_INET6, str, &((struct sockaddr_in6 *)sa)->sin6_addr)) {
 		sa->ss_family = AF_INET6;
+		set_host_port(sa, port);
 		return sa;
 	}
 
@@ -683,6 +689,7 @@ struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, i
 	if ((!sa->ss_family || sa->ss_family == AF_UNSPEC || sa->ss_family == AF_INET) &&
 	    inet_pton(AF_INET, str, &((struct sockaddr_in *)sa)->sin_addr)) {
 		sa->ss_family = AF_INET;
+		set_host_port(sa, port);
 		return sa;
 	}
 
@@ -712,9 +719,11 @@ struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, i
 			switch (result->ai_family) {
 			case AF_INET:
 				memcpy((struct sockaddr_in *)sa, result->ai_addr, result->ai_addrlen);
+				set_host_port(sa, port);
 				return sa;
 			case AF_INET6:
 				memcpy((struct sockaddr_in6 *)sa, result->ai_addr, result->ai_addrlen);
+				set_host_port(sa, port);
 				return sa;
 			}
 		}
@@ -734,9 +743,11 @@ struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, i
 		switch (sa->ss_family) {
 		case AF_INET:
 			((struct sockaddr_in *)sa)->sin_addr = *(struct in_addr *) *(he->h_addr_list);
+			set_host_port(sa, port);
 			return sa;
 		case AF_INET6:
 			((struct sockaddr_in6 *)sa)->sin6_addr = *(struct in6_addr *) *(he->h_addr_list);
+			set_host_port(sa, port);
 			return sa;
 		}
 	}
@@ -797,7 +808,10 @@ struct sockaddr_storage *str2ip2(const char *str, struct sockaddr_storage *sa, i
  *     that the caller will have to free(),
  *   - NULL if there was an explicit address that doesn't require resolution.
  *
- * Hostnames are only resolved if <resolve> is non-null.
+ * Hostnames are only resolved if <resolve> is non-null. Note that if <resolve>
+ * is null, <fqdn> is still honnored so it is possible for the caller to know
+ * whether a resolution failed by setting <resolve> to null and checking if
+ * <fqdn> was filled, indicating the need for a resolution.
  *
  * When a file descriptor is passed, its value is put into the s_addr part of
  * the address when cast to sockaddr_in and the address family is AF_UNSPEC.
@@ -891,7 +905,6 @@ struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high, char
 		memcpy(((struct sockaddr_un *)&ss)->sun_path + prefix_path_len + abstract, str2, adr_len + 1 - abstract);
 	}
 	else { /* IPv4 and IPv6 */
-		int use_fqdn = 0;
 		char *end = str2 + strlen(str2);
 		char *chr;
 
@@ -916,14 +929,6 @@ struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high, char
 			port1 = "";
 		}
 
-		if (str2ip2(str2, &ss, 0) == NULL) {
-			use_fqdn = 1;
-			if (!resolve || str2ip2(str2, &ss, 1) == NULL) {
-				memprintf(err, "invalid address: '%s' in '%s'\n", str2, str);
-				goto out;
-			}
-		}
-
 		if (isdigit((int)(unsigned char)*port1)) {	/* single port or range */
 			port2 = strchr(port1, '-');
 			if (port2)
@@ -946,14 +951,34 @@ struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high, char
 			memprintf(err, "invalid character '%c' in port number '%s' in '%s'\n", *port1, port1, str);
 			goto out;
 		}
-		set_host_port(&ss, porta);
 
-		if (use_fqdn && fqdn) {
-			if (str2 != back)
-				memmove(back, str2, strlen(str2) + 1);
-			*fqdn = back;
-			back = NULL;
+		/* first try to parse the IP without resolving. If it fails, it
+		 * tells us we need to keep a copy of the FQDN to resolve later
+		 * and to enable DNS. In this case we can proceed if <fqdn> is
+		 * set or if resolve is set, otherwise it's an error.
+		 */
+		if (str2ip2(str2, &ss, 0) == NULL) {
+			if (!resolve && fqdn) {
+				/* we'll still want to store the port, so let's
+				 * force it to IPv4 for now.
+				 */
+				memset(&ss, 0, sizeof(ss));
+				ss.ss_family = AF_INET;
+			}
+			else if ((!resolve && !fqdn) ||
+				 (resolve && str2ip2(str2, &ss, 1) == NULL)) {
+				memprintf(err, "invalid address: '%s' in '%s'\n", str2, str);
+				goto out;
+			}
+
+			if (fqdn) {
+				if (str2 != back)
+					memmove(back, str2, strlen(str2) + 1);
+				*fqdn = back;
+				back = NULL;
+			}
 		}
+		set_host_port(&ss, porta);
 	}
 
 	ret = &ss;
@@ -1406,6 +1431,47 @@ int port_to_str(struct sockaddr_storage *addr, char *str, int size)
 	return addr->ss_family;
 }
 
+/* check if the given address is local to the system or not. It will return
+ * -1 when it's not possible to know, 0 when the address is not local, 1 when
+ * it is. We don't want to iterate over all interfaces for this (and it is not
+ * portable). So instead we try to bind in UDP to this address on a free non
+ * privileged port and to connect to the same address, port 0 (connect doesn't
+ * care). If it succeeds, we own the address. Note that non-inet addresses are
+ * considered local since they're most likely AF_UNIX.
+ */
+int addr_is_local(const struct netns_entry *ns,
+                  const struct sockaddr_storage *orig)
+{
+	struct sockaddr_storage addr;
+	int result;
+	int fd;
+
+	if (!is_inet_addr(orig))
+		return 1;
+
+	memcpy(&addr, orig, sizeof(addr));
+	set_host_port(&addr, 0);
+
+	fd = my_socketat(ns, addr.ss_family, SOCK_DGRAM, IPPROTO_UDP);
+	if (fd < 0)
+		return -1;
+
+	result = -1;
+	if (bind(fd, (struct sockaddr *)&addr, get_addr_len(&addr)) == 0) {
+		if (connect(fd, (struct sockaddr *)&addr, get_addr_len(&addr)) == -1)
+			result = 0; // fail, non-local address
+		else
+			result = 1; // success, local address
+	}
+	else {
+		if (errno == EADDRNOTAVAIL)
+			result = 0; // definitely not local :-)
+	}
+	close(fd);
+
+	return result;
+}
+
 /* will try to encode the string <string> replacing all characters tagged in
  * <map> with the hexadecimal representation of their ASCII-code (2 digits)
  * prefixed by <escape>, and will store the result between <start> (included)
@@ -1464,6 +1530,36 @@ char *encode_chunk(char *start, char *stop,
 				*start++ = hextab[*str & 15];
 			}
 			str++;
+		}
+		*start = '\0';
+	}
+	return start;
+}
+
+/*
+ * Tries to prefix characters tagged in the <map> with the <escape>
+ * character. The input <string> must be zero-terminated. The result will
+ * be stored between <start> (included) and <stop> (excluded). This
+ * function will always try to terminate the resulting string with a '\0'
+ * before <stop>, and will return its position if the conversion
+ * completes.
+ */
+char *escape_string(char *start, char *stop,
+		    const char escape, const fd_set *map,
+		    const char *string)
+{
+	if (start < stop) {
+		stop--; /* reserve one byte for the final '\0' */
+		while (start < stop && *string != '\0') {
+			if (!FD_ISSET((unsigned char)(*string), map))
+				*start++ = *string;
+			else {
+				if (start + 2 >= stop)
+					break;
+				*start++ = escape;
+				*start++ = *string;
+			}
+			string++;
 		}
 		*start = '\0';
 	}
@@ -2485,6 +2581,66 @@ int v6tov4(struct in_addr *sin_addr, struct in6_addr *sin6_addr)
 	return 0;
 }
 
+/* compare two struct sockaddr_storage and return:
+ *  0 (true)  if the addr is the same in both
+ *  1 (false) if the addr is not the same in both
+ *  -1 (unable) if one of the addr is not AF_INET*
+ */
+int ipcmp(struct sockaddr_storage *ss1, struct sockaddr_storage *ss2)
+{
+	if ((ss1->ss_family != AF_INET) && (ss1->ss_family != AF_INET6))
+		return -1;
+
+	if ((ss2->ss_family != AF_INET) && (ss2->ss_family != AF_INET6))
+		return -1;
+
+	if (ss1->ss_family != ss2->ss_family)
+		return 1;
+
+	switch (ss1->ss_family) {
+		case AF_INET:
+			return memcmp(&((struct sockaddr_in *)ss1)->sin_addr,
+				      &((struct sockaddr_in *)ss2)->sin_addr,
+				      sizeof(struct in_addr)) != 0;
+		case AF_INET6:
+			return memcmp(&((struct sockaddr_in6 *)ss1)->sin6_addr,
+				      &((struct sockaddr_in6 *)ss2)->sin6_addr,
+				      sizeof(struct in6_addr)) != 0;
+	}
+
+	return 1;
+}
+
+/* copy IP address from <source> into <dest>
+ * The caller must allocate and clear <dest> before calling.
+ * The source must be in either AF_INET or AF_INET6 family, or the destination
+ * address will be undefined. If the destination address used to hold a port,
+ * it is preserved, so that this function can be used to switch to another
+ * address family with no risk. Returns a pointer to the destination.
+ */
+struct sockaddr_storage *ipcpy(struct sockaddr_storage *source, struct sockaddr_storage *dest)
+{
+	int prev_port;
+
+	prev_port = get_net_port(dest);
+	memset(dest, 0, sizeof(*dest));
+	dest->ss_family = source->ss_family;
+
+	/* copy new addr and apply it */
+	switch (source->ss_family) {
+		case AF_INET:
+			((struct sockaddr_in *)dest)->sin_addr.s_addr = ((struct sockaddr_in *)source)->sin_addr.s_addr;
+			((struct sockaddr_in *)dest)->sin_port = prev_port;
+			break;
+		case AF_INET6:
+			memcpy(((struct sockaddr_in6 *)dest)->sin6_addr.s6_addr, ((struct sockaddr_in6 *)source)->sin6_addr.s6_addr, sizeof(struct in6_addr));
+			((struct sockaddr_in6 *)dest)->sin6_port = prev_port;
+			break;
+	}
+
+	return dest;
+}
+
 char *human_time(int t, short hz_div) {
 	static char rv[sizeof("24855d23h")+1];	// longest of "23h59m" and "59m59s"
 	char *p = rv;
@@ -2921,6 +3077,9 @@ static inline int parse_http_time(const char **date, int *len, struct tm *tm)
  */
 int parse_imf_date(const char *date, int len, struct tm *tm)
 {
+	/* tm_gmtoff, if present, ought to be zero'ed */
+	memset(tm, 0, sizeof(*tm));
+
 	RET0_UNLESS(parse_http_dayname(&date, &len, tm));     /* day-name */
 	RET0_UNLESS(parse_expect_char(&date, &len, ','));     /* expect "," */
 	RET0_UNLESS(parse_expect_char(&date, &len, ' '));     /* expect SP */
@@ -2935,7 +3094,6 @@ int parse_imf_date(const char *date, int len, struct tm *tm)
 	RET0_UNLESS(parse_expect_char(&date, &len, ' '));     /* expect SP */
 	RET0_UNLESS(parse_strcmp(&date, &len, "GMT", 3));     /* GMT = %x47.4D.54 ; "GMT", case-sensitive */
 	tm->tm_isdst = -1;
-	tm->tm_gmtoff = 0;
 	return 1;
 }
 
@@ -2951,6 +3109,9 @@ int parse_imf_date(const char *date, int len, struct tm *tm)
 int parse_rfc850_date(const char *date, int len, struct tm *tm)
 {
 	int year;
+
+	/* tm_gmtoff, if present, ought to be zero'ed */
+	memset(tm, 0, sizeof(*tm));
 
 	RET0_UNLESS(parse_http_ldayname(&date, &len, tm));    /* Read the day name */
 	RET0_UNLESS(parse_expect_char(&date, &len, ','));     /* expect "," */
@@ -2989,7 +3150,6 @@ int parse_rfc850_date(const char *date, int len, struct tm *tm)
 	RET0_UNLESS(parse_expect_char(&date, &len, ' ')); /* expect SP */
 	RET0_UNLESS(parse_strcmp(&date, &len, "GMT", 3)); /* GMT = %x47.4D.54 ; "GMT", case-sensitive */
 	tm->tm_isdst = -1;
-	tm->tm_gmtoff = 0;
 
 	return 1;
 }
@@ -3007,6 +3167,9 @@ int parse_rfc850_date(const char *date, int len, struct tm *tm)
  */
 int parse_asctime_date(const char *date, int len, struct tm *tm)
 {
+	/* tm_gmtoff, if present, ought to be zero'ed */
+	memset(tm, 0, sizeof(*tm));
+
 	RET0_UNLESS(parse_http_dayname(&date, &len, tm));   /* day-name */
 	RET0_UNLESS(parse_expect_char(&date, &len, ' '));   /* expect SP */
 	RET0_UNLESS(parse_http_monthname(&date, &len, tm)); /* expect month */
@@ -3024,7 +3187,6 @@ int parse_asctime_date(const char *date, int len, struct tm *tm)
 	RET0_UNLESS(parse_4digit(&date, &len, &tm->tm_year)); /* year = 4DIGIT */
 	tm->tm_year -= 1900;
 	tm->tm_isdst = -1;
-	tm->tm_gmtoff = 0;
 	return 1;
 }
 
@@ -3476,6 +3638,131 @@ fail_wl_s:
 fail_wl:
 	free(wl);
 	return 0;
+}
+
+/* print a string of text buffer to <out>. The format is :
+ * Non-printable chars \t, \n, \r and \e are * encoded in C format.
+ * Other non-printable chars are encoded "\xHH". Space, '\', and '=' are also escaped.
+ * Print stopped if null char or <bsize> is reached, or if no more place in the chunk.
+ */
+int dump_text(struct chunk *out, const char *buf, int bsize)
+{
+	unsigned char c;
+	int ptr = 0;
+
+	while (buf[ptr] && ptr < bsize) {
+		c = buf[ptr];
+		if (isprint(c) && isascii(c) && c != '\\' && c != ' ' && c != '=') {
+			if (out->len > out->size - 1)
+				break;
+			out->str[out->len++] = c;
+		}
+		else if (c == '\t' || c == '\n' || c == '\r' || c == '\e' || c == '\\' || c == ' ' || c == '=') {
+			if (out->len > out->size - 2)
+				break;
+			out->str[out->len++] = '\\';
+			switch (c) {
+			case ' ': c = ' '; break;
+			case '\t': c = 't'; break;
+			case '\n': c = 'n'; break;
+			case '\r': c = 'r'; break;
+			case '\e': c = 'e'; break;
+			case '\\': c = '\\'; break;
+			case '=': c = '='; break;
+			}
+			out->str[out->len++] = c;
+		}
+		else {
+			if (out->len > out->size - 4)
+				break;
+			out->str[out->len++] = '\\';
+			out->str[out->len++] = 'x';
+			out->str[out->len++] = hextab[(c >> 4) & 0xF];
+			out->str[out->len++] = hextab[c & 0xF];
+		}
+		ptr++;
+	}
+
+	return ptr;
+}
+
+/* print a buffer in hexa.
+ * Print stopped if <bsize> is reached, or if no more place in the chunk.
+ */
+int dump_binary(struct chunk *out, const char *buf, int bsize)
+{
+	unsigned char c;
+	int ptr = 0;
+
+	while (ptr < bsize) {
+		c = buf[ptr];
+
+		if (out->len > out->size - 2)
+			break;
+		out->str[out->len++] = hextab[(c >> 4) & 0xF];
+		out->str[out->len++] = hextab[c & 0xF];
+
+		ptr++;
+	}
+	return ptr;
+}
+
+/* print a line of text buffer (limited to 70 bytes) to <out>. The format is :
+ * <2 spaces> <offset=5 digits> <space or plus> <space> <70 chars max> <\n>
+ * which is 60 chars per line. Non-printable chars \t, \n, \r and \e are
+ * encoded in C format. Other non-printable chars are encoded "\xHH". Original
+ * lines are respected within the limit of 70 output chars. Lines that are
+ * continuation of a previous truncated line begin with "+" instead of " "
+ * after the offset. The new pointer is returned.
+ */
+int dump_text_line(struct chunk *out, const char *buf, int bsize, int len,
+                   int *line, int ptr)
+{
+	int end;
+	unsigned char c;
+
+	end = out->len + 80;
+	if (end > out->size)
+		return ptr;
+
+	chunk_appendf(out, "  %05d%c ", ptr, (ptr == *line) ? ' ' : '+');
+
+	while (ptr < len && ptr < bsize) {
+		c = buf[ptr];
+		if (isprint(c) && isascii(c) && c != '\\') {
+			if (out->len > end - 2)
+				break;
+			out->str[out->len++] = c;
+		} else if (c == '\t' || c == '\n' || c == '\r' || c == '\e' || c == '\\') {
+			if (out->len > end - 3)
+				break;
+			out->str[out->len++] = '\\';
+			switch (c) {
+			case '\t': c = 't'; break;
+			case '\n': c = 'n'; break;
+			case '\r': c = 'r'; break;
+			case '\e': c = 'e'; break;
+			case '\\': c = '\\'; break;
+			}
+			out->str[out->len++] = c;
+		} else {
+			if (out->len > end - 5)
+				break;
+			out->str[out->len++] = '\\';
+			out->str[out->len++] = 'x';
+			out->str[out->len++] = hextab[(c >> 4) & 0xF];
+			out->str[out->len++] = hextab[c & 0xF];
+		}
+		if (buf[ptr++] == '\n') {
+			/* we had a line break, let's return now */
+			out->str[out->len++] = '\n';
+			*line = ptr;
+			return ptr;
+		}
+	}
+	/* we have an incomplete line, we return it as-is */
+	out->str[out->len++] = '\n';
+	return ptr;
 }
 
 /*

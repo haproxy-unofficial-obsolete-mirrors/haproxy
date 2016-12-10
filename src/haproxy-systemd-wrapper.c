@@ -28,6 +28,11 @@ static char *pid_file = "/run/haproxy.pid";
 static int wrapper_argc;
 static char **wrapper_argv;
 
+static void setup_signal_handler();
+static void pause_signal_handler();
+static void reset_signal_handler();
+
+
 /* returns the path to the haproxy binary into <buffer>, whose size indicated
  * in <buffer_size> must be at least 1 byte long.
  */
@@ -60,22 +65,53 @@ static void locate_haproxy(char *buffer, size_t buffer_size)
 	return;
 }
 
+/* Note: this function must not exit in case of error (except in the child), as
+ * it is only dedicated the starting a new haproxy process. By keeping the
+ * process alive it will ensure that future signal delivery may get rid of
+ * the issue. If the first startup fails, the wrapper will notice it and
+ * return an error thanks to wait() returning ECHILD.
+ */
 static void spawn_haproxy(char **pid_strv, int nb_pid)
 {
 	char haproxy_bin[512];
 	pid_t pid;
 	int main_argc;
 	char **main_argv;
+	int pipefd[2];
+	char fdstr[20];
+	int ret;
 
 	main_argc = wrapper_argc - 1;
 	main_argv = wrapper_argv + 1;
 
+	if (pipe(pipefd) != 0) {
+		fprintf(stderr, SD_NOTICE "haproxy-systemd-wrapper: failed to create a pipe, please try again later.\n");
+		return;
+	}
+
 	pid = fork();
 	if (!pid) {
-		/* 3 for "haproxy -Ds -sf" */
-		char **argv = calloc(4 + main_argc + nb_pid + 1, sizeof(char *));
+		char **argv;
 		int i;
 		int argno = 0;
+
+		/* 3 for "haproxy -Ds -sf" */
+		argv = calloc(4 + main_argc + nb_pid + 1, sizeof(char *));
+		if (!argv) {
+			fprintf(stderr, SD_NOTICE "haproxy-systemd-wrapper: failed to calloc(), please try again later.\n");
+			exit(1);
+		}
+
+		reset_signal_handler();
+
+		close(pipefd[0]); /* close the read side */
+
+		snprintf(fdstr, sizeof(fdstr), "%d", pipefd[1]);
+		if (setenv("HAPROXY_WRAPPER_FD", fdstr, 1) != 0) {
+			fprintf(stderr, SD_NOTICE "haproxy-systemd-wrapper: failed to setenv(), please try again later.\n");
+			exit(1);
+		}
+
 		locate_haproxy(haproxy_bin, 512);
 		argv[argno++] = haproxy_bin;
 		for (i = 0; i < main_argc; ++i)
@@ -94,8 +130,25 @@ static void spawn_haproxy(char **pid_strv, int nb_pid)
 		fprintf(stderr, "\n");
 
 		execv(argv[0], argv);
-		exit(0);
+		fprintf(stderr, SD_NOTICE "haproxy-systemd-wrapper: execv(%s) failed, please try again later.\n", argv[0]);
+		exit(1);
 	}
+	else if (pid == -1) {
+		fprintf(stderr, SD_NOTICE "haproxy-systemd-wrapper: failed to fork(), please try again later.\n");
+	}
+
+	/* The parent closes the write side and waits for the child to close it
+	 * as well. Also deal the case where the fd would unexpectedly be 1 or 2
+	 * by silently draining all data.
+	 */
+	close(pipefd[1]);
+
+	do {
+		char c;
+		ret = read(pipefd[0], &c, sizeof(c));
+	} while ((ret > 0) || (ret == -1 && errno == EINTR));
+	/* the child has finished starting up */
+	close(pipefd[0]);
 }
 
 static int read_pids(char ***pid_strv)
@@ -127,6 +180,34 @@ static void signal_handler(int signum)
 		caught_signal = signum;
 }
 
+static void setup_signal_handler()
+{
+	struct sigaction sa;
+
+	memset(&sa, 0, sizeof(struct sigaction));
+	sa.sa_handler = &signal_handler;
+	sigaction(SIGUSR2, &sa, NULL);
+	sigaction(SIGHUP, &sa, NULL);
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+}
+
+static void pause_signal_handler()
+{
+	signal(SIGUSR2, SIG_IGN);
+	signal(SIGHUP,  SIG_IGN);
+	signal(SIGINT,  SIG_DFL);
+	signal(SIGTERM, SIG_DFL);
+}
+
+static void reset_signal_handler()
+{
+	signal(SIGUSR2, SIG_DFL);
+	signal(SIGHUP,  SIG_DFL);
+	signal(SIGINT,  SIG_DFL);
+	signal(SIGTERM, SIG_DFL);
+}
+
 /* handles SIGUSR2 and SIGHUP only */
 static void do_restart(int sig)
 {
@@ -134,7 +215,12 @@ static void do_restart(int sig)
 	fprintf(stderr, SD_NOTICE "haproxy-systemd-wrapper: re-executing on %s.\n",
 	        sig == SIGUSR2 ? "SIGUSR2" : "SIGHUP");
 
+	/* don't let the other process take one of those signals by accident */
+	pause_signal_handler();
 	execv(wrapper_argv[0], wrapper_argv);
+	/* failed, let's reinstall the signal handler and continue */
+	setup_signal_handler();
+	fprintf(stderr, SD_NOTICE "haproxy-systemd-wrapper: re-exec(%s) failed.\n", wrapper_argv[0]);
 }
 
 /* handles SIGTERM and SIGINT only */
@@ -168,20 +254,14 @@ static void init(int argc, char **argv)
 int main(int argc, char **argv)
 {
 	int status;
-	struct sigaction sa;
+
+	setup_signal_handler();
 
 	wrapper_argc = argc;
 	wrapper_argv = argv;
 
 	--argc; ++argv;
 	init(argc, argv);
-
-	memset(&sa, 0, sizeof(struct sigaction));
-	sa.sa_handler = &signal_handler;
-	sigaction(SIGUSR2, &sa, NULL);
-	sigaction(SIGHUP, &sa, NULL);
-	sigaction(SIGINT, &sa, NULL);
-	sigaction(SIGTERM, &sa, NULL);
 
 	if (getenv(REEXEC_FLAG) != NULL) {
 		/* We are being re-executed: restart HAProxy gracefully */
@@ -214,6 +294,16 @@ int main(int argc, char **argv)
 			do_shutdown(sig);
 		}
 	}
+
+	/* return either exit code or signal+128 */
+	if (WIFEXITED(status))
+		status = WEXITSTATUS(status);
+	else if (WIFSIGNALED(status))
+		status = 128 + WTERMSIG(status);
+	else if (WIFSTOPPED(status))
+		status = 128 + WSTOPSIG(status);
+	else
+		status = 255;
 
 	fprintf(stderr, SD_NOTICE "haproxy-systemd-wrapper: exit, haproxy RC=%d\n",
 			status);

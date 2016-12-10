@@ -73,6 +73,7 @@
 #define SF_ERR_DOWN     0x00009000	/* the proxy killed a stream because the backend became unavailable */
 #define SF_ERR_KILLED   0x0000a000	/* the proxy killed a stream because it was asked to do so */
 #define SF_ERR_UP       0x0000b000	/* the proxy killed a stream because a preferred backend became available */
+#define SF_ERR_CHK_PORT 0x0000c000	/* no port could be found for a health check. TODO: check SF_ERR_SHIFT */
 #define SF_ERR_MASK     0x0000f000	/* mask to get only stream error flags */
 #define SF_ERR_SHIFT    12		/* bit shift */
 
@@ -97,6 +98,8 @@ struct strm_logs {
 	int level;                      /* log level to force + 1 if > 0, -1 = no log */
 	struct timeval accept_date;     /* date of the stream's accept() in user date */
 	struct timeval tv_accept;       /* date of the stream's accept() in internal date (monotonic) */
+	long t_handshake;               /* hanshake duration, -1 if never occurs */
+	long t_idle;                    /* idle duration, -1 if never occurs */
 	struct timeval tv_request;      /* date the request arrives, {0,0} if never occurs */
 	long  t_queue;                  /* delay before the stream gets out of the connect queue, -1 if never occurs */
 	long  t_connect;                /* delay before the connect() to the server succeeds, -1 if never occurs */

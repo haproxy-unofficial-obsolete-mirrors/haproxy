@@ -21,13 +21,15 @@
 #include <common/time.h>
 #include <common/uri_auth.h>
 
+#include <types/cli.h>
 #include <types/hlua.h>
 #include <types/proxy.h>
+#include <types/stats.h>
 
-#include <proto/dumpstats.h>
 #include <proto/proto_http.h>
 #include <proto/proxy.h>
 #include <proto/server.h>
+#include <proto/stats.h>
 
 /* Contains the class reference of the concat object. */
 static int class_concat_ref;
@@ -38,6 +40,13 @@ static int class_listener_ref;
 #define STATS_LEN (MAX((int)ST_F_TOTAL_FIELDS, (int)INF_TOTAL_FIELDS))
 
 static struct field stats[STATS_LEN];
+
+int hlua_checkboolean(lua_State *L, int index)
+{
+	if (!lua_isboolean(L, index))
+		luaL_argerror(L, index, "boolean expected");
+	return lua_toboolean(L, index);
+}
 
 /* This function gets a struct field and convert it in Lua
  * variable. The variable is pushed at the top of the stak.
@@ -906,6 +915,124 @@ int hlua_fcn_post_init(lua_State *L)
 	return 1;
 }
 
+/* This Lua function take a string, a list of separators.
+ * It tokenize the input string using the list of separators
+ * as separator.
+ *
+ * The functionreturns a tablle filled with tokens.
+ */
+int hlua_tokenize(lua_State *L)
+{
+	const char *str;
+	const char *sep;
+	int index;
+	const char *token;
+	const char *p;
+	const char *c;
+	int ignore_empty;
+
+	ignore_empty = 0;
+
+	str = luaL_checkstring(L, 1);
+	sep = luaL_checkstring(L, 2);
+	if (lua_gettop(L) == 3)
+		ignore_empty = hlua_checkboolean(L, 3);
+
+	lua_newtable(L);
+	index = 1;
+	token = str;
+	p = str;
+	while(1) {
+		for (c = sep; *c != '\0'; c++)
+			if (*p == *c)
+				break;
+		if (*p == *c) {
+			if ((!ignore_empty) || (p - token > 0)) {
+				lua_pushlstring(L, token, p - token);
+				lua_rawseti(L, -2, index);
+				index++;
+			}
+			token = p + 1;
+		}
+		if (*p == '\0')
+			break;
+		p++;
+	}
+
+	return 1;
+}
+
+int hlua_parse_addr(lua_State *L)
+{
+	struct hlua_addr *addr;
+	const char *str = luaL_checkstring(L, 1);
+	unsigned char mask;
+
+	addr = lua_newuserdata(L, sizeof(struct hlua_addr));
+	if (!addr) {
+		lua_pushnil(L);
+		return 1;
+	}
+
+	if (str2net(str, PAT_MF_NO_DNS, &addr->addr.v4.ip, &addr->addr.v4.mask)) {
+		addr->type = AF_INET;
+		return 1;
+	}
+
+	if (str62net(str, &addr->addr.v6.ip, &mask)) {
+		len2mask6(mask, &addr->addr.v6.mask);
+		addr->type = AF_INET6;
+		return 1;
+	}
+
+	lua_pop(L, 1);
+	lua_pushnil(L);
+	return 1;
+}
+
+int hlua_match_addr(lua_State *L)
+{
+	struct hlua_addr *addr1;
+	struct hlua_addr *addr2;
+
+	if (!lua_isuserdata(L, 1) ||
+	    !lua_isuserdata(L, 2)) {
+		lua_pushboolean(L, 0);
+		return 1;
+	}
+
+	addr1 = lua_touserdata(L, 1);
+	addr2 = lua_touserdata(L, 2);
+
+	if (addr1->type != addr2->type) {
+		lua_pushboolean(L, 0);
+		return 1;
+	}
+
+	if (addr1->type == AF_INET) {
+		if ((addr1->addr.v4.ip.s_addr & addr2->addr.v4.mask.s_addr) ==
+		    (addr2->addr.v4.ip.s_addr & addr1->addr.v4.mask.s_addr)) {
+			lua_pushboolean(L, 1);
+			return 1;
+		}
+	} else {
+		if (((addr1->addr.v6.ip.s6_addr32[0] & addr2->addr.v6.mask.s6_addr32[0]) ==
+		     (addr2->addr.v6.ip.s6_addr32[0] & addr1->addr.v6.mask.s6_addr32[0])) &&
+		    ((addr1->addr.v6.ip.s6_addr32[1] & addr2->addr.v6.mask.s6_addr32[1]) ==
+		     (addr2->addr.v6.ip.s6_addr32[1] & addr1->addr.v6.mask.s6_addr32[1])) &&
+		    ((addr1->addr.v6.ip.s6_addr32[2] & addr2->addr.v6.mask.s6_addr32[2]) ==
+		     (addr2->addr.v6.ip.s6_addr32[2] & addr1->addr.v6.mask.s6_addr32[2])) &&
+		    ((addr1->addr.v6.ip.s6_addr32[3] & addr2->addr.v6.mask.s6_addr32[3]) ==
+		     (addr2->addr.v6.ip.s6_addr32[3] & addr1->addr.v6.mask.s6_addr32[3]))) {
+			lua_pushboolean(L, 1);
+			return 1;
+		}
+	}
+
+	lua_pushboolean(L, 0);
+	return 1;
+}
+
 int hlua_fcn_reg_core_fcn(lua_State *L)
 {
 	if (!hlua_concat_init(L))
@@ -918,6 +1045,9 @@ int hlua_fcn_reg_core_fcn(lua_State *L)
 	hlua_class_function(L, "asctime_date", hlua_asctime_date);
 	hlua_class_function(L, "concat", hlua_concat_new);
 	hlua_class_function(L, "get_info", hlua_get_info);
+	hlua_class_function(L, "parse_addr", hlua_parse_addr);
+	hlua_class_function(L, "match_addr", hlua_match_addr);
+	hlua_class_function(L, "tokenize", hlua_tokenize);
 
 	/* Create listener object. */
 	lua_newtable(L);

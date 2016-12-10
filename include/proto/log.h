@@ -65,27 +65,16 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 void strm_log(struct stream *s);
 
 /*
- * Parse args in a logformat_var
- */
-int parse_logformat_var_args(char *args, struct logformat_node *node);
-
-/*
- * Parse a variable '%varname' or '%{args}varname' in log-format
- *
- */
-int parse_logformat_var(char *arg, int arg_len, char *var, int var_len, struct proxy *curproxy, struct list *list_format, int *defoptions);
-
-/*
  * add to the logformat linked list
  */
-void add_to_logformat_list(char *start, char *end, int type, struct list *list_format);
+int add_to_logformat_list(char *start, char *end, int type, struct list *list_format, char **err);
 
 /*
  * Parse the log_format string and fill a linked list.
  * Variable name are preceded by % and composed by characters [a-zA-Z0-9]* : %varname
  * You can set arguments using { } : %{many arguments}varname
  */
-void parse_logformat_string(const char *str, struct proxy *curproxy, struct list *list_format, int options, int cap, const char *file, int line);
+int parse_logformat_string(const char *str, struct proxy *curproxy, struct list *list_format, int options, int cap, char **err);
 /*
  * Displays the message on stderr with the date and pid. Overrides the quiet
  * mode during startup.

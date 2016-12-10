@@ -1,7 +1,7 @@
                              ------------------------
                              HAProxy Management Guide
                              ------------------------
-                                   version 1.7
+                                   version 1.8
 
 
 This document describes how to start, stop, manage, and troubleshoot HAProxy,
@@ -227,6 +227,14 @@ list of options is :
     related to this poller. On systems supporting poll, the fallback will
     generally be the "select" poller, which cannot be disabled and is limited
     to 1024 file descriptors.
+
+  -dr : ignore server address resolution failures. It is very common when
+    validating a configuration out of production not to have access to the same
+    resolvers and to fail on server address resolution, making it difficult to
+    test a configuration. This option simply appends the "none" method to the
+    list of address resolution methods for all servers, ensuring that even if
+    the libc fails to resolve an address, the startup sequence is not
+    interrupted.
 
   -m <limit> : limit the total allocatable memory to <limit> megabytes across
     all processes. This may cause some connection refusals or some slowdowns
@@ -933,7 +941,7 @@ S (Servers).
  16. wredis [..BS]: number of times a request was redispatched to another
      server. The server value counts the number of times that server was
      switched away from.
- 17. status [LFBS]: status (UP/DOWN/NOLB/MAINT/MAINT(via)...)
+ 17. status [LFBS]: status (UP/DOWN/NOLB/MAINT/MAINT(via)/MAINT(resolution)...)
  18. weight [..BS]: total weight (backend), server weight (server)
  19. act [..BS]: number of active servers (backend), server is active (server)
  20. bck [..BS]: number of backup servers (backend), server is backup (server)
@@ -1035,6 +1043,8 @@ S (Servers).
  78: conn_rate_max [.F..]: highest known conn_rate
  79: conn_tot [.F..]: cumulative number of connections
  80: intercepted [.FB.]: cum. number of intercepted requests (monitor, stats)
+ 81: dcon [LF..]: requests denied by "tcp-request connection" rules
+ 82: dses [LF..]: requests denied by "tcp-request session" rules
 
 
 9.2) Typed output format
@@ -1238,6 +1248,9 @@ commands in this mode, they need to be delimited by a semi-colon (';'). For
 example :
 
     # echo "show info;show stat;show table" | socat /var/run/haproxy stdio
+
+If a command needs to use a semi-colon or a backslash (eg: in a value), it
+must be preceeded by a backslash ('\').
 
 The interactive mode displays a prompt ('>') and waits for commands to be
 entered on the line, then processes them, and displays the prompt again to wait
@@ -1579,8 +1592,11 @@ set rate-limit ssl-sessions global <value>
   is passed in number of sessions per second sent to the SSL stack. It applies
   before the handshake in order to protect the stack against handshake abuses.
 
-set server <backend>/<server> addr <ip4 or ip6 address>
+set server <backend>/<server> addr <ip4 or ip6 address> [port <port>]
   Replace the current IP address of a server by the one provided.
+  Optionnaly, the port can be changed using the 'port' parameter.
+  Note that changing the port also support switching from/to port mapping
+  (notation with +X or -Y), only if a port is configured for the health check.
 
 set server <backend>/<server> agent [ up | down ]
   Force a server's agent to a new state. This can be useful to immediately
@@ -1591,6 +1607,9 @@ set server <backend>/<server> health [ up | stopping | down ]
   Force a server's health to a new state. This can be useful to immediately
   switch a server's state regardless of some slow health checks for example.
   Note that the change is propagated to tracking servers if any.
+
+set server <backend>/<server> check-port <port>
+  Change the port used for health checking to <port>
 
 set server <backend>/<server> state [ ready | drain | maint ]
   Force a server's administrative state to a new state. This can be useful to
@@ -1665,12 +1684,15 @@ show env [<name>]
   ensure that they contain the expected values. This command is restricted and
   can only be issued on sockets configured for levels "operator" or "admin".
 
-show errors [<iid>]
+show errors [<iid>|<proxy>] [request|response]
   Dump last known request and response errors collected by frontends and
   backends. If <iid> is specified, the limit the dump to errors concerning
-  either frontend or backend whose ID is <iid>. This command is restricted
-  and can only be issued on sockets configured for levels "operator" or
-  "admin".
+  either frontend or backend whose ID is <iid>. Proxy ID "-1" will cause
+  all instances to be dumped. If a proxy name is specified instead, its ID
+  will be used as the filter. If "request" or "response" is added after the
+  proxy name or ID, only request or response errors will be dumped. This
+  command is restricted and can only be issued on sockets configured for
+  levels "operator" or "admin".
 
   The errors which may be collected are the last request and response errors
   caused by protocol violations, often due to invalid characters in header
@@ -1696,7 +1718,7 @@ show errors [<iid>]
   line.
 
   Example :
-        $ echo "show errors" | socat stdio /tmp/sock1
+        $ echo "show errors -1 response" | socat stdio /tmp/sock1
     >>> [04/Mar/2009:15:46:56.081] backend http-in (#2) : invalid response
           src 127.0.0.1, session #54, frontend fe-eth0 (#1), server s2 (#1)
           response length 213 bytes, error at position 23:
@@ -1783,8 +1805,9 @@ show info [typed]
       11.PoolFailed.1:MCP:u32:0
       (...)
 
-  In the typed format, the presence of the process ID at the end of the line
-  makes it very easy to visually aggregate outputs from multiple processes.
+  In the typed format, the presence of the process ID at the end of the
+  first column makes it very easy to visually aggregate outputs from
+  multiple processes.
   Example :
 
       $ ( echo show info typed | socat /var/run/haproxy.sock1 ;    \
@@ -1848,20 +1871,73 @@ show servers state [<backend>]
      srv_name:                    Server label.
      srv_addr:                    Server IP address.
      srv_op_state:                Server operational state (UP/DOWN/...).
-                                  In source code: SRV_ST_*.
+                                    0 = SRV_ST_STOPPED
+                                      The server is down.
+                                    1 = SRV_ST_STARTING
+                                      The server is warming up (up but
+                                      throttled).
+                                    2 = SRV_ST_RUNNING
+                                      The server is fully up.
+                                    3 = SRV_ST_STOPPING
+                                      The server is up but soft-stopping
+                                      (eg: 404).
      srv_admin_state:             Server administrative state (MAINT/DRAIN/...).
-                                  In source code: SRV_ADMF_*.
+                                  The state is actually a mask of values :
+                                    0x01 = SRV_ADMF_FMAINT
+                                      The server was explicitly forced into
+                                      maintenance.
+                                    0x02 = SRV_ADMF_IMAINT
+                                      The server has inherited the maintenance
+                                      status from a tracked server.
+                                    0x04 = SRV_ADMF_CMAINT
+                                      The server is in maintenance because of
+                                      the configuration.
+                                    0x08 = SRV_ADMF_FDRAIN
+                                      The server was explicitly forced into
+                                      drain state.
+                                    0x10 = SRV_ADMF_IDRAIN
+                                      The server has inherited the drain status
+                                      from a tracked server.
+                                    0x20 = SRV_ADMF_RMAINT
+                                      The server is in maintenance because of an
+                                      IP address resolution failure.
      srv_uweight:                 User visible server's weight.
      srv_iweight:                 Server's initial weight.
      srv_time_since_last_change:  Time since last operational change.
      srv_check_status:            Last health check status.
      srv_check_result:            Last check result (FAILED/PASSED/...).
-                                  In source code: CHK_RES_*.
+                                    0 = CHK_RES_UNKNOWN
+                                      Initialized to this by default.
+                                    1 = CHK_RES_NEUTRAL
+                                      Valid check but no status information.
+                                    2 = CHK_RES_FAILED
+                                      Check failed.
+                                    3 = CHK_RES_PASSED
+                                      Check succeeded and server is fully up
+                                      again.
+                                    4 = CHK_RES_CONDPASS
+                                      Check reports the server doesn't want new
+                                      sessions.
      srv_check_health:            Checks rise / fall current counter.
      srv_check_state:             State of the check (ENABLED/PAUSED/...).
-                                  In source code: CHK_ST_*.
+                                  The state is actually a mask of values :
+                                    0x01 = CHK_ST_INPROGRESS
+                                      A check is currently running.
+                                    0x02 = CHK_ST_CONFIGURED
+                                      This check is configured and may be
+                                      enabled.
+                                    0x04 = CHK_ST_ENABLED
+                                      This check is currently administratively
+                                      enabled.
+                                    0x08 = CHK_ST_PAUSED
+                                      Checks are paused because of maintenance
+                                      (health only).
      srv_agent_state:             State of the agent check (ENABLED/PAUSED/...).
-                                  In source code: CHK_ST_*.
+                                  This state uses the same mask values as
+                                  "srv_check_state", adding this specific one :
+                                    0x10 = CHK_ST_AGENT
+                                      Check is an agent check (otherwise it's a
+                                      health check).
      bk_f_forced_id:              Flag to know if the backend ID is forced by
                                   configuration.
      srv_f_forced_id:             Flag to know if the server's ID is forced by
@@ -1884,12 +1960,14 @@ show sess <id>
   The special id "all" dumps the states of all sessions, which must be avoided
   as much as possible as it is highly CPU intensive and can take a lot of time.
 
-show stat [<iid> <type> <sid>] [typed]
+show stat [{<iid>|<proxy>} <type> <sid>] [typed]
   Dump statistics using the CSV format, or using the extended typed output
   format described in the section above if "typed" is passed after the other
   arguments. By passing <id>, <type> and <sid>, it is possible to dump only
   selected items :
-    - <iid> is a proxy ID, -1 to dump everything
+    - <iid> is a proxy ID, -1 to dump everything. Alternatively, a proxy name
+      <proxy> may be specified. In this case, this proxy's ID will be used as
+      the ID selector.
     - <type> selects the type of dumpable objects : 1 for frontends, 2 for
        backends, 4 for servers, -1 for everything. These values can be ORed,
        for example:
@@ -1995,9 +2073,10 @@ show stat [<iid> <type> <sid>] [typed]
         B.3.0.55.lastsess.1:MMP:s32:-1
         (...)
 
-  In the typed format, the presence of the process ID at the end of the line
-  makes it very easy to visually aggregate outputs from multiple processes, as
-  show in the example below where each line appears for each process :
+  In the typed format, the presence of the process ID at the end of the
+  first column makes it very easy to visually aggregate outputs from
+  multiple processes, as show in the example below where each line appears
+  for each process :
 
         $ ( echo show stat typed | socat /var/run/haproxy.sock1 - ; \
             echo show stat typed | socat /var/run/haproxy.sock2 - ) | \

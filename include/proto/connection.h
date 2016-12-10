@@ -152,6 +152,7 @@ static inline void conn_force_close(struct connection *conn)
 	if (conn_ctrl_ready(conn))
 		fd_delete(conn->t.sock.fd);
 
+	conn->t.sock.fd = DEAD_FD_MAGIC;
 	conn->flags &= ~(CO_FL_XPRT_READY|CO_FL_CTRL_READY);
 }
 
@@ -261,7 +262,8 @@ static inline void conn_stop_polling(struct connection *c)
 	c->flags &= ~(CO_FL_CURR_RD_ENA | CO_FL_CURR_WR_ENA |
 		      CO_FL_SOCK_RD_ENA | CO_FL_SOCK_WR_ENA |
 		      CO_FL_DATA_RD_ENA | CO_FL_DATA_WR_ENA);
-	fd_stop_both(c->t.sock.fd);
+	if (conn_ctrl_ready(c))
+		fd_stop_both(c->t.sock.fd);
 }
 
 /* Automatically update polling on connection <c> depending on the DATA and
@@ -292,6 +294,20 @@ static inline void __conn_data_want_recv(struct connection *c)
 static inline void __conn_data_stop_recv(struct connection *c)
 {
 	c->flags &= ~CO_FL_DATA_RD_ENA;
+}
+
+/* this one is used only to stop speculative recv(). It doesn't stop it if the
+ * fd is already polled in order to avoid expensive polling status changes.
+ * Since it might require the upper layer to re-enable reading, we'll return 1
+ * if we've really stopped something otherwise zero.
+ */
+static inline int __conn_data_done_recv(struct connection *c)
+{
+	if (!conn_ctrl_ready(c) || !fd_recv_polled(c->t.sock.fd)) {
+		c->flags &= ~CO_FL_DATA_RD_ENA;
+		return 1;
+	}
+	return 0;
 }
 
 static inline void __conn_data_want_send(struct connection *c)
@@ -480,7 +496,7 @@ static inline void conn_init(struct connection *conn)
 	conn->data = NULL;
 	conn->owner = NULL;
 	conn->send_proxy_ofs = 0;
-	conn->t.sock.fd = -1; /* just to help with debugging */
+	conn->t.sock.fd = DEAD_FD_MAGIC;
 	conn->err_code = CO_ER_NONE;
 	conn->target = NULL;
 	conn->proxy_netns = NULL;
@@ -595,6 +611,28 @@ static inline const char *conn_err_code_str(struct connection *c)
 	}
 	return NULL;
 }
+
+static inline const char *conn_get_ctrl_name(const struct connection *conn)
+{
+	if (!conn_ctrl_ready(conn))
+		return "NONE";
+	return conn->ctrl->name;
+}
+
+static inline const char *conn_get_xprt_name(const struct connection *conn)
+{
+	if (!conn_xprt_ready(conn))
+		return "NONE";
+	return conn->xprt->name;
+}
+
+static inline const char *conn_get_data_name(const struct connection *conn)
+{
+	if (!conn->data)
+		return "NONE";
+	return conn->data->name;
+}
+
 
 #endif /* _PROTO_CONNECTION_H */
 

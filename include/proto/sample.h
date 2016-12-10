@@ -36,6 +36,7 @@ struct sample *sample_process(struct proxy *px, struct session *sess,
 struct sample *sample_fetch_as_type(struct proxy *px, struct session *sess,
                                    struct stream *strm, unsigned int opt,
                                    struct sample_expr *expr, int smp_type);
+void release_sample_expr(struct sample_expr *expr);
 void sample_register_fetches(struct sample_fetch_kw_list *psl);
 void sample_register_convs(struct sample_conv_kw_list *psl);
 const char *sample_src_names(unsigned int use);
@@ -72,6 +73,94 @@ struct sample *smp_set_owner(struct sample *smp, struct proxy *px,
 	smp->strm = strm;
 	smp->opt  = opt;
 	return smp;
+}
+
+
+/* Returns 1 if a sample may be safely used. It performs a few checks on the
+ * string length versus size, same for the binary version, and ensures that
+ * strings are properly terminated by a zero. If this last point is not granted
+ * but the string is not const, then the \0 is appended. Otherwise it returns 0,
+ * meaning the caller may need to call smp_dup() before going further.
+ */
+static inline
+int smp_is_safe(struct sample *smp)
+{
+	switch (smp->data.type) {
+	case SMP_T_STR:
+		if ((smp->data.u.str.len < 0) ||
+		    (smp->data.u.str.size && smp->data.u.str.len >= smp->data.u.str.size))
+			return 0;
+
+		if (smp->data.u.str.str[smp->data.u.str.len] == 0)
+			return 1;
+
+		if (!smp->data.u.str.size || (smp->flags & SMP_F_CONST))
+			return 0;
+
+		smp->data.u.str.str[smp->data.u.str.len] = 0;
+		return 1;
+
+	case SMP_T_BIN:
+		return (smp->data.u.str.len >= 0) &&
+		       (!smp->data.u.str.size || smp->data.u.str.len <= smp->data.u.str.size);
+
+	default:
+		return 1;
+	}
+}
+
+/* checks that a sample may freely be used, or duplicates it to normalize it.
+ * Returns 1 on success, 0 if the sample must not be used. The function also
+ * checks for NULL to simplify the calling code.
+ */
+static inline
+int smp_make_safe(struct sample *smp)
+{
+	return smp && (smp_is_safe(smp) || smp_dup(smp));
+}
+
+/* Returns 1 if a sample may be safely modified in place. It performs a few
+ * checks on the string length versus size, same for the binary version, and
+ * ensures that strings are properly terminated by a zero, and of course that
+ * the size is allocate and that the SMP_F_CONST flag is not set. If only the
+ * trailing zero is missing, it is appended. Otherwise it returns 0, meaning
+ * the caller may need to call smp_dup() before going further.
+ */
+static inline
+int smp_is_rw(struct sample *smp)
+{
+	if (smp->flags & SMP_F_CONST)
+		return 0;
+
+	switch (smp->data.type) {
+	case SMP_T_STR:
+		if (!smp->data.u.str.size ||
+		    smp->data.u.str.len < 0 ||
+		    smp->data.u.str.len >= smp->data.u.str.size)
+			return 0;
+
+		if (smp->data.u.str.str[smp->data.u.str.len] != 0)
+			smp->data.u.str.str[smp->data.u.str.len] = 0;
+		return 1;
+
+	case SMP_T_BIN:
+		return smp->data.u.str.size &&
+		       smp->data.u.str.len >= 0 &&
+		       smp->data.u.str.len <= smp->data.u.str.size;
+
+	default:
+		return 1;
+	}
+}
+
+/* checks that a sample may freely be modified, or duplicates it to normalize
+ * it and make it R/W. Returns 1 on success, 0 if the sample must not be used.
+ * The function also checks for NULL to simplify the calling code.
+ */
+static inline
+int smp_make_rw(struct sample *smp)
+{
+	return smp && (smp_is_rw(smp) || smp_dup(smp));
 }
 
 #endif /* _PROTO_SAMPLE_H */

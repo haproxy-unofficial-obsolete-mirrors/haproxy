@@ -304,11 +304,21 @@ static int
 flt_stream_add_filter(struct stream *s, struct flt_conf *fconf, unsigned int flags)
 {
 	struct filter *f = pool_alloc2(pool2_filter);
+
 	if (!f) /* not enough memory */
 		return -1;
 	memset(f, 0, sizeof(*f));
 	f->config = fconf;
 	f->flags |= flags;
+
+	if (FLT_OPS(f)->attach) {
+		int ret = FLT_OPS(f)->attach(s, f);
+		if (ret <= 0) {
+			pool_free2(pool2_filter, f);
+			return ret;
+		}
+	}
+
 	LIST_ADDQ(&strm_flt(s)->filters, &f->list);
 	strm_flt(s)->flags |= STRM_FLT_FL_HAS_FILTERS;
 	return 0;
@@ -345,6 +355,8 @@ flt_stream_release(struct stream *s, int only_backend)
 
 	list_for_each_entry_safe(filter, back, &strm_flt(s)->filters, list) {
 		if (!only_backend || (filter->flags & FLT_FL_IS_BACKEND_FILTER)) {
+			if (FLT_OPS(filter)->detach)
+				FLT_OPS(filter)->detach(s, filter);
 			LIST_DEL(&filter->list);
 			pool_free2(pool2_filter, filter);
 		}
@@ -386,22 +398,46 @@ flt_stream_stop(struct stream *s)
 }
 
 /*
+ * Calls 'check_timeouts' for all filters attached to a stream. This happens when
+ * the stream is woken up because of expired timer.
+ */
+void
+flt_stream_check_timeouts(struct stream *s)
+{
+	struct filter *filter;
+
+	list_for_each_entry(filter, &strm_flt(s)->filters, list) {
+		if (FLT_OPS(filter)->check_timeouts)
+			FLT_OPS(filter)->check_timeouts(s, filter);
+	}
+}
+
+/*
  * Called when a backend is set for a stream. If the frontend and the backend
- * are the same, this function does nothing. Else it attaches all backend
- * filters to the stream. Returns -1 if an error occurs, 0 otherwise.
+ * are not the same, this function attaches all backend filters to the
+ * stream. Returns -1 if an error occurs, 0 otherwise.
  */
 int
 flt_set_stream_backend(struct stream *s, struct proxy *be)
 {
 	struct flt_conf *fconf;
+	struct filter   *filter;
 
 	if (strm_fe(s) == be)
-		return 0;
+		goto end;
 
 	list_for_each_entry(fconf, &be->filter_configs, list) {
 		if (flt_stream_add_filter(s, fconf, FLT_FL_IS_BACKEND_FILTER) < 0)
 			return -1;
 	}
+
+  end:
+	list_for_each_entry(filter, &strm_flt(s)->filters, list) {
+		if (FLT_OPS(filter)->stream_set_backend &&
+		    FLT_OPS(filter)->stream_set_backend(s, filter, be) < 0)
+			return -1;
+	}
+
 	return 0;
 }
 
@@ -781,10 +817,11 @@ end:
 		if (s->txn && (s->txn->flags & TX_WAIT_NEXT_RQ) && !channel_input_closed(&s->req)) {
 			s->req.analysers = strm_li(s) ? strm_li(s)->analysers : 0;
 			s->res.analysers = 0;
+
+			/* Remove backend filters from the list */
+			flt_stream_release(s, 1);
 		}
 
-		/* Remove backend filters from the list */
-		flt_stream_release(s, 1);
 	}
 	else if (ret) {
 		/* Analyzer ends only for one channel. So wake up the stream to

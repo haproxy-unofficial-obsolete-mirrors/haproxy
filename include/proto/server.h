@@ -26,6 +26,7 @@
 
 #include <common/config.h>
 #include <common/time.h>
+#include <types/applet.h>
 #include <types/dns.h>
 #include <types/proxy.h>
 #include <types/queue.h>
@@ -40,14 +41,19 @@ int srv_lastsession(const struct server *s);
 int srv_getinter(const struct check *check);
 int parse_server(const char *file, int linenum, char **args, struct proxy *curproxy, struct proxy *defproxy);
 int update_server_addr(struct server *s, void *ip, int ip_sin_family, const char *updater);
+const char *update_server_addr_port(struct server *s, const char *addr, const char *port, char *updater);
 struct server *server_find_by_id(struct proxy *bk, int id);
 struct server *server_find_by_name(struct proxy *bk, const char *name);
 struct server *server_find_best_match(struct proxy *bk, char *name, int id, int *diff);
 void apply_server_state(void);
+void srv_compute_all_admin_states(struct proxy *px);
+int srv_set_addr_via_libc(struct server *srv, int *err_code);
+int srv_init_addr(void);
+struct server *cli_find_server(struct appctx *appctx, char *arg);
 
 /* functions related to server name resolution */
 int snr_update_srv_status(struct server *s);
-int snr_resolution_cb(struct dns_resolution *resolution, struct dns_nameserver *nameserver, unsigned char *response, int response_len);
+int snr_resolution_cb(struct dns_resolution *resolution, struct dns_nameserver *nameserver, struct dns_response_packet *dns_p);
 int snr_resolution_error_cb(struct dns_resolution *resolution, int error_code);
 
 /* increase the number of cumulated connections on the designated server */
@@ -185,9 +191,10 @@ void srv_set_stopping(struct server *s, const char *reason);
  * one flag at once. The equivalent "inherited" flag is propagated to all
  * tracking servers. Maintenance mode disables health checks (but not agent
  * checks). When either the flag is already set or no flag is passed, nothing
- * is done.
+ * is done. If <cause> is non-null, it will be displayed at the end of the log
+ * lines to justify the state change.
  */
-void srv_set_admin_flag(struct server *s, enum srv_admin mode);
+void srv_set_admin_flag(struct server *s, enum srv_admin mode, const char *cause);
 
 /* Disables admin flag <mode> (among SRV_ADMF_*) on server <s>. This is used to
  * stop enforcing either maint mode or drain mode. It is not allowed to set more
@@ -202,7 +209,7 @@ void srv_clr_admin_flag(struct server *s, enum srv_admin mode);
  */
 static inline void srv_adm_set_maint(struct server *s)
 {
-	srv_set_admin_flag(s, SRV_ADMF_FMAINT);
+	srv_set_admin_flag(s, SRV_ADMF_FMAINT, NULL);
 	srv_clr_admin_flag(s, SRV_ADMF_FDRAIN);
 }
 
@@ -211,7 +218,7 @@ static inline void srv_adm_set_maint(struct server *s)
  */
 static inline void srv_adm_set_drain(struct server *s)
 {
-	srv_set_admin_flag(s, SRV_ADMF_FDRAIN);
+	srv_set_admin_flag(s, SRV_ADMF_FDRAIN, NULL);
 	srv_clr_admin_flag(s, SRV_ADMF_FMAINT);
 }
 
@@ -222,6 +229,34 @@ static inline void srv_adm_set_ready(struct server *s)
 {
 	srv_clr_admin_flag(s, SRV_ADMF_FDRAIN);
 	srv_clr_admin_flag(s, SRV_ADMF_FMAINT);
+}
+
+/* appends an initaddr method to the existing list. Returns 0 on failure. */
+static inline int srv_append_initaddr(unsigned int *list, enum srv_initaddr addr)
+{
+	int shift = 0;
+
+	while (shift + 3 < 32 && (*list >> shift))
+		shift += 3;
+
+	if (shift + 3 > 32)
+		return 0;
+
+	*list |= addr << shift;
+	return 1;
+}
+
+/* returns the next initaddr method and removes it from <list> by shifting
+ * it right (implying that it MUST NOT be the server's. Returns SRV_IADDR_END
+ * at the end.
+ */
+static inline enum srv_initaddr srv_get_next_initaddr(unsigned int *list)
+{
+	enum srv_initaddr ret;
+
+	ret = *list & 7;
+	*list >>= 3;
+	return ret;
 }
 
 #endif /* _PROTO_SERVER_H */

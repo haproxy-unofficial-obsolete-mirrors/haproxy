@@ -86,12 +86,14 @@ struct data_cb si_conn_cb = {
 	.recv    = si_conn_recv_cb,
 	.send    = si_conn_send_cb,
 	.wake    = si_conn_wake_cb,
+	.name    = "STRM",
 };
 
 struct data_cb si_idle_conn_cb = {
 	.recv    = si_idle_conn_null_cb,
 	.send    = si_idle_conn_null_cb,
 	.wake    = si_idle_conn_wake_cb,
+	.name    = "IDLE",
 };
 
 /*
@@ -1171,8 +1173,8 @@ static void si_conn_recv_cb(struct connection *conn)
 		}
 
 		if ((ic->flags & CF_READ_DONTWAIT) || --read_poll <= 0) {
-			si->flags |= SI_FL_WAIT_ROOM;
-			__conn_data_stop_recv(conn);
+			if (__conn_data_done_recv(conn))
+				si->flags |= SI_FL_WAIT_ROOM;
 			break;
 		}
 

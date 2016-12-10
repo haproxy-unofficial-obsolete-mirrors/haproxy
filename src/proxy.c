@@ -29,10 +29,14 @@
 #include <ebistree.h>
 
 #include <types/capture.h>
+#include <types/cli.h>
 #include <types/global.h>
 #include <types/obj_type.h>
 #include <types/peers.h>
+#include <types/stats.h>
 
+#include <proto/applet.h>
+#include <proto/cli.h>
 #include <proto/backend.h>
 #include <proto/fd.h>
 #include <proto/filters.h>
@@ -44,6 +48,7 @@
 #include <proto/proxy.h>
 #include <proto/signal.h>
 #include <proto/stream.h>
+#include <proto/stream_interface.h>
 #include <proto/task.h>
 
 
@@ -56,7 +61,7 @@ unsigned int error_snapshot_id = 0;     /* global ID assigned to each error then
 /*
  * This function returns a string containing a name describing capabilities to
  * report comprehensible error messages. Specifically, it will return the words
- * "frontend", "backend", "ruleset" when appropriate, or "proxy" for all other
+ * "frontend", "backend" when appropriate, or "proxy" for all other
  * cases including the proxies declared in "listen" mode.
  */
 const char *proxy_cap_str(int cap)
@@ -66,8 +71,6 @@ const char *proxy_cap_str(int cap)
 			return "frontend";
 		else if (cap & PR_CAP_BE)
 			return "backend";
-		else if (cap & PR_CAP_RS)
-			return "ruleset";
 	}
 	return "proxy";
 }
@@ -737,6 +740,7 @@ void init_new_proxy(struct proxy *p)
 	LIST_INIT(&p->tcp_req.inspect_rules);
 	LIST_INIT(&p->tcp_rep.inspect_rules);
 	LIST_INIT(&p->tcp_req.l4_rules);
+	LIST_INIT(&p->tcp_req.l5_rules);
 	LIST_INIT(&p->req_add);
 	LIST_INIT(&p->rsp_add);
 	LIST_INIT(&p->listener_queue);
@@ -1132,14 +1136,15 @@ int stream_set_backend(struct stream *s, struct proxy *be)
 {
 	if (s->flags & SF_BE_ASSIGNED)
 		return 1;
+
+	if (flt_set_stream_backend(s, be) < 0)
+		return 0;
+
 	s->be = be;
 	be->beconn++;
 	if (be->beconn > be->be_counters.conn_max)
 		be->be_counters.conn_max = be->beconn;
 	proxy_inc_be_ctr(be);
-
-	if (flt_set_stream_backend(s, be) < 0)
-		return 0;
 
 	/* assign new parameters to the stream from the new backend */
 	s->si[1].flags &= ~SI_FL_INDEP_STR;
@@ -1216,10 +1221,353 @@ static struct cfg_kw_list cfg_kws = {ILH, {
 	{ 0, NULL, NULL },
 }};
 
+/* Expects to find a frontend named <arg> and returns it, otherwise displays various
+ * adequate error messages and returns NULL. This function is designed to be used by
+ * functions requiring a frontend on the CLI.
+ */
+struct proxy *cli_find_frontend(struct appctx *appctx, const char *arg)
+{
+	struct proxy *px;
+
+	if (!*arg) {
+		appctx->ctx.cli.msg = "A frontend name is expected.\n";
+		appctx->st0 = CLI_ST_PRINT;
+		return NULL;
+	}
+
+	px = proxy_fe_by_name(arg);
+	if (!px) {
+		appctx->ctx.cli.msg = "No such frontend.\n";
+		appctx->st0 = CLI_ST_PRINT;
+		return NULL;
+	}
+	return px;
+}
+
+/* parse a "show servers" CLI line, returns 0 if it wants to start the dump or
+ * 1 if it stops immediately.
+ */
+static int cli_parse_show_servers(char **args, struct appctx *appctx, void *private)
+{
+	appctx->ctx.server_state.iid = 0;
+	appctx->ctx.server_state.px = NULL;
+	appctx->ctx.server_state.sv = NULL;
+
+	/* check if a backend name has been provided */
+	if (*args[3]) {
+		/* read server state from local file */
+		appctx->ctx.server_state.px = proxy_be_by_name(args[3]);
+
+		if (!appctx->ctx.server_state.px) {
+			appctx->ctx.cli.msg = "Can't find backend.\n";
+			appctx->st0 = CLI_ST_PRINT;
+			return 1;
+		}
+		appctx->ctx.server_state.iid = appctx->ctx.server_state.px->uuid;
+	}
+	return 0;
+}
+
+/* dumps server state information into <buf> for all the servers found in <backend>
+ * These information are all the parameters which may change during HAProxy runtime.
+ * By default, we only export to the last known server state file format.
+ * These information can be used at next startup to recover same level of server state.
+ */
+static int dump_servers_state(struct stream_interface *si, struct chunk *buf)
+{
+	struct appctx *appctx = __objt_appctx(si->end);
+	struct server *srv;
+	char srv_addr[INET6_ADDRSTRLEN + 1];
+	time_t srv_time_since_last_change;
+	int bk_f_forced_id, srv_f_forced_id;
+
+
+	/* we don't want to report any state if the backend is not enabled on this process */
+	if (appctx->ctx.server_state.px->bind_proc && !(appctx->ctx.server_state.px->bind_proc & (1UL << (relative_pid - 1))))
+		return 1;
+
+	if (!appctx->ctx.server_state.sv)
+		appctx->ctx.server_state.sv = appctx->ctx.server_state.px->srv;
+
+	for (; appctx->ctx.server_state.sv != NULL; appctx->ctx.server_state.sv = srv->next) {
+		srv = appctx->ctx.server_state.sv;
+		srv_addr[0] = '\0';
+
+		switch (srv->addr.ss_family) {
+			case AF_INET:
+				inet_ntop(srv->addr.ss_family, &((struct sockaddr_in *)&srv->addr)->sin_addr,
+					  srv_addr, INET_ADDRSTRLEN + 1);
+				break;
+			case AF_INET6:
+				inet_ntop(srv->addr.ss_family, &((struct sockaddr_in6 *)&srv->addr)->sin6_addr,
+					  srv_addr, INET6_ADDRSTRLEN + 1);
+				break;
+		}
+		srv_time_since_last_change = now.tv_sec - srv->last_change;
+		bk_f_forced_id = appctx->ctx.server_state.px->options & PR_O_FORCED_ID ? 1 : 0;
+		srv_f_forced_id = srv->flags & SRV_F_FORCED_ID ? 1 : 0;
+
+		chunk_appendf(buf,
+				"%d %s "
+				"%d %s %s "
+				"%d %d %d %d %ld "
+				"%d %d %d %d %d "
+				"%d %d"
+				"\n",
+				appctx->ctx.server_state.px->uuid, appctx->ctx.server_state.px->id,
+				srv->puid, srv->id, srv_addr,
+				srv->state, srv->admin, srv->uweight, srv->iweight, (long int)srv_time_since_last_change,
+				srv->check.status, srv->check.result, srv->check.health, srv->check.state, srv->agent.state,
+				bk_f_forced_id, srv_f_forced_id);
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si_applet_cant_put(si);
+			return 0;
+		}
+	}
+	return 1;
+}
+
+/* Parses backend list or simply use backend name provided by the user to return
+ * states of servers to stdout.
+ */
+static int cli_io_handler_servers_state(struct appctx *appctx)
+{
+	struct stream_interface *si = appctx->owner;
+	extern struct proxy *proxy;
+	struct proxy *curproxy;
+
+	chunk_reset(&trash);
+
+	if (appctx->st2 == STAT_ST_INIT) {
+		if (!appctx->ctx.server_state.px)
+			appctx->ctx.server_state.px = proxy;
+		appctx->st2 = STAT_ST_HEAD;
+	}
+
+	if (appctx->st2 == STAT_ST_HEAD) {
+		chunk_printf(&trash, "%d\n# %s\n", SRV_STATE_FILE_VERSION, SRV_STATE_FILE_FIELD_NAMES);
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si_applet_cant_put(si);
+			return 0;
+		}
+		appctx->st2 = STAT_ST_INFO;
+	}
+
+	/* STAT_ST_INFO */
+	for (; appctx->ctx.server_state.px != NULL; appctx->ctx.server_state.px = curproxy->next) {
+		curproxy = appctx->ctx.server_state.px;
+		/* servers are only in backends */
+		if (curproxy->cap & PR_CAP_BE) {
+			if (!dump_servers_state(si, &trash))
+				return 0;
+
+			if (bi_putchk(si_ic(si), &trash) == -1) {
+				si_applet_cant_put(si);
+				return 0;
+			}
+		}
+		/* only the selected proxy is dumped */
+		if (appctx->ctx.server_state.iid)
+			break;
+	}
+
+	return 1;
+}
+
+static int cli_parse_show_backend(char **args, struct appctx *appctx, void *private)
+{
+	appctx->ctx.be.px = NULL;
+	return 0;
+}
+
+/* Parses backend list and simply report backend names */
+static int cli_io_handler_show_backend(struct appctx *appctx)
+{
+	extern struct proxy *proxy;
+	struct stream_interface *si = appctx->owner;
+	struct proxy *curproxy;
+
+	chunk_reset(&trash);
+
+	if (!appctx->ctx.be.px) {
+		chunk_printf(&trash, "# name\n");
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si_applet_cant_put(si);
+			return 0;
+		}
+		appctx->ctx.be.px = proxy;
+	}
+
+	for (; appctx->ctx.be.px != NULL; appctx->ctx.be.px = curproxy->next) {
+		curproxy = appctx->ctx.be.px;
+
+		/* looking for backends only */
+		if (!(curproxy->cap & PR_CAP_BE))
+			continue;
+
+		/* we don't want to list a backend which is bound to this process */
+		if (curproxy->bind_proc && !(curproxy->bind_proc & (1UL << (relative_pid - 1))))
+			continue;
+
+		chunk_appendf(&trash, "%s\n", curproxy->id);
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si_applet_cant_put(si);
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
+/* Parses the "set maxconn frontend" directive, it always returns 1 */
+static int cli_parse_set_maxconn_frontend(char **args, struct appctx *appctx, void *private)
+{
+	struct proxy *px;
+	struct listener *l;
+	int v;
+
+	if (!cli_has_level(appctx, ACCESS_LVL_ADMIN))
+		return 1;
+
+	px = cli_find_frontend(appctx, args[3]);
+	if (!px)
+		return 1;
+
+	if (!*args[4]) {
+		appctx->ctx.cli.msg = "Integer value expected.\n";
+		appctx->st0 = CLI_ST_PRINT;
+		return 1;
+	}
+
+	v = atoi(args[4]);
+	if (v < 0) {
+		appctx->ctx.cli.msg = "Value out of range.\n";
+		appctx->st0 = CLI_ST_PRINT;
+		return 1;
+	}
+
+	/* OK, the value is fine, so we assign it to the proxy and to all of
+	 * its listeners. The blocked ones will be dequeued.
+	 */
+	px->maxconn = v;
+	list_for_each_entry(l, &px->conf.listeners, by_fe) {
+		l->maxconn = v;
+		if (l->state == LI_FULL)
+			resume_listener(l);
+	}
+
+	if (px->maxconn > px->feconn && !LIST_ISEMPTY(&px->listener_queue))
+		dequeue_all_listeners(&px->listener_queue);
+
+	return 1;
+}
+
+/* Parses the "shutdown frontend" directive, it always returns 1 */
+static int cli_parse_shutdown_frontend(char **args, struct appctx *appctx, void *private)
+{
+	struct proxy *px;
+
+	if (!cli_has_level(appctx, ACCESS_LVL_ADMIN))
+		return 1;
+
+	px = cli_find_frontend(appctx, args[2]);
+	if (!px)
+		return 1;
+
+	if (px->state == PR_STSTOPPED) {
+		appctx->ctx.cli.msg = "Frontend was already shut down.\n";
+		appctx->st0 = CLI_ST_PRINT;
+		return 1;
+	}
+
+	Warning("Proxy %s stopped (FE: %lld conns, BE: %lld conns).\n",
+	        px->id, px->fe_counters.cum_conn, px->be_counters.cum_conn);
+	send_log(px, LOG_WARNING, "Proxy %s stopped (FE: %lld conns, BE: %lld conns).\n",
+	         px->id, px->fe_counters.cum_conn, px->be_counters.cum_conn);
+	stop_proxy(px);
+	return 1;
+}
+
+/* Parses the "disable frontend" directive, it always returns 1 */
+static int cli_parse_disable_frontend(char **args, struct appctx *appctx, void *private)
+{
+	struct proxy *px;
+
+	if (!cli_has_level(appctx, ACCESS_LVL_ADMIN))
+		return 1;
+
+	px = cli_find_frontend(appctx, args[2]);
+	if (!px)
+		return 1;
+
+	if (px->state == PR_STSTOPPED) {
+		appctx->ctx.cli.msg = "Frontend was previously shut down, cannot disable.\n";
+		appctx->st0 = CLI_ST_PRINT;
+		return 1;
+	}
+
+	if (px->state == PR_STPAUSED) {
+		appctx->ctx.cli.msg = "Frontend is already disabled.\n";
+		appctx->st0 = CLI_ST_PRINT;
+		return 1;
+	}
+
+	if (!pause_proxy(px)) {
+		appctx->ctx.cli.msg = "Failed to pause frontend, check logs for precise cause.\n";
+		appctx->st0 = CLI_ST_PRINT;
+		return 1;
+	}
+	return 1;
+}
+
+/* Parses the "enable frontend" directive, it always returns 1 */
+static int cli_parse_enable_frontend(char **args, struct appctx *appctx, void *private)
+{
+	struct proxy *px;
+
+	if (!cli_has_level(appctx, ACCESS_LVL_ADMIN))
+		return 1;
+
+	px = cli_find_frontend(appctx, args[2]);
+	if (!px)
+		return 1;
+
+	if (px->state == PR_STSTOPPED) {
+		appctx->ctx.cli.msg = "Frontend was previously shut down, cannot enable.\n";
+		appctx->st0 = CLI_ST_PRINT;
+		return 1;
+	}
+
+	if (px->state != PR_STPAUSED) {
+		appctx->ctx.cli.msg = "Frontend is already enabled.\n";
+		appctx->st0 = CLI_ST_PRINT;
+		return 1;
+	}
+
+	if (!resume_proxy(px)) {
+		appctx->ctx.cli.msg = "Failed to resume frontend, check logs for precise cause (port conflict?).\n";
+		appctx->st0 = CLI_ST_PRINT;
+		return 1;
+	}
+	return 1;
+}
+
+/* register cli keywords */
+static struct cli_kw_list cli_kws = {{ },{
+	{ { "disable", "frontend",  NULL }, "disable frontend : temporarily disable specific frontend", cli_parse_disable_frontend, NULL, NULL },
+	{ { "enable", "frontend",  NULL }, "enable frontend : re-enable specific frontend", cli_parse_enable_frontend, NULL, NULL },
+	{ { "set", "maxconn", "frontend",  NULL }, "set maxconn frontend : change a frontend's maxconn setting", cli_parse_set_maxconn_frontend, NULL },
+	{ { "show","servers", "state",  NULL }, "show servers state [id]: dump volatile server information (for backend <id>)", cli_parse_show_servers, cli_io_handler_servers_state },
+	{ { "show", "backend", NULL }, "show backend   : list backends in the current running config", cli_parse_show_backend, cli_io_handler_show_backend },
+	{ { "shutdown", "frontend",  NULL }, "shutdown frontend : stop a specific frontend", cli_parse_shutdown_frontend, NULL, NULL },
+	{{},}
+}};
+
 __attribute__((constructor))
 static void __proxy_module_init(void)
 {
 	cfg_register_keywords(&cfg_kws);
+	cli_register_kw(&cli_kws);
 }
 
 /*

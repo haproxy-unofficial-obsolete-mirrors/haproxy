@@ -77,8 +77,7 @@ enum PR_SRV_STATE_FILE {
 #define PR_CAP_NONE    0x0000
 #define PR_CAP_FE      0x0001
 #define PR_CAP_BE      0x0002
-#define PR_CAP_RS      0x0004
-#define PR_CAP_LISTEN  (PR_CAP_FE|PR_CAP_BE|PR_CAP_RS)
+#define PR_CAP_LISTEN  (PR_CAP_FE|PR_CAP_BE)
 
 /* bits for proxy->options */
 #define PR_O_REDISP     0x00000001      /* allow reconnection to dispatch in case of errors */
@@ -174,7 +173,8 @@ enum PR_SRV_STATE_FILE {
 #define PR_O2_LB_AGENT_CHK 0x80000000   /* use a TCP connection to obtain a metric of server health */
 #define PR_O2_TCPCHK_CHK 0x90000000     /* use TCPCHK check for server health */
 #define PR_O2_EXT_CHK   0xA0000000      /* use external command for server health */
-/* unused: 0xB0000000 to 0xF000000, reserved for health checks */
+#define PR_O2_SPOP_CHK  0xB0000000      /* use SPOP for server health */
+/* unused: 0xC0000000 to 0xF000000, reserved for health checks */
 #define PR_O2_CHK_ANY   0xF0000000      /* Mask to cover any check */
 /* end of proxy->options2 */
 
@@ -269,6 +269,7 @@ struct proxy {
 		unsigned int inspect_delay;     /* inspection delay */
 		struct list inspect_rules;      /* inspection rules */
 		struct list l4_rules;           /* layer4 rules */
+		struct list l5_rules;           /* layer5 rules */
 	} tcp_req;
 	struct {                                /* TCP request processing */
 		unsigned int inspect_delay;     /* inspection delay */
@@ -276,6 +277,7 @@ struct proxy {
 	} tcp_rep;
 	struct server *srv, defsrv;		/* known servers; default server configuration */
 	int srv_act, srv_bck;			/* # of servers eligible for LB (UP|!checked) AND (enabled+weight!=0) */
+	int served;				/* # of active sessions currently being served */
 	struct lbprm lbprm;			/* load-balancing parameters */
 	char *cookie_domain;			/* domain used to insert the cookie */
 	char *cookie_name;			/* name of the cookie to look for */
@@ -360,8 +362,8 @@ struct proxy {
 	struct pool_head *req_cap_pool,		/* pools of pre-allocated char ** used to build the streams */
 	                 *rsp_cap_pool;
 	struct list req_add, rsp_add;           /* headers to be added */
-	struct pxcounters be_counters;		/* backend statistics counters */
-	struct pxcounters fe_counters;		/* frontend statistics counters */
+	struct be_counters be_counters;		/* backend statistics counters */
+	struct fe_counters fe_counters;		/* frontend statistics counters */
 
 	struct list listener_queue;		/* list of the temporarily limited listeners because of lack of a proxy resource */
 	struct stktable table;			/* table for storing sticking streams */
@@ -444,6 +446,8 @@ struct switching_rule {
 		char *name;			/* target backend name during config parsing */
 		struct list expr;		/* logformat expression to use for dynamic rules */
 	} be;
+	char *file;
+	int line;
 };
 
 struct server_rule {

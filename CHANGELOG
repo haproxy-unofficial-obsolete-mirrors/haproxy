@@ -1,6 +1,361 @@
 ChangeLog :
 ===========
 
+2016/11/25 : 1.8-dev0
+
+2016/11/25 : 1.7.0
+    - SCRIPTS: make publish-release also copy the new SPOE doc
+    - BUILD: http: include types/sample.h in proto_http.h
+    - BUILD: debug/flags: remove test for SF_COMP_READY
+    - CONTRIB: debug/flags: add check for SF_ERR_CHK_PORT
+    - MINOR: lua: add function which return true if the channel is full.
+    - MINOR: lua: add ip addresses and network manipulation function
+    - CONTRIB: tcploop: scriptable TCP I/O for debugging purposes
+    - CONTRIB: tcploop: implement fork()
+    - CONTRIB: tcploop: implement logging when called with -v
+    - CONTRIB: tcploop: update the usage output
+    - CONTRIB: tcploop: support sending plain strings
+    - CONTRIB: tcploop: don't report failed send() or recv()
+    - CONTRIB: tcploop: add basic loops via a jump instruction
+    - BUG/MEDIUM: channel: bad unlikely macro
+    - CLEANUP: lua: move comment
+    - CLEANUP: lua: control executed twice
+    - BUG/MEDIUM: ssl: Store certificate filename in a variable
+    - BUG/MINOR: ssl: Print correct filename when error occurs reading OCSP
+    - CLEANUP: ssl: Remove goto after return dead code
+    - CLEANUP: ssl: Fix bind keywords name in comments
+    - DOC: ssl: Use correct wording for ca-sign-pass
+    - CLEANUP: lua: avoid directly calling getsockname/getpeername()
+    - BUG/MINOR: stick-table: handle out-of-memory condition gracefully
+    - MINOR: cli: add private pointer and release function
+    - MEDIUM: lua: Add cli handler for Lua
+    - BUG/MEDIUM: connection: check the control layer before stopping polling
+    - DEBUG: connection: mark the closed FDs with a value that is easier to detect
+    - BUG/MEDIUM: stick-table: fix regression caused by recent fix for out-of-memory
+    - BUG/MINOR: cli: properly decrement ref count on tables during failed dumps
+    - BUG/MEDIUM: lua: In some case, the return of sample-fetche is ignored
+    - MINOR: filters: Add check_timeouts callback to handle timers expiration on streams
+    - MINOR: spoe: Add 'timeout processing' option to limit time to process an event
+    - MINOR: spoe: Remove useless 'timeout ack' option
+    - MINOR: spoe: Add 'option continue-on-error' statement in spoe-agent section
+    - MINOR: spoe: Add "maxconnrate" and "maxerrrate" statements
+    - MINOR: spoe: Add "option set-on-error" statement
+    - MINOR: stats: correct documentation of process ID for typed output
+    - BUILD: contrib: fix ip6range build on Centos 7
+    - BUILD: fix build on Solaris 10/11
+    - BUG/MINOR: cli: fix pointer size when reporting data/transport layer name
+    - BUG/MINOR: cli: dequeue from the proxy when changing a maxconn
+    - BUG/MINOR: cli: wake up the CLI's task after a timeout update
+    - MINOR: connection: add a few functions to report the data and xprt layers' names
+    - MINOR: connection: add names for transport and data layers
+    - REORG: cli: split dumpstats.c in src/cli.c and src/stats.c
+    - REORG: cli: split dumpstats.h in stats.h and cli.h
+    - REORG: cli: move ssl CLI functions to ssl_sock.c
+    - REORG: cli: move map and acl code to map.c
+    - REORG: cli: move show stat resolvers to dns.c
+    - MINOR: cli: create new function cli_has_level() to validate permissions
+    - MINOR: server: create new function cli_find_server() to find a server
+    - MINOR: proxy: create new function cli_find_frontend() to find a frontend
+    - REORG: cli: move 'set server' to server.c
+    - REORG: cli: move 'show pools' to memory.c
+    - REORG: cli: move 'show servers' to proxy.c
+    - REORG: cli: move 'show sess' to stream.c
+    - REORG: cli: move 'show backend' to proxy.c
+    - REORG: cli: move get/set weight to server.c
+    - REORG: cli: move "show stat" to stats.c
+    - REORG: cli: move "show info" to stats.c
+    - REORG: cli: move dump_text(), dump_text_line(), and dump_binary() to standard.c
+    - REORG: cli: move table dump/clear/set to stick_table.c
+    - REORG: cli: move "show errors" out of cli.c
+    - REORG: cli: make "show env" also use the generic keyword registration
+    - REORG: cli: move "set timeout" to its own handler
+    - REORG: cli: move "clear counters" to stats.c
+    - REORG: cli: move "set maxconn global" to its own handler
+    - REORG: cli: move "set maxconn server" to server.c
+    - REORG: cli: move "set maxconn frontend" to proxy.c
+    - REORG: cli: move "shutdown sessions server" to stream.c
+    - REORG: cli: move "shutdown session" to stream.c
+    - REORG: cli: move "shutdown frontend" to proxy.c
+    - REORG: cli: move "{enable|disable} frontend" to proxy.c
+    - REORG: cli: move "{enable|disable} server" to server.c
+    - REORG: cli: move "{enable|disable} health" to server.c
+    - REORG: cli: move "{enable|disable} agent" to server.c
+    - REORG: cli: move the "set rate-limit" functions to their own parser
+    - CLEANUP: cli: rename STAT_CLI_* to CLI_ST_*
+    - CLEANUP: cli: simplify the request parser a little bit
+    - CLEANUP: cli: remove assignments to st0 and st2 in keyword parsers
+    - BUILD: server: remove a build warning introduced by latest series
+    - BUG/MINOR: log-format: uncatched memory allocation functions
+    - CLEANUP: log-format: useless file and line in json converter
+    - CLEANUP/MINOR: log-format: unexport functions parse_logformat_var_args() and parse_logformat_var()
+    - CLEANUP: log-format: fix return code of the function parse_logformat_var()
+    - CLEANUP: log-format: fix return code of function parse_logformat_var_args()
+    - CLEANUP: log-format: remove unused arguments
+    - MEDIUM: log-format: strict parsing and enable fail
+    - MEDIUM: log-format/conf: take into account the parse_logformat_string() return code
+    - BUILD: ssl: make the SSL layer build again with openssl 0.9.8
+    - BUILD: vars: remove a build warning on vars.c
+    - MINOR: lua: add utility function for check boolean argument
+    - MINOR: lua: Add tokenize function.
+    - BUG/MINOR: conf: calloc untested
+    - MINOR: http/conf: store the use_backend configuration file and line for logs
+    - MEDIUM: log-format: Use standard HAProxy log system to report errors
+    - CLEANUP: sample: report "converter" instead of "conv method" in error messages
+    - BUG: spoe: Fix parsing of SPOE actions in ACK frames
+    - MINOR: cli: make "show stat" support a proxy name
+    - MINOR: cli: make "show errors" support a proxy name
+    - MINOR: cli: make "show errors" capable of dumping only request or response
+    - BUG/MINOR: freq-ctr: make swrate_add() support larger values
+    - CLEANUP: counters: move from 3 types to 2 types
+    - CLEANUP: cfgparse: cascade the warnif_misplaced_* rules
+    - REORG: tcp-rules: move tcp rules processing to their own file
+    - REORG: stkctr: move all the stick counters processing to stick-tables.c
+    - DOC: update the roadmap file with the latest changes
+
+2016/11/09 : 1.7-dev6
+    - DOC: fix the entry for hash-balance-factor config option
+    - DOC: Fix typo in description of `-st` parameter in man page
+    - CLEANUP: cfgparse: Very minor spelling correction
+    - MINOR: examples: Update haproxy.spec URLs to haproxy.org
+    - BUG/MEDIUM: peers: on shutdown, wake up the appctx, not the stream
+    - BUG/MEDIUM: peers: fix use after free in peer_session_create()
+    - MINOR: peers: make peer_session_forceshutdown() use the appctx and not the stream
+    - MINOR: peers: remove the pointer to the stream
+    - BUG/MEDIUM: systemd-wrapper: return correct exit codes
+    - DOC: stats: provide state details for show servers state
+    - MEDIUM: tools: make str2ip2() preserve existing ports
+    - CLEANUP: tools: make ipcpy() preserve the original port
+    - OPTIM: http: move all http character classs tables into a single one
+    - OPTIM: http: improve parsing performance of long header lines
+    - OPTIM: http: improve parsing performance of long URIs
+    - OPTIM: http: optimize lookup of comma and quote in header values
+    - BUG/MEDIUM: srv-state: properly restore the DRAIN state
+    - BUG/MINOR: srv-state: allow to have both CMAINT and FDRAIN flags
+    - MINOR: server: do not emit warnings/logs/alerts on server state changes at boot
+    - BUG/MEDIUM: servers: properly propagate the maintenance states during startup
+    - MEDIUM: wurfl: add Scientiamobile WURFL device detection module
+    - DOC: move the device detection modules documentation to their own files
+    - CLEANUP: wurfl: reduce exposure in the rest of the code
+    - MEDIUM: ssl: Add support for OpenSSL 1.1.0
+    - MINOR: stream: make option contstats usable again
+    - MEDIUM: tools: make str2sa_range() return the FQDN even when not resolving
+    - MINOR: init: move apply_server_state in haproxy.c before MODE_CHECK
+    - MAJOR: server: postpone address resolution
+    - MINOR: new srv_admin flag: SRV_ADMF_RMAINT
+    - MINOR: server: indicate in the logs when RMAINT is cleared
+    - MINOR: stats: indicate it when a server is down due to resolution
+    - MINOR: server: make srv_set_admin_state() capable of telling why this happens
+    - MINOR: dns: implement extra 'hold' timers.
+    - MAJOR: dns: runtime resolution can change server admin state
+    - MEDIUM: cli: leave the RMAINT state when setting an IP address on the CLI
+    - MEDIUM: server: add a new init-addr server line setting
+    - MEDIUM: server: make use of init-addr
+    - MINOR: server: implement init-addr none
+    - MEDIUM: server: make libc resolution failure non-fatal
+    - MINOR: server: add support for explicit numeric address in init-addr
+    - DOC: add some documentation for the "init-addr" server keyword
+    - MINOR: init: add -dr to ignore server address resolution failures
+    - MEDIUM: server: do not restrict anymore usage of IP address from the state file
+    - BUG: vars: Fix 'set-var' converter because of a typo
+    - CLEANUP: remove last references to 'ruleset' section
+    - MEDIUM: filters: Add attch/detach and stream_set_backend callbacks
+    - MINOR: filters: Update filters documentation accordingly to recent changes
+    - MINOR: filters: Call stream_set_backend callbacks before updating backend stats
+    - MINOR: filters: Remove backend filters attached to a stream only for HTTP streams
+    - MINOR: flt_trace: Add hexdump option to dump forwarded data
+    - MINOR: cfgparse: Add functions to backup and restore registered sections
+    - MINOR: cfgparse: Parse scope lines and save the last one parsed
+    - REORG: sample: move code to release a sample expression in sample.c
+    - MINOR: vars: Allow '.' in variable names
+    - MINOR: vars: Add vars_set_by_name_ifexist function
+    - MEDIUM: vars: Add a per-process scope for variables
+    - MINOR: vars: Add 'unset-var' action/converter
+    - MAJOR: spoe: Add an experimental Stream Processing Offload Engine
+    - MINOR: spoe: add random ip-reputation service as SPOA example
+    - MINOR: spoe/checks: Add support for SPOP health checks
+    - DOC: update ROADMAP file
+
+2016/10/25 : 1.7-dev5
+    - MINOR: cfgparse: few memory leaks fixes.
+    - MEDIUM: log: Decompose %Tq in %Th %Ti %TR
+    - CLEANUP: logs: remove unused log format field definitions
+    - BUILD/MAJOR:updated 51d Trie implementation to incorperate latest update to 51Degrees.c
+    - BUG/MAJOR: stream: properly mark the server address as unset on connect retry
+    - CLEANUP: proto_http: Removing useless variable assignation
+    - CLEANUP: dumpstats: Removing useless variables allocation
+    - CLEANUP: dns: Removing usless variable & assignation
+    - BUG/MINOR: payload: fix SSLv2 version parser
+    - MINOR: cli: allow the semi-colon to be escaped on the CLI
+    - MINOR: cli: change a server health check port through the stats socket
+    - BUG/MINOR: Fix OSX compilation errors
+    - MAJOR: check: find out which port to use for health check at run time
+    - MINOR: server: introduction of 3 new server flags
+    - MINOR: new update_server_addr_port() function to change both server's ADDR and service PORT
+    - MINOR: cli: ability to change a server's port
+    - CLEANUP/MINOR dns: comment do not follow up code update
+    - MINOR: chunk: new strncat function
+    - MINOR: dns: wrong DNS_MAX_UDP_MESSAGE value
+    - MINOR: dns: new MAX values
+    - MINOR: dns: new macro to compute DNS header size
+    - MINOR: dns: new DNS structures to store received packets
+    - MEDIUM: dns: new DNS response parser
+    - MINOR: dns: query type change when last record is a CNAME
+    - MINOR: dns: proper domain name validation when receiving DNS response
+    - MINOR: dns: comments in types/dns.h about structures endianness
+    - BUG/MINOR: displayed PCRE version is running release
+    - MINOR: show Built with PCRE version
+    - MINOR: show Running on zlib version
+    - MEDIUM: make SO_REUSEPORT configurable
+    - MINOR: enable IP_BIND_ADDRESS_NO_PORT on backend connections
+    - BUG/MEDIUM: http/compression: Fix how chunked data are copied during the HTTP body parsing
+    - BUG/MINOR: stats: report the correct conn_time in backend's html output
+    - BUG/MEDIUM: dns: don't randomly crash on out-of-memory
+    - MINOR: Add fe_req_rate sample fetch
+    - MEDIUM: peers: Fix a peer stick-tables synchronization issue.
+    - MEDIUM: cli: register CLI keywords with cli_register_kw()
+    - BUILD: Make use of accept4() on OpenBSD.
+    - MINOR: tcp: make set-src/set-src-port and set-dst/set-dst-port commutative
+    - DOC: fix missed entry for "set-{src,dst}{,-port}"
+    - BUG/MINOR: vars: use sess and not s->sess in action_store()
+    - BUG/MINOR: vars: make smp_fetch_var() more robust against misuses
+    - BUG/MINOR: vars: smp_fetch_var() doesn't depend on HTTP but on the session
+    - MINOR: stats: output dcon
+    - CLEANUP: tcp rules: mention everywhere that tcp-conn rules are L4
+    - MINOR: counters: add new fields for denied_sess
+    - MEDIUM: tcp: add registration and processing of TCP L5 rules
+    - MINOR: stats: emit dses
+    - DOC: document tcp-request session
+    - MINOR: ssl: add debug traces
+    - BUILD/CLEANUP: ssl: Check BIO_reset() return code
+    - BUG/MINOR: ssl: Check malloc return code
+    - BUG/MINOR: ssl: prevent multiple entries for the same certificate
+    - BUG/MINOR: systemd: make the wrapper return a non-null status code on error
+    - BUG/MINOR: systemd: always restore signals before execve()
+    - BUG/MINOR: systemd: check return value of calloc()
+    - MINOR: systemd: report it when execve() fails
+    - BUG/MEDIUM: systemd: let the wrapper know that haproxy has completed or failed
+    - MINOR: proxy: add 'served' field to proxy, equal to total of all servers'
+    - MINOR: backend: add hash-balance-factor option for hash-type consistent
+    - MINOR: server: compute a "cumulative weight" to allow chash balancing to hit its target
+    - MEDIUM: server: Implement bounded-load hash algorithm
+    - SCRIPTS: make git-show-backports also dump a "git show" command
+    - MINOR: build: Allow linking to device-atlas library file
+    - MINOR: stats: Escape equals sign on socket dump
+
+2016/08/14 : 1.7-dev4
+    - MINOR: add list_append_word function
+    - MEDIUM: init: use list_append_word in haproxy.c
+    - MEDIUM: init: allow directory as argument of -f
+    - CLEANUP: config: detect double registration of a config section
+    - MINOR: log: add the %Td log-format specifier
+    - MEDIUM: filters: Move HTTP headers filtering in its own callback
+    - MINOR: filters: Simplify calls to analyzers using 2 new macros
+    - MEDIUM: filters: Add pre and post analyzer callbacks
+    - DOC: filters: Update the filters documentation accordingly to recent changes
+    - BUG/MEDIUM: init: don't use environment locale
+    - SCRIPTS: teach git-show-backports how to report upstream commits
+    - SCRIPTS: make git-show-backports capable of limiting its history
+    - BUG/MAJOR: fix listening IP address storage for frontends
+    - BUG/MINOR: fix listening IP address storage for frontends (cont)
+    - DOC: Fix typo so fetch is properly parsed by Cyril's converter
+    - BUG/MAJOR: http: fix breakage of "reqdeny" causing random crashes
+    - BUG/MEDIUM: stick-tables: fix breakage in table converters
+    - MINOR: stick-table: change all stick-table converters' inputs to SMP_T_ANY
+    - BUG/MEDIUM: dns: unbreak DNS resolver after header fix
+    - BUILD: fix build on Solaris 11
+    - BUG/MEDIUM: config: fix multiple declaration of section parsers
+    - BUG/MEDIUM: stats: show servers state may show an servers from another backend
+    - BUG/MEDIUM: fix risk of segfault with "show tls-keys"
+    - MEDIUM: dumpstats: 'show tls-keys' is now able to show secrets
+    - DOC: update doc about tls-tickets-keys dump
+    - MEDIUM: tcp: add 'set-src' to 'tcp-request connection'
+    - MINOR: set the CO_FL_ADDR_FROM_SET flags with 'set-src'
+    - MEDIUM: tcp/http: add 'set-src-port' action
+    - MEDIUM: tcp/http: new set-dst/set-dst-port actions
+    - BUG/MEDIUM: sticktables: segfault in some configuration error cases
+    - BUILD/MEDIUM: rebuild everything when an include file is changed
+    - BUILD/MEDIUM: force a full rebuild if some build options change
+    - BUG/MEDIUM: lua: converters doesn't work
+    - BUG/MINOR: http: add-header: header name copied twice
+    - BUG/MEDIUM: http: add-header: buffer overwritten
+    - BUG/MINOR: ssl: fix potential memory leak in ssl_sock_load_dh_params()
+    - MINOR: stream: export the function 'smp_create_src_stkctr'
+    - BUG/MEDIUM: dumpstats: undefined behavior in stats_tlskeys_list()
+    - MEDIUM: dumpstats: make stats_tlskeys_list() yield-aware during tls-keys dump
+    - BUG/MINOR: http: url32+src should use the big endian version of url32
+    - BUG/MINOR: http: url32+src should check cli_conn before using it
+    - DOC: http: add documentation for url32 and url32+src
+    - BUG/MINOR: fix http-response set-log-level parsing error
+    - MINOR: systemd: Use variable for config and pidfile paths
+    - MINOR: systemd: Perform sanity check on config before reload
+    - MEDIUM: ssl: support SNI filters with multicerts
+    - MINOR: ssl: crt-list parsing factor
+    - BUILD: ssl: fix typo causing a build failure in the multicert patch
+    - MINOR: listener: add the "accept-netscaler-cip" option to the "bind" keyword
+    - MINOR: tcp: add "tcp-request connection expect-netscaler-cip layer4"
+    - BUG/MINOR: init: always ensure that global.rlimit_nofile matches actual limits
+    - BUG/MINOR: init: ensure that FD limit is raised to the max allowed
+    - BUG/MEDIUM: external-checks: close all FDs right after the fork()
+    - BUG/MAJOR: external-checks: use asynchronous signal delivery
+    - BUG/MINOR: external-checks: do not unblock undesired signals
+    - CLEANUP: external-check: don't block/unblock SIGCHLD when manipulating the list
+    - BUG/MEDIUM: filters: Fix data filtering when data are modified
+    - BUG/MINOR: filters: Fix HTTP parsing when a filter loops on data forwarding
+    - BUG/MINOR: srv-state: fix incorrect output of state file
+    - BUG/MINOR: ssl: close ssl key file on error
+    - BUG/MINOR: http: fix misleading error message for response captures
+    - BUG/BUILD: don't automatically run "make" on "make install"
+    - DOC: add missing doc for http-request deny [deny_status <status>]
+    - CLEANUP: dumpstats: u64 field is an unsigned type.
+    - BUG/MEDIUM: http: unbreak uri/header/url_param hashing
+    - BUG/MINOR: Rework slightly commit 9962f8fc to clean code and avoid mistakes
+    - MINOR: new function my_realloc2 = realloc + free upon failure
+    - CLEANUP: fixed some usages of realloc leading to memory leak
+    - Revert "BUG/MINOR: ssl: fix potential memory leak in ssl_sock_load_dh_params()"
+    - CLEANUP: connection: using internal struct to hold source and dest port.
+    - DOC: spelling fixes
+    - BUG/MINOR: ssl: fix potential memory leak in ssl_sock_load_dh_params()
+    - BUG/MEDIUM: dns: fix alignment issues in the DNS response parser
+    - BUG/MINOR: Fix endiness issue in DNS header creation code
+    - BUG/MEDIUM: lua: the function txn_done() from sample fetches can crash
+    - BUG/MEDIUM: lua: the function txn_done() from action wrapper can crash
+    - MEDIUM: http: implement http-response track-sc* directive
+    - BUG/MINOR: peers: Fix peers data decoding issue
+    - BUG/MINOR: peers: don't count track-sc multiple times on errors
+    - MINOR: standard: add function "escape_string"
+    - BUG/MEDIUM: log: use function "escape_string" instead of "escape_chunk"
+    - MINOR: tcp: Return TCP statistics like RTT and RTT variance
+    - DOC: lua: remove old functions
+    - BUG/MEDIUM: lua: somme HTTP manipulation functions are called without valid requests
+    - DOC: fix json converter example and error message
+    - BUG/MEDIUM: stream-int: completely detach connection on connect error
+    - DOC: minor typo fixes to improve HTML parsing by haproxy-dconv
+    - BUILD: make proto_tcp.c compatible with musl library
+    - BUG/MAJOR: compression: initialize avail_in/next_in even during flush
+    - BUG/MEDIUM: samples: make smp_dup() always duplicate the sample
+    - MINOR: sample: implement smp_is_safe() and smp_make_safe()
+    - MINOR: sample: provide smp_is_rw() and smp_make_rw()
+    - BUG/MAJOR: server: the "sni" directive could randomly cause trouble
+    - BUG/MEDIUM: stick-tables: do not fail on string keys with no allocated size
+    - BUG/MEDIUM: stick-table: properly convert binary samples to keys
+    - MINOR: sample: use smp_make_rw() in upper/lower converters
+    - MINOR: tcp: add dst_is_local and src_is_local
+    - BUG/MINOR: peers: some updates are pushed twice after a resync.
+    - BUILD: protocol: fix some build errors on OpenBSD
+    - BUILD: log: iovec requires to include sys/uio.h on OpenBSD
+    - BUILD: tcp: do not include netinet/ip.h for IP_TTL
+    - BUILD: connection: fix build breakage on openbsd due to missing in_systm.h
+    - BUILD: checks: remove the last strcat and eliminate a warning on OpenBSD
+    - BUILD: tcp: define SOL_TCP when only IPPROTO_TCP exists
+    - BUILD: compression: remove a warning when no compression lib is used
+    - BUILD: poll: remove unused hap_fd_isset() which causes a warning with clang
+    - MINOR: tcp: add further tcp info fetchers
+    - BUG/MINOR: peers: empty chunks after a resync.
+    - BUG/MAJOR: stick-counters: possible crash when using sc_trackers with wrong table
+    - MINOR: standard.c: ipcmp() function to compare 2 IP addresses stored in 2 struct sockaddr_storage
+    - MINOR: standard.c: ipcpy() function to copy an IP address from a struct sockaddr_storage into an other one
+    - MAJOR: listen section: don't use first bind port anymore when no server ports are provided
+
 2016/05/10 : 1.7-dev3
     - MINOR: sample: Moves ARGS underlying type from 32 to 64 bits.
     - BUG/MINOR: log: Don't use strftime() which can clobber timezone if chrooted

@@ -30,7 +30,23 @@
  */
 #define DNS_MAX_LABEL_SIZE	63
 #define DNS_MAX_NAME_SIZE	255
-#define DNS_MAX_UDP_MESSAGE	4096
+#define DNS_MAX_UDP_MESSAGE	512
+
+/* DNS minimun record size: 1 char + 1 NULL + type + class */
+#define DNS_MIN_RECORD_SIZE	( 1 + 1 + 2 + 2 )
+
+/* maximum number of query records in a DNS response
+ * For now, we allow only one */
+#define DNS_MAX_QUERY_RECORDS 1
+
+/* maximum number of answer record in a DNS response */
+#define DNS_MAX_ANSWER_RECORDS ((DNS_MAX_UDP_MESSAGE - DNS_HEADER_SIZE) / DNS_MIN_RECORD_SIZE)
+
+/* size of dns_buffer used to store responses from the buffer
+ * dns_buffer is used to store data collected from records found in a response.
+ * Before using it, caller will always check that there is at least DNS_MAX_NAME_SIZE bytes
+ * available */
+#define DNS_ANALYZE_BUFFER_SIZE DNS_MAX_UDP_MESSAGE + DNS_MAX_NAME_SIZE
 
 /* DNS error messages */
 #define DNS_TOO_LONG_FQDN	"hostname too long"
@@ -60,6 +76,9 @@
  */
 #define SRV_MAX_PREF_NET 5
 
+/* DNS header size */
+#define DNS_HEADER_SIZE		sizeof(struct dns_header)
+
 /* DNS request or response header structure */
 struct dns_header {
 	uint16_t id;
@@ -71,9 +90,42 @@ struct dns_header {
 } __attribute__ ((packed));
 
 /* short structure to describe a DNS question */
+/* NOTE: big endian structure */
 struct dns_question {
 	unsigned short	qtype;		/* question type */
 	unsigned short	qclass;		/* query class */
+};
+
+/* NOTE: big endian structure */
+struct dns_query_item {
+	struct list list;
+	char name[DNS_MAX_NAME_SIZE];		/* query name */
+	unsigned short type;			/* question type */
+	unsigned short class;			/* query class */
+};
+
+/* NOTE: big endian structure */
+struct dns_answer_item {
+	struct list list;
+	char *name;				/* answer name
+						 * For SRV type, name also includes service
+						 * and protocol value */
+	int16_t type;				/* question type */
+	int16_t class;				/* query class */
+	int32_t ttl;				/* response TTL */
+	int16_t priority;			/* SRV type priority */
+	int16_t weight;				/* SRV type weight */
+	int16_t port;				/* SRV type port */
+	int16_t data_len;			/* number of bytes in target below */
+	struct sockaddr address;		/* IPv4 or IPv6, network format */
+	char *target;				/* Response data: SRV or CNAME type target */
+};
+
+struct dns_response_packet {
+	struct dns_header header;
+	struct list query_list;
+	struct list answer_list;
+	/* authority and additional_information ignored for now */
 };
 
 /*
@@ -96,6 +148,10 @@ struct dns_resolvers {
 	} timeout;
 	struct {			/* time to hold current data when */
 		int valid;		/*   a response is valid */
+		int nx;                 /*   a response doesn't exist */
+		int timeout;            /*   no answer was delivered */
+		int refused;            /*   dns server refused to answer */
+		int other;              /*   other dns response errors */
 	} hold;
 	struct task *t;			/* timeout management */
 	struct list curr_resolution;	/* current running resolutions */
@@ -161,7 +217,7 @@ struct dns_resolution {
 	struct list list;		/* resolution list */
 	struct dns_resolvers *resolvers;	/* resolvers section associated to this resolution */
 	void *requester;		/* owner of this name resolution */
-	int (*requester_cb)(struct dns_resolution *, struct dns_nameserver *, unsigned char *, int);
+	int (*requester_cb)(struct dns_resolution *, struct dns_nameserver *, struct dns_response_packet *);
 					/* requester callback for valid response */
 	int (*requester_error_cb)(struct dns_resolution *, int);
 					/* requester callback, for error management */
@@ -213,6 +269,7 @@ enum {
 	DNS_RESP_TIMEOUT,		/* DNS server has not answered in time */
 	DNS_RESP_TRUNCATED,		/* DNS response is truncated */
 	DNS_RESP_NO_EXPECTED_RECORD,	/* No expected records were found in the response */
+	DNS_RESP_QUERY_COUNT_ERROR,	/* we did not get the expected number of queries in the response */
 };
 
 /* return codes after searching an IP in a DNS response buffer, using a family preference */

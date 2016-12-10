@@ -519,6 +519,47 @@ Core class
 
   It takes no input, and no output is expected.
 
+.. js:function:: core.register_cli([path], usage, func)
+
+  **context**: body
+
+  Register and start independent task. The task is started when the HAProxy
+  main scheduler starts. For example this type of tasks can be executed to
+  perform complex health checks.
+
+  :param array path: is the sequence of word for which the cli execute the Lua
+    binding.
+  :param string usage: is the usage message displayed in the help.
+  :param function func: is the Lua function called to handle the CLI commands.
+
+  The prototype of the Lua function used as argument is:
+
+.. code-block:: lua
+
+    function(AppletTCP, [arg1, [arg2, [...]]])
+..
+
+  I/O are managed with the :ref:`applettcp_class` object. Args are given as
+  paramter. The args embbed the registred path. If the path is declared like
+  this:
+
+.. code-block:: lua
+
+    core.register_cli({"show", "ssl", "stats"}, "Display SSL stats..", function(applet, arg1, arg2, arg3, arg4, arg5)
+	 end)
+..
+
+  And we execute this in the prompt:
+
+.. code-block:: text
+
+    > prompt
+    > show ssl stats all
+..
+
+  Then, arg1, arg2 and arg3 will contains respectivey "show", "ssl" and "stats".
+  arg4 will contain "all". arg5 contains nil.
+
 .. js:function:: core.set_nice(nice)
 
   **context**: task, action, sample-fetch, converter
@@ -581,6 +622,62 @@ Core class
 
   Give back the hand at the HAProxy scheduler. It is used when the LUA
   processing consumes a lot of processing time.
+
+.. js:function:: core.parse_addr(address)
+
+  **context**: body, init, task, action, sample-fetch, converter
+
+  :param network: is a string describing an ipv4 or ipv6 address and optionally
+    its network length, like this: "127.0.0.1/8" or "aaaa::1234/32".
+  :returns: a userdata containing network or nil if an error occurs.
+
+  Parse ipv4 or ipv6 adresses and its facultative associated network.
+
+.. js:function:: core.match_addr(addr1, addr2)
+
+  **context**: body, init, task, action, sample-fetch, converter
+
+  :param addr1: is an address created with "core.parse_addr".
+  :param addr2: is an address created with "core.parse_addr".
+  :returns: boolean, true if the network of the addresses matche, else returns
+    false.
+
+  Match two networks. For example "127.0.0.1/32" matchs "127.0.0.0/8". The order
+  of network is not important.
+
+.. js:function:: core.tokenize(str, separators [, noblank])
+
+  **context**: body, init, task, action, sample-fetch, converter
+
+  This function is useful for tokenizing an entry, or splitting some messages.
+  :param string str: The string which will be split.
+  :param string separators: A string containing a list of separators.
+  :param boolean noblank: Ignore empty entries.
+  :returns: an array of string.
+
+  For example:
+
+.. code-block:: lua
+
+	local array = core.tokenize("This function is useful, for tokenizing an entry.", "., ", true)
+	print_r(array)
+..
+
+  Returns this array:
+
+.. code-block:: text
+
+	(table) table: 0x21c01e0 [
+	    1: (string) "This"
+	    2: (string) "function"
+	    3: (string) "is"
+	    4: (string) "useful"
+	    5: (string) "for"
+	    6: (string) "tokenizing"
+	    7: (string) "an"
+	    8: (string) "entry"
+	]
+..
 
 .. _proxy_class:
 
@@ -1070,6 +1167,11 @@ Channel class
   :param class_channel channel: The manipulated Channel.
   :param integer int: The amount of data which will be forwarded.
 
+.. js:function:: Channel.is_full(channel)
+
+  This function returns true if the buffer channel is full.
+
+  :returns: a boolean
 
 .. _http_class:
 
@@ -1215,32 +1317,6 @@ HTTP class
   :param string regex: The match regular expression.
   :param string replace: The replacement value.
   :see: HTTP.req_replace_header()
-
-.. js:function:: HTTP.req_replace_value(http, name, regex, replace)
-
-  Works like "HTTP.req_replace_header()" except that it matches the regex
-  against every comma-delimited value of the header field "name" instead of the
-  entire header.
-
-  :param class_http http: The related http object.
-  :param string name: The header name.
-  :param string regex: The match regular expression.
-  :param string replace: The replacement value.
-  :see: HTTP.req_replace_header()
-  :see: HTTP.res_replace_value()
-
-.. js:function:: HTTP.res_replace_value(http, name, regex, replace)
-
-  Works like "HTTP.res_replace_header()" except that it matches the regex
-  against every comma-delimited value of the header field "name" instead of the
-  entire header.
-
-  :param class_http http: The related http object.
-  :param string name: The header name.
-  :param string regex: The match regular expression.
-  :param string replace: The replacement value.
-  :see: HTTP.res_replace_header()
-  :see: HTTP.req_replace_value()
 
 .. js:function:: HTTP.req_set_method(http, method)
 
@@ -1445,7 +1521,13 @@ TXN class
 
   :param class_txn txn: The class txn object containing the data.
   :param string var: The variable name according with the HAProxy variable syntax.
-  :param opaque value: The data which is stored in the variable.
+
+.. js:function:: TXN.unset_var(TXN, var)
+
+  Unset the variable <var>.
+
+  :param class_txn txn: The class txn object containing the data.
+  :param string var: The variable name according with the HAProxy variable syntax.
 
 .. js:function:: TXN.get_var(TXN, var)
 

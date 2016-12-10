@@ -22,10 +22,15 @@
 #include <common/time.h>
 #include <common/ticks.h>
 
+#include <types/applet.h>
+#include <types/cli.h>
 #include <types/global.h>
 #include <types/dns.h>
 #include <types/proto_udp.h>
+#include <types/stats.h>
 
+#include <proto/channel.h>
+#include <proto/cli.h>
 #include <proto/checks.h>
 #include <proto/dns.h>
 #include <proto/fd.h>
@@ -33,9 +38,21 @@
 #include <proto/server.h>
 #include <proto/task.h>
 #include <proto/proto_udp.h>
+#include <proto/stream_interface.h>
 
 struct list dns_resolvers = LIST_HEAD_INIT(dns_resolvers);
 struct dns_resolution *resolution = NULL;
+
+/*
+ * pre-allocated memory for maximum record names in a DNS response
+ * Each name is DNS_MAX_NAME_SIZE, we add 1 for the NULL character
+ *
+ * WARNING: this is not thread safe...
+ */
+struct dns_response_packet dns_response;
+struct chunk dns_trash = { };
+struct dns_query_item dns_query_records[DNS_MAX_QUERY_RECORDS];
+struct dns_answer_item dns_answer_records[DNS_MAX_ANSWER_RECORDS];
 
 static int64_t dns_query_id_seed;	/* random seed */
 
@@ -118,17 +135,20 @@ void dns_reset_resolution(struct dns_resolution *resolution)
  *  - check if the packet requires processing (not outdated resolution)
  *  - ensure the DNS packet received is valid and call requester's callback
  *  - call requester's error callback if invalid response
+ *  - check the dn_name in the packet against the one sent
  */
 void dns_resolve_recv(struct dgram_conn *dgram)
 {
 	struct dns_nameserver *nameserver;
 	struct dns_resolvers *resolvers;
 	struct dns_resolution *resolution;
+	struct dns_query_item *query;
 	unsigned char buf[DNS_MAX_UDP_MESSAGE + 1];
 	unsigned char *bufend;
 	int fd, buflen, ret;
 	unsigned short query_id;
 	struct eb32_node *eb;
+	struct dns_response_packet *dns_p = &dns_response;
 
 	fd = dgram->t.sock.fd;
 
@@ -187,12 +207,12 @@ void dns_resolve_recv(struct dgram_conn *dgram)
 		/* number of responses received */
 		resolution->nb_responses += 1;
 
-		ret = dns_validate_dns_response(buf, bufend, resolution->hostname_dn, resolution->hostname_dn_len);
+		ret = dns_validate_dns_response(buf, bufend, dns_p);
 
 		/* treat only errors */
 		switch (ret) {
+		case DNS_RESP_QUERY_COUNT_ERROR:
 		case DNS_RESP_INVALID:
-		case DNS_RESP_WRONG_NAME:
 			nameserver->counters.invalid += 1;
 			resolution->requester_error_cb(resolution, DNS_RESP_INVALID);
 			continue;
@@ -233,8 +253,18 @@ void dns_resolve_recv(struct dgram_conn *dgram)
 			continue;
 		}
 
+		/* Now let's check the query's dname corresponds to the one we sent.
+		 * We can check only the first query of the list. We send one query at a time
+		 * so we get one query in the response */
+		query = LIST_NEXT(&dns_p->query_list, struct dns_query_item *, list);
+		if (query && memcmp(query->name, resolution->hostname_dn, resolution->hostname_dn_len) != 0) {
+			nameserver->counters.other += 1;
+			resolution->requester_error_cb(resolution, DNS_RESP_WRONG_NAME);
+			continue;
+		}
+
 		nameserver->counters.valid += 1;
-		resolution->requester_cb(resolution, nameserver, buf, buflen);
+		resolution->requester_cb(resolution, nameserver, dns_p);
 	}
 }
 
@@ -280,11 +310,10 @@ int dns_send_query(struct dns_resolution *resolution)
 {
 	struct dns_resolvers *resolvers;
 	struct dns_nameserver *nameserver;
-	int ret, send_error, bufsize, fd;
+	int ret, bufsize, fd;
 
 	resolvers = resolution->resolvers;
 
-	ret = send_error = 0;
 	bufsize = dns_build_query(resolution->query_id, resolution->query_type, resolution->hostname_dn,
 			resolution->hostname_dn_len, trash.str, trash.size);
 
@@ -333,35 +362,117 @@ void dns_update_resolvers_timeout(struct dns_resolvers *resolvers)
 }
 
 /*
+ * Analyse, re-build and copy the name <name> from the DNS response packet <buffer>.
+ * <name> must point to the 'data_len' information or pointer 'c0' for compressed data.
+ * The result is copied into <dest>, ensuring we don't overflow using <dest_len>
+ * Returns the number of bytes the caller can move forward. If 0 it means an error occured
+ * while parsing the name.
+ * <offset> is the number of bytes the caller could move forward.
+ */
+int dns_read_name(unsigned char *buffer, unsigned char *bufend, unsigned char *name, char *destination, int dest_len, int *offset)
+{
+	int nb_bytes = 0, n = 0;
+	int label_len;
+	unsigned char *reader = name;
+	char *dest = destination;
+
+	while (1) {
+		/* name compression is in use */
+		if ((*reader & 0xc0) == 0xc0) {
+			/* a pointer must point BEFORE current position */
+			if ((buffer + reader[1]) > reader) {
+				goto out_error;
+			}
+
+			n = dns_read_name(buffer, bufend, buffer + reader[1], dest, dest_len - nb_bytes, offset);
+			if (n == 0)
+				goto out_error;
+
+			dest += n;
+			nb_bytes += n;
+			goto out;
+		}
+
+		label_len = *reader;
+		if (label_len == 0)
+			goto out;
+		/* Check if:
+		 *  - we won't read outside the buffer
+		 *  - there is enough place in the destination
+		 */
+		if ((reader + label_len >= bufend) || (nb_bytes + label_len >= dest_len))
+			goto out_error;
+
+		/* +1 to take label len + label string */
+		label_len += 1;
+
+		memcpy(dest, reader, label_len);
+
+		dest += label_len;
+		nb_bytes += label_len;
+		reader += label_len;
+	}
+
+ out:
+	/* offset computation:
+	 * parse from <name> until finding either NULL or a pointer "c0xx"
+	 */
+	reader = name;
+	*offset = 0;
+	while (reader < bufend) {
+		if ((reader[0] & 0xc0) == 0xc0) {
+			*offset += 2;
+			break;
+		}
+		else if (*reader == 0) {
+			*offset += 1;
+			break;
+		}
+		*offset += 1;
+		++reader;
+	}
+
+	return nb_bytes;
+
+ out_error:
+	return 0;
+}
+
+/*
  * Function to validate that the buffer DNS response provided in <resp> and
  * finishing before <bufend> is valid from a DNS protocol point of view.
- * The caller can also ask the function to check if the response contains data
- * for a domain name <dn_name> whose length is <dn_name_len> returns one of the
- * DNS_RESP_* code.
+ *
+ * The result is stored in the structured pointed by <dns_p>.
+ * It's up to the caller to allocate memory for <dns_p>.
+ *
+ * This function returns one of the DNS_RESP_* code to indicate the type of
+ * error found.
  */
-int dns_validate_dns_response(unsigned char *resp, unsigned char *bufend, char *dn_name, int dn_name_len)
+int dns_validate_dns_response(unsigned char *resp, unsigned char *bufend, struct dns_response_packet *dns_p)
 {
-	unsigned char *reader, *cname, *ptr;
-	int i, len, flags, type, ancount, cnamelen, expected_record;
+	unsigned char *reader;
+	char *previous_dname, tmpname[DNS_MAX_NAME_SIZE];
+	int len, flags, offset, ret;
+	int dns_query_record_id, dns_answer_record_id;
+	struct dns_query_item *dns_query;
+	struct dns_answer_item *dns_answer_record;
 
 	reader = resp;
-	cname = NULL;
-	cnamelen = 0;
 	len = 0;
-	expected_record = 0; /* flag to report if at least one expected record type is found in the response.
-			      * For now, only records containing an IP address (A and AAAA) are
-			      * considered as expected.
-			      * Later, this function may be updated to let the caller decide what type
-			      * of record is expected to consider the response as valid. (SRV or TXT types)
-			      */
+	previous_dname = NULL;
 
-	/* move forward 2 bytes for the query id */
-	reader += 2;
-	if (reader >= bufend)
+	/* initialization of local buffer */
+	memset(dns_p, '\0', sizeof(struct dns_response_packet));
+	chunk_reset(&dns_trash);
+
+	/* query id */
+	if (reader + 2 >= bufend)
 		return DNS_RESP_INVALID;
+	dns_p->header.id = reader[0] * 256 + reader[1];
+	reader += 2;
 
 	/*
-	 * flags are stored over 2 bytes
+	 * flags and rcode are stored over 2 bytes
 	 * First byte contains:
 	 *  - response flag (1 bit)
 	 *  - opcode (4 bits)
@@ -388,196 +499,215 @@ int dns_validate_dns_response(unsigned char *resp, unsigned char *bufend, char *
 
 	/* move forward 2 bytes for flags */
 	reader += 2;
-	if (reader >= bufend)
-		return DNS_RESP_INVALID;
 
-	/* move forward 2 bytes for question count */
+	/* 2 bytes for question count */
+	if (reader + 2 >= bufend)
+		return DNS_RESP_INVALID;
+	dns_p->header.qdcount = reader[0] * 256 + reader[1];
+	/* (for now) we send one query only, so we expect only one in the response too */
+	if (dns_p->header.qdcount != 1)
+		return DNS_RESP_QUERY_COUNT_ERROR;
+	if (dns_p->header.qdcount > DNS_MAX_QUERY_RECORDS)
+		return DNS_RESP_INVALID;
 	reader += 2;
-	if (reader >= bufend)
-		return DNS_RESP_INVALID;
 
-	/* analyzing answer count */
-	if (reader + 2 > bufend)
+	/* 2 bytes for answer count */
+	if (reader + 2 >= bufend)
 		return DNS_RESP_INVALID;
-	ancount = reader[0] * 256 + reader[1];
-
-	if (ancount == 0)
+	dns_p->header.ancount = reader[0] * 256 + reader[1];
+	if (dns_p->header.ancount == 0)
 		return DNS_RESP_ANCOUNT_ZERO;
-
-	/* move forward 2 bytes for answer count */
+	/* check if too many records are announced */
+	if (dns_p->header.ancount > DNS_MAX_ANSWER_RECORDS)
+		return DNS_RESP_INVALID;
 	reader += 2;
-	if (reader >= bufend)
+
+	/* 2 bytes authority count */
+	if (reader + 2 >= bufend)
 		return DNS_RESP_INVALID;
+	dns_p->header.nscount = reader[0] * 256 + reader[1];
+	reader += 2;
 
-	/* move forward 4 bytes authority and additional count */
-	reader += 4;
-	if (reader >= bufend)
+	/* 2 bytes additional count */
+	if (reader + 2 >= bufend)
 		return DNS_RESP_INVALID;
+	dns_p->header.arcount = reader[0] * 256 + reader[1];
+	reader += 2;
 
-	/* check if the name can stand in response */
-	if (dn_name && ((reader + dn_name_len + 1) > bufend))
-		return DNS_RESP_INVALID;
-
-	/* check hostname */
-	if (dn_name && (memcmp(reader, dn_name, dn_name_len) != 0))
-		return DNS_RESP_WRONG_NAME;
-
-	/* move forward hostname len bytes + 1 for NULL byte */
-	if (dn_name) {
-		reader = reader + dn_name_len + 1;
-	}
-	else {
-		ptr = reader;
-		while (*ptr) {
-			ptr++;
-			if (ptr >= bufend)
-				return DNS_RESP_INVALID;
-		}
-		reader = ptr + 1;
-	}
-
-	/* move forward 4 bytes for question type and question class */
-	reader += 4;
-	if (reader >= bufend)
-		return DNS_RESP_INVALID;
-
-	/* now parsing response records */
-	for (i = 1; i <= ancount; i++) {
-		if (reader >= bufend)
-			return DNS_RESP_INVALID;
-
-		/*
-		 * name can be a pointer, so move forward reader cursor accordingly
-		 * if 1st byte is '11XXXXXX', it means name is a pointer
-		 * and 2nd byte gives the offset from resp where the hostname can
-		 * be found
+	/* parsing dns queries */
+	LIST_INIT(&dns_p->query_list);
+	for (dns_query_record_id = 0; dns_query_record_id < dns_p->header.qdcount; dns_query_record_id++) {
+		/* use next pre-allocated dns_query_item after ensuring there is
+		 * still one available.
+		 * It's then added to our packet query list.
 		 */
-		if ((*reader & 0xc0) == 0xc0) {
-			/*
-			 * pointer, hostname can be found at resp + *(reader + 1)
-			 */
-			if (reader + 1 > bufend)
-				return DNS_RESP_INVALID;
-
-			ptr = resp + *(reader + 1);
-
-			/* check if the pointer points inside the buffer */
-			if (ptr >= bufend)
-				return DNS_RESP_INVALID;
-		}
-		else {
-			/*
-			 * name is a string which starts at first byte
-			 * checking against last cname when recursing through the response
-			 */
-			/* look for the end of the string and ensure it's in the buffer */
-			ptr = reader;
-			len = 0;
-			while (*ptr) {
-				++len;
-				++ptr;
-				if (ptr >= bufend)
-					return DNS_RESP_INVALID;
-			}
-
-			/* if cname is set, it means a CNAME recursion is in progress */
-			ptr = reader;
-		}
-
-		/* ptr now points to the name */
-		if ((*reader & 0xc0) != 0xc0) {
-			/* if cname is set, it means a CNAME recursion is in progress */
-			if (cname) {
-				/* check if the name can stand in response */
-				if ((reader + cnamelen) > bufend)
-					return DNS_RESP_INVALID;
-				/* compare cname and current name */
-				if (memcmp(ptr, cname, cnamelen) != 0)
-					return DNS_RESP_CNAME_ERROR;
-
-				cname = reader;
-				cnamelen = dns_str_to_dn_label_len((const char *)cname);
-
-				/* move forward cnamelen bytes + NULL byte */
-				reader += (cnamelen + 1);
-			}
-			/* compare server hostname to current name */
-			else if (dn_name) {
-				/* check if the name can stand in response */
-				if ((reader + dn_name_len) > bufend)
-					return DNS_RESP_INVALID;
-				if (memcmp(ptr, dn_name, dn_name_len) != 0)
-					return DNS_RESP_WRONG_NAME;
-
-				reader += (dn_name_len + 1);
-			}
-			else {
-				reader += (len + 1);
-			}
-		}
-		else {
-			/* shortname in progress */
-			/* move forward 2 bytes for information pointer and address pointer */
-			reader += 2;
-		}
-
-		if (reader >= bufend)
+		if (dns_query_record_id > DNS_MAX_QUERY_RECORDS)
 			return DNS_RESP_INVALID;
+		dns_query = &dns_query_records[dns_query_record_id];
+		LIST_ADDQ(&dns_p->query_list, &dns_query->list);
 
-		/*
-		 * we know the record is either for our server hostname
-		 * or a valid CNAME in a crecursion
+		/* name is a NULL terminated string in our case, since we have
+		 * one query per response and the first one can't be compressed
+		 * (using the 0x0c format)
 		 */
+		offset = 0;
+		len = dns_read_name(resp, bufend, reader, dns_query->name, DNS_MAX_NAME_SIZE, &offset);
 
-		/* now reading record type (A, AAAA, CNAME, etc...) */
-		if (reader + 2 > bufend)
+		if (len == 0)
 			return DNS_RESP_INVALID;
-		type = reader[0] * 256 + reader[1];
 
-		/* move forward 2 bytes for type (2) */
+		reader += offset;
+		previous_dname = dns_query->name;
+
+		/* move forward 2 bytes for question type */
+		if (reader + 2 >= bufend)
+			return DNS_RESP_INVALID;
+		dns_query->type = reader[0] * 256 + reader[1];
 		reader += 2;
 
-		/* move forward 6 bytes for class (2) and ttl (4) */
-		reader += 6;
+		/* move forward 2 bytes for question class */
+		if (reader + 2 >= bufend)
+			return DNS_RESP_INVALID;
+		dns_query->class = reader[0] * 256 + reader[1];
+		reader += 2;
+	}
+
+	/* now parsing response records */
+	LIST_INIT(&dns_p->answer_list);
+	for (dns_answer_record_id = 0; dns_answer_record_id < dns_p->header.ancount; dns_answer_record_id++) {
 		if (reader >= bufend)
 			return DNS_RESP_INVALID;
+
+		/* pull next response record from the list, if still one available, then add it
+		 * to the record list */
+		if (dns_answer_record_id > DNS_MAX_ANSWER_RECORDS)
+			return DNS_RESP_INVALID;
+		dns_answer_record = &dns_answer_records[dns_answer_record_id];
+		LIST_ADDQ(&dns_p->answer_list, &dns_answer_record->list);
+
+		offset = 0;
+		len = dns_read_name(resp, bufend, reader, tmpname, DNS_MAX_NAME_SIZE, &offset);
+
+		if (len == 0)
+			return DNS_RESP_INVALID;
+
+		/* check if the current record dname is valid.
+		 * previous_dname points either to queried dname or last CNAME target
+		 */
+		if (memcmp(previous_dname, tmpname, len) != 0) {
+			if (dns_answer_record_id == 0) {
+				/* first record, means a mismatch issue between queried dname
+				 * and dname found in the first record */
+				return DNS_RESP_INVALID;
+			} else {
+				/* if not the first record, this means we have a CNAME resolution
+				 * error */
+				return DNS_RESP_CNAME_ERROR;
+			}
+
+		}
+
+		dns_answer_record->name = chunk_newstr(&dns_trash);
+		if (dns_answer_record->name == NULL)
+			return DNS_RESP_INVALID;
+
+		ret = chunk_strncat(&dns_trash, tmpname, len);
+		if (ret == 0)
+			return DNS_RESP_INVALID;
+
+		reader += offset;
+		if (reader >= bufend)
+			return DNS_RESP_INVALID;
+
+		if (reader >= bufend)
+			return DNS_RESP_INVALID;
+
+		/* 2 bytes for record type (A, AAAA, CNAME, etc...) */
+		if (reader + 2 > bufend)
+			return DNS_RESP_INVALID;
+		dns_answer_record->type = reader[0] * 256 + reader[1];
+		reader += 2;
+
+		/* 2 bytes for class (2) */
+		if (reader + 2 > bufend)
+			return DNS_RESP_INVALID;
+		dns_answer_record->class = reader[0] * 256 + reader[1];
+		reader += 2;
+
+		/* 4 bytes for ttl (4) */
+		if (reader + 4 > bufend)
+			return DNS_RESP_INVALID;
+		dns_answer_record->ttl =   reader[0] * 16777216 + reader[1] * 65536
+			                 + reader[2] * 256 + reader[3];
+		reader += 4;
 
 		/* now reading data len */
 		if (reader + 2 > bufend)
 			return DNS_RESP_INVALID;
-		len = reader[0] * 256 + reader[1];
+		dns_answer_record->data_len = reader[0] * 256 + reader[1];
 
 		/* move forward 2 bytes for data len */
 		reader += 2;
 
 		/* analyzing record content */
-		switch (type) {
+		switch (dns_answer_record->type) {
 			case DNS_RTYPE_A:
 				/* ipv4 is stored on 4 bytes */
-				if (len != 4)
+				if (dns_answer_record->data_len != 4)
 					return DNS_RESP_INVALID;
-				expected_record = 1;
+				dns_answer_record->address.sa_family = AF_INET;
+				memcpy(&(((struct sockaddr_in *)&dns_answer_record->address)->sin_addr),
+						reader, dns_answer_record->data_len);
 				break;
 
 			case DNS_RTYPE_CNAME:
-				cname = reader;
-				cnamelen = len;
+				/* check if this is the last record and update the caller about the status:
+				 * no IP could be found and last record was a CNAME. Could be triggered
+				 * by a wrong query type
+				 *
+				 * + 1 because dns_answer_record_id starts at 0 while number of answers
+				 * is an integer and starts at 1.
+				 */
+				if (dns_answer_record_id + 1 == dns_p->header.ancount)
+					return DNS_RESP_CNAME_ERROR;
+
+				offset = 0;
+				len = dns_read_name(resp, bufend, reader, tmpname, DNS_MAX_NAME_SIZE, &offset);
+
+				if (len == 0)
+					return DNS_RESP_INVALID;
+
+				dns_answer_record->target = chunk_newstr(&dns_trash);
+				if (dns_answer_record->target == NULL)
+					return DNS_RESP_INVALID;
+
+				ret = chunk_strncat(&dns_trash, tmpname, len);
+				if (ret == 0)
+					return DNS_RESP_INVALID;
+
+				previous_dname = dns_answer_record->target;
+
 				break;
 
 			case DNS_RTYPE_AAAA:
 				/* ipv6 is stored on 16 bytes */
-				if (len != 16)
+				if (dns_answer_record->data_len != 16)
 					return DNS_RESP_INVALID;
-				expected_record = 1;
+				dns_answer_record->address.sa_family = AF_INET6;
+				memcpy(&(((struct sockaddr_in6 *)&dns_answer_record->address)->sin6_addr),
+						reader, dns_answer_record->data_len);
 				break;
+
 		} /* switch (record type) */
 
-		/* move forward len for analyzing next record in the response */
-		reader += len;
+		/* move forward dns_answer_record->data_len for analyzing next record in the response */
+		reader += dns_answer_record->data_len;
 	} /* for i 0 to ancount */
 
-	if (expected_record == 0)
-		return DNS_RESP_NO_EXPECTED_RECORD;
+	/* let's add a last \0 to close our last string */
+	ret = chunk_strncat(&dns_trash, "\0", 1);
+	if (ret == 0)
+		return DNS_RESP_INVALID;
 
 	return DNS_RESP_VALID;
 }
@@ -587,24 +717,22 @@ int dns_validate_dns_response(unsigned char *resp, unsigned char *bufend, char *
  * If existing IP not found, return the first IP matching family_priority,
  * otherwise, first ip found
  * The following tasks are the responsibility of the caller:
- *   - resp contains an error free DNS response
- *   - the response matches the dn_name
+ *   - <dns_p> contains an error free DNS response
  * For both cases above, dns_validate_dns_response is required
  * returns one of the DNS_UPD_* code
  */
 #define DNS_MAX_IP_REC 20
-int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
+int dns_get_ip_from_response(struct dns_response_packet *dns_p,
                              struct dns_resolution *resol, void *currentip,
                              short currentip_sin_family,
                              void **newip, short *newip_sin_family)
 {
+	struct dns_answer_item *record;
 	int family_priority;
-	char *dn_name;
-	int dn_name_len;
-	int i, ancount, cnamelen, type, data_len, currentip_found;
-	unsigned char *reader, *cname, *ptr, *newip4, *newip6;
+	int i, currentip_found;
+	unsigned char *newip4, *newip6;
 	struct {
-		unsigned char *ip;
+		void *ip;
 		unsigned char type;
 	} rec[DNS_MAX_IP_REC];
 	int currentip_sel;
@@ -613,120 +741,39 @@ int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
 	int score, max_score;
 
 	family_priority = resol->opts->family_prio;
-	dn_name = resol->hostname_dn;
-	dn_name_len = resol->hostname_dn_len;
-
-	cname = *newip = newip4 = newip6 = NULL;
-	cnamelen = currentip_found = 0;
+	*newip = newip4 = newip6 = NULL;
+	currentip_found = 0;
 	*newip_sin_family = AF_UNSPEC;
-	ancount = *(resp + 7);	/* Assume no more than 256 answers */
-
-	/* bypass DNS response header */
-	reader = resp + sizeof(struct dns_header);
-
-	/* bypass DNS query section */
-	/* move forward hostname len bytes + 1 for NULL byte */
-	reader = reader + dn_name_len + 1;
-
-	/* move forward 4 bytes for question type and question class */
-	reader += 4;
 
 	/* now parsing response records */
-	for (i = 1; i <= ancount; i++) {
-		/*
-		 * name can be a pointer, so move forward reader cursor accordingly
-		 * if 1st byte is '11XXXXXX', it means name is a pointer
-		 * and 2nd byte gives the offset from buf where the hostname can
-		 * be found
-		 */
-		if ((*reader & 0xc0) == 0xc0)
-			ptr = resp + *(reader + 1);
-		else
-			ptr = reader;
-
-		if (cname) {
-			if (memcmp(ptr, cname, cnamelen)) {
-				return DNS_UPD_NAME_ERROR;
-			}
-		}
-		else if (memcmp(ptr, dn_name, dn_name_len))
-			return DNS_UPD_NAME_ERROR;
-
-		if ((*reader & 0xc0) == 0xc0) {
-			/* move forward 2 bytes for information pointer and address pointer */
-			reader += 2;
-		}
-		else {
-			if (cname) {
-				cname = reader;
-				cnamelen = dns_str_to_dn_label_len((char *)cname);
-
-				/* move forward cnamelen bytes + NULL byte */
-				reader += (cnamelen + 1);
-			}
-			else {
-				/* move forward dn_name_len bytes + NULL byte */
-				reader += (dn_name_len + 1);
-			}
-		}
-
-		/*
-		 * we know the record is either for our server hostname
-		 * or a valid CNAME in a crecursion
-		 */
-
-		/* now reading record type (A, AAAA, CNAME, etc...) */
-		type = reader[0] * 256 + reader[1];
-
-		/* move forward 2 bytes for type (2) */
-		reader += 2;
-
-		/* move forward 6 bytes for class (2) and ttl (4) */
-		reader += 6;
-
-		/* now reading data len */
-		data_len = reader[0] * 256 + reader[1];
-
-		/* move forward 2 bytes for data len */
-		reader += 2;
-
+	list_for_each_entry(record, &dns_response.answer_list, list) {
 		/* analyzing record content */
-		switch (type) {
+		switch (record->type) {
 			case DNS_RTYPE_A:
 				/* Store IPv4, only if some room is avalaible. */
 				if (rec_nb < DNS_MAX_IP_REC) {
-					rec[rec_nb].ip = reader;
+					rec[rec_nb].ip = &(((struct sockaddr_in *)&record->address)->sin_addr);
 					rec[rec_nb].type = AF_INET;
 					rec_nb++;
 				}
-				/* move forward data_len for analyzing next record in the response */
-				reader += data_len;
 				break;
 
+			/* we're looking for IPs only. CNAME validation is done when
+			 * parsing the response buffer for the first time */
 			case DNS_RTYPE_CNAME:
-				cname = reader;
-				cnamelen = data_len;
-
-				reader += data_len;
 				break;
 
 			case DNS_RTYPE_AAAA:
 				/* Store IPv6, only if some room is avalaible. */
 				if (rec_nb < DNS_MAX_IP_REC) {
-					rec[rec_nb].ip = reader;
+					rec[rec_nb].ip = &(((struct sockaddr_in6 *)&record->address)->sin6_addr);
 					rec[rec_nb].type = AF_INET6;
 					rec_nb++;
 				}
-				/* move forward data_len for analyzing next record in the response */
-				reader += data_len;
 				break;
 
-			default:
-				/* not supported record type */
-				/* move forward data_len for analyzing next record in the response */
-				reader += data_len;
 		} /* switch (record type) */
-	} /* for i 0 to ancount */
+	} /* list for each record entries */
 
 	/* Select an IP regarding configuration preference.
 	 * Top priority is the prefered network ip version,
@@ -795,11 +842,6 @@ int dns_get_ip_from_response(unsigned char *resp, unsigned char *resp_end,
 				return DNS_UPD_NO;
 			max_score = score;
 		}
-	}
-
-	/* only CNAMEs in the response, no IP found */
-	if (cname && !newip4 && !newip6) {
-		return DNS_UPD_CNAME;
 	}
 
 	/* no IP found in the response */
@@ -887,7 +929,18 @@ int dns_init_resolvers(void)
 	struct dns_nameserver *curnameserver;
 	struct dgram_conn *dgram;
 	struct task *t;
+	char *dns_trash_str;
 	int fd;
+
+	dns_trash_str = malloc(global.tune.bufsize);
+	if (dns_trash_str == NULL) {
+		Alert("Starting resolvers: out of memory.\n");
+		return 0;
+	}
+
+	/* allocate memory for the dns_trash buffer used to temporarily store
+	 * the records of the received response */
+	chunk_init(&dns_trash, dns_trash_str, global.tune.bufsize);
 
 	/* give a first random value to our dns query_id seed */
 	dns_query_id_seed = random();
@@ -1214,3 +1267,105 @@ struct task *dns_process_resolve(struct task *t)
 	dns_update_resolvers_timeout(resolvers);
 	return t;
 }
+
+static int cli_parse_stat_resolvers(char **args, struct appctx *appctx, void *private)
+{
+	struct dns_resolvers *presolvers;
+
+	if (*args[3]) {
+		appctx->ctx.resolvers.ptr = NULL;
+		list_for_each_entry(presolvers, &dns_resolvers, list) {
+			if (strcmp(presolvers->id, args[3]) == 0) {
+				appctx->ctx.resolvers.ptr = presolvers;
+				break;
+			}
+		}
+		if (appctx->ctx.resolvers.ptr == NULL) {
+			appctx->ctx.cli.msg = "Can't find that resolvers section\n";
+			appctx->st0 = CLI_ST_PRINT;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* This function dumps counters from all resolvers section and associated name servers.
+ * It returns 0 if the output buffer is full and it needs
+ * to be called again, otherwise non-zero.
+ */
+static int cli_io_handler_dump_resolvers_to_buffer(struct appctx *appctx)
+{
+	struct stream_interface *si = appctx->owner;
+	struct dns_resolvers *presolvers;
+	struct dns_nameserver *pnameserver;
+
+	chunk_reset(&trash);
+
+	switch (appctx->st2) {
+	case STAT_ST_INIT:
+		appctx->st2 = STAT_ST_LIST; /* let's start producing data */
+		/* fall through */
+
+	case STAT_ST_LIST:
+		if (LIST_ISEMPTY(&dns_resolvers)) {
+			chunk_appendf(&trash, "No resolvers found\n");
+		}
+		else {
+			list_for_each_entry(presolvers, &dns_resolvers, list) {
+				if (appctx->ctx.resolvers.ptr != NULL && appctx->ctx.resolvers.ptr != presolvers)
+					continue;
+
+				chunk_appendf(&trash, "Resolvers section %s\n", presolvers->id);
+				list_for_each_entry(pnameserver, &presolvers->nameserver_list, list) {
+					chunk_appendf(&trash, " nameserver %s:\n", pnameserver->id);
+					chunk_appendf(&trash, "  sent: %ld\n", pnameserver->counters.sent);
+					chunk_appendf(&trash, "  valid: %ld\n", pnameserver->counters.valid);
+					chunk_appendf(&trash, "  update: %ld\n", pnameserver->counters.update);
+					chunk_appendf(&trash, "  cname: %ld\n", pnameserver->counters.cname);
+					chunk_appendf(&trash, "  cname_error: %ld\n", pnameserver->counters.cname_error);
+					chunk_appendf(&trash, "  any_err: %ld\n", pnameserver->counters.any_err);
+					chunk_appendf(&trash, "  nx: %ld\n", pnameserver->counters.nx);
+					chunk_appendf(&trash, "  timeout: %ld\n", pnameserver->counters.timeout);
+					chunk_appendf(&trash, "  refused: %ld\n", pnameserver->counters.refused);
+					chunk_appendf(&trash, "  other: %ld\n", pnameserver->counters.other);
+					chunk_appendf(&trash, "  invalid: %ld\n", pnameserver->counters.invalid);
+					chunk_appendf(&trash, "  too_big: %ld\n", pnameserver->counters.too_big);
+					chunk_appendf(&trash, "  truncated: %ld\n", pnameserver->counters.truncated);
+					chunk_appendf(&trash, "  outdated: %ld\n", pnameserver->counters.outdated);
+				}
+			}
+		}
+
+		/* display response */
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			/* let's try again later from this session. We add ourselves into
+			 * this session's users so that it can remove us upon termination.
+			 */
+			si->flags |= SI_FL_WAIT_ROOM;
+			return 0;
+		}
+
+		appctx->st2 = STAT_ST_FIN;
+		/* fall through */
+
+	default:
+		appctx->st2 = STAT_ST_FIN;
+		return 1;
+	}
+}
+
+/* register cli keywords */
+static struct cli_kw_list cli_kws = {{ },{
+	{ { "show", "stat", "resolvers", NULL }, "show stat resolvers [id]: dumps counters from all resolvers section and\n"
+	                                         "                          associated name servers",
+	                                         cli_parse_stat_resolvers, cli_io_handler_dump_resolvers_to_buffer },
+	{{},}
+}};
+
+
+__attribute__((constructor))
+static void __dns_init(void)
+{
+	cli_register_kw(&cli_kws);
+}
+

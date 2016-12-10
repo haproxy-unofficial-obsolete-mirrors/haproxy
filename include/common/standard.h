@@ -33,6 +33,7 @@
 #include <arpa/inet.h>
 #include <common/chunk.h>
 #include <common/config.h>
+#include <common/namespace.h>
 #include <eb32tree.h>
 
 #ifndef LLONG_MAX
@@ -358,6 +359,17 @@ int addr_to_str(struct sockaddr_storage *addr, char *str, int size);
  */
 int port_to_str(struct sockaddr_storage *addr, char *str, int size);
 
+/* check if the given address is local to the system or not. It will return
+ * -1 when it's not possible to know, 0 when the address is not local, 1 when
+ * it is. We don't want to iterate over all interfaces for this (and it is not
+ * portable). So instead we try to bind in UDP to this address on a free non
+ * privileged port and to connect to the same address, port 0 (connect doesn't
+ * care). If it succeeds, we own the address. Note that non-inet addresses are
+ * considered local since they're most likely AF_UNIX.
+ */
+int addr_is_local(const struct netns_entry *ns,
+                  const struct sockaddr_storage *orig);
+
 /* will try to encode the string <string> replacing all characters tagged in
  * <map> with the hexadecimal representation of their ASCII-code (2 digits)
  * prefixed by <escape>, and will store the result between <start> (included)
@@ -379,6 +391,18 @@ char *encode_string(char *start, char *stop,
 char *encode_chunk(char *start, char *stop,
                    const char escape, const fd_set *map,
                    const struct chunk *chunk);
+
+/*
+ * Tries to prefix characters tagged in the <map> with the <escape>
+ * character. The input <string> must be zero-terminated. The result will
+ * be stored between <start> (included) and <stop> (excluded). This
+ * function will always try to terminate the resulting string with a '\0'
+ * before <stop>, and will return its position if the conversion
+ * completes.
+ */
+char *escape_string(char *start, char *stop,
+		    const char escape, const fd_set *map,
+		    const char *string);
 
 /*
  * Tries to prefix characters tagged in the <map> with the <escape>
@@ -856,6 +880,18 @@ extern void v4tov6(struct in6_addr *sin6_addr, struct in_addr *sin_addr);
  */
 extern int v6tov4(struct in_addr *sin_addr, struct in6_addr *sin6_addr);
 
+/* compare two struct sockaddr_storage and return:
+ *  0 (true)  if the addr is the same in both
+ *  1 (false) if the addr is not the same in both
+ */
+int ipcmp(struct sockaddr_storage *ss1, struct sockaddr_storage *ss2);
+
+/* copy ip from <source> into <dest>
+ * the caller must clear <dest> before calling.
+ * Returns a pointer to the destination
+ */
+struct sockaddr_storage *ipcpy(struct sockaddr_storage *source, struct sockaddr_storage *dest);
+
 char *human_time(int t, short hz_div);
 
 extern const char *monthname[];
@@ -1093,6 +1129,11 @@ static inline unsigned long long rdtsc()
 struct list;
 int list_append_word(struct list *li, const char *str, char **err);
 
+int dump_text(struct chunk *out, const char *buf, int bsize);
+int dump_binary(struct chunk *out, const char *buf, int bsize);
+int dump_text_line(struct chunk *out, const char *buf, int bsize, int len,
+                   int *line, int ptr);
+
 /* same as realloc() except that ptr is also freed upon failure */
 static inline void *my_realloc2(void *ptr, size_t size)
 {
@@ -1103,5 +1144,14 @@ static inline void *my_realloc2(void *ptr, size_t size)
 		free(ptr);
 	return ret;
 }
+
+/* HAP_STRING() makes a string from a literal while HAP_XSTRING() first
+ * evaluates the argument and is suited to pass macros.
+ *
+ * They allow macros like PCRE_MAJOR to be defined without quotes, which
+ * is convenient for applications that want to test its value.
+ */
+#define HAP_STRING(...) #__VA_ARGS__
+#define HAP_XSTRING(...) HAP_STRING(__VA_ARGS__)
 
 #endif /* _COMMON_STANDARD_H */

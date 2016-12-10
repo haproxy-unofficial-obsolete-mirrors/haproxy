@@ -39,7 +39,7 @@ struct task;
 struct protocol;
 struct xprt_ops;
 struct proxy;
-struct licounters;
+struct fe_counters;
 
 /* listener state */
 enum li_state {
@@ -80,19 +80,20 @@ enum li_state {
  */
 
 /* listener socket options */
-#define LI_O_NONE	0x0000
-#define LI_O_NOLINGER	0x0001	/* disable linger on this socket */
-#define LI_O_FOREIGN	0x0002	/* permit listening on foreing addresses */
-#define LI_O_NOQUICKACK	0x0004	/* disable quick ack of immediate data (linux) */
-#define LI_O_DEF_ACCEPT	0x0008	/* wait up to 1 second for data before accepting */
-#define LI_O_TCP_RULES  0x0010  /* run TCP rules checks on the incoming connection */
-#define LI_O_CHK_MONNET 0x0020  /* check the source against a monitor-net rule */
-#define LI_O_ACC_PROXY  0x0040  /* find the proxied address in the first request line */
-#define LI_O_UNLIMITED  0x0080  /* listener not subject to global limits (peers & stats socket) */
-#define LI_O_TCP_FO     0x0100  /* enable TCP Fast Open (linux >= 3.7) */
-#define LI_O_V6ONLY     0x0200  /* bind to IPv6 only on Linux >= 2.4.21 */
-#define LI_O_V4V6       0x0400  /* bind to IPv4/IPv6 on Linux >= 2.4.21 */
-#define LI_O_ACC_CIP    0x0800  /* find the proxied address in the NetScaler Client IP header */
+#define LI_O_NONE               0x0000
+#define LI_O_NOLINGER           0x0001  /* disable linger on this socket */
+#define LI_O_FOREIGN            0x0002  /* permit listening on foreing addresses ("transparent") */
+#define LI_O_NOQUICKACK         0x0004  /* disable quick ack of immediate data (linux) */
+#define LI_O_DEF_ACCEPT         0x0008  /* wait up to 1 second for data before accepting */
+#define LI_O_TCP_L4_RULES       0x0010  /* run TCP L4 rules checks on the incoming connection */
+#define LI_O_TCP_L5_RULES       0x0020  /* run TCP L5 rules checks on the incoming session */
+#define LI_O_CHK_MONNET         0x0040  /* check the source against a monitor-net rule */
+#define LI_O_ACC_PROXY          0x0080  /* find the proxied address in the first request line */
+#define LI_O_UNLIMITED          0x0100  /* listener not subject to global limits (peers & stats socket) */
+#define LI_O_TCP_FO             0x0200  /* enable TCP Fast Open (linux >= 3.7) */
+#define LI_O_V6ONLY             0x0400  /* bind to IPv6 only on Linux >= 2.4.21 */
+#define LI_O_V4V6               0x0800  /* bind to IPv4/IPv6 on Linux >= 2.4.21 */
+#define LI_O_ACC_CIP            0x1000  /* find the proxied address in the NetScaler Client IP header */
 
 /* Note: if a listener uses LI_O_UNLIMITED, it is highly recommended that it adds its own
  * maxconn setting to the global.maxsock value so that its resources are reserved.
@@ -170,7 +171,7 @@ struct listener {
 	char *name;			/* listener's name */
 	int luid;			/* listener universally unique ID, used for SNMP */
 	int options;			/* socket options : LI_O_* */
-	struct licounters *counters;	/* statistics counters */
+	struct fe_counters *counters;	/* statistics counters */
 	struct protocol *proto;		/* protocol this listener belongs to */
 	struct xprt_ops *xprt;          /* transport-layer operations for this socket */
 	int nbconn;			/* current number of connections on this listener */

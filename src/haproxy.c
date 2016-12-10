@@ -109,9 +109,14 @@
 #include <proto/signal.h>
 #include <proto/task.h>
 #include <proto/dns.h>
+#include <proto/vars.h>
 
 #ifdef USE_OPENSSL
 #include <proto/ssl_sock.h>
+#endif
+
+#ifdef USE_WURFL
+#include <proto/wurfl.h>
 #endif
 
 #ifdef USE_DEVICEATLAS
@@ -204,6 +209,19 @@ struct global global = {
 		.cache_size = 0,
 	},
 #endif
+#ifdef USE_WURFL
+	.wurfl = {
+		.data_file = NULL,
+		.cache_size = NULL,
+		.engine_mode = -1,
+		.useragent_priority = -1,
+		.information_list_separator = ',',
+		.information_list = LIST_HEAD_INIT(global.wurfl.information_list),
+		.patch_file_list = LIST_HEAD_INIT(global.wurfl.patch_file_list),
+		.handle = NULL,
+	},
+#endif
+
 	/* others NULL OK */
 };
 
@@ -292,6 +310,7 @@ void display_build_opts()
 
 #ifdef USE_ZLIB
 	printf("Built with zlib version : " ZLIB_VERSION "\n");
+	printf("Running on zlib version : %s\n", zlibVersion());
 #elif defined(USE_SLZ)
 	printf("Built with libslz for stateless compression.\n");
 #else /* USE_ZLIB */
@@ -352,7 +371,10 @@ void display_build_opts()
 #endif
 
 #ifdef USE_PCRE
-	printf("Built with PCRE version : %s", pcre_version());
+	printf("Built with PCRE version : %s\n", (HAP_XSTRING(Z PCRE_PRERELEASE)[1] == 0)?
+		HAP_XSTRING(PCRE_MAJOR.PCRE_MINOR PCRE_DATE) :
+		HAP_XSTRING(PCRE_MAJOR.PCRE_MINOR) HAP_XSTRING(PCRE_PRERELEASE PCRE_DATE));
+	printf("Running on PCRE version : %s", pcre_version());
 	printf("\nPCRE library supports JIT : ");
 #ifdef USE_PCRE_JIT
 	{
@@ -410,6 +432,9 @@ void display_build_opts()
 #ifdef USE_51DEGREES
 	printf("Built with 51Degrees support\n");
 #endif
+#ifdef USE_WURFL
+	printf("Built with WURFL support\n");
+#endif
 	putchar('\n');
 
 	list_pollers(stdout);
@@ -455,6 +480,10 @@ void usage(char *name)
 #if defined(USE_GETADDRINFO)
 		"        -dG disables getaddrinfo() usage\n"
 #endif
+#if defined(SO_REUSEPORT)
+		"        -dR disables SO_REUSEPORT usage\n"
+#endif
+		"        -dr ignores server address resolution failures\n"
 		"        -dV disables SSL verify on servers side\n"
 		"        -sf/-st [pid ]* finishes/terminates old pids.\n"
 		"\n",
@@ -706,6 +735,9 @@ void init(int argc, char **argv)
 	/* Initialise lua. */
 	hlua_init();
 
+	/* Initialize process vars */
+	vars_init(&global.vars, SCOPE_PROC);
+
 	global.tune.options |= GTUNE_USE_SELECT;  /* select() is always available */
 #if defined(ENABLE_POLL)
 	global.tune.options |= GTUNE_USE_POLL;
@@ -721,6 +753,9 @@ void init(int argc, char **argv)
 #endif
 #if defined(USE_GETADDRINFO)
 	global.tune.options |= GTUNE_USE_GAI;
+#endif
+#if defined(SO_REUSEPORT)
+	global.tune.options |= GTUNE_USE_REUSEPORT;
 #endif
 
 	pid = getpid();
@@ -765,6 +800,10 @@ void init(int argc, char **argv)
 			else if (*flag == 'd' && flag[1] == 'G')
 				global.tune.options &= ~GTUNE_USE_GAI;
 #endif
+#if defined(SO_REUSEPORT)
+			else if (*flag == 'd' && flag[1] == 'R')
+				global.tune.options &= ~GTUNE_USE_REUSEPORT;
+#endif
 			else if (*flag == 'd' && flag[1] == 'V')
 				global.ssl_server_verify = SSL_SERVER_VERIFY_NONE;
 			else if (*flag == 'V')
@@ -773,6 +812,8 @@ void init(int argc, char **argv)
 				arg_mode |= MODE_FOREGROUND;
 			else if (*flag == 'd' && flag[1] == 'M')
 				mem_poison_byte = flag[2] ? strtol(flag + 2, NULL, 0) : 'P';
+			else if (*flag == 'd' && flag[1] == 'r')
+				global.tune.options |= GTUNE_RESOLVE_DONTFAIL;
 			else if (*flag == 'd')
 				arg_mode |= MODE_DEBUG;
 			else if (*flag == 'c')
@@ -918,6 +959,19 @@ void init(int argc, char **argv)
         }
 #endif
 
+	/* Apply server states */
+	apply_server_state();
+
+	for (px = proxy; px; px = px->next)
+		srv_compute_all_admin_states(px);
+
+	/* Apply servers' configured address */
+	err_code |= srv_init_addr();
+	if (err_code & (ERR_ABORT|ERR_FATAL)) {
+		Alert("Failed to initialize server(s) addr.\n");
+		exit(1);
+	}
+
 	if (global.mode & MODE_CHECK) {
 		struct peers *pr;
 		struct proxy *px;
@@ -939,9 +993,6 @@ void init(int argc, char **argv)
 		exit(2);
 	}
 
-	/* Apply server states */
-	apply_server_state();
-
 	global_listener_queue_task = task_new();
 	if (!global_listener_queue_task) {
 		Alert("Out of memory when initializing global task\n");
@@ -959,6 +1010,9 @@ void init(int argc, char **argv)
 #endif
 #ifdef USE_51DEGREES
 	init_51degrees();
+#endif
+#ifdef USE_WURFL
+	ha_wurfl_init();
 #endif
 
 	for (px = proxy; px; px = px->next) {
@@ -1292,33 +1346,6 @@ static void deinit_tcp_rules(struct list *rules)
 	}
 }
 
-static void deinit_sample_arg(struct arg *p)
-{
-	struct arg *p_back = p;
-
-	if (!p)
-		return;
-
-	while (p->type != ARGT_STOP) {
-		if (p->type == ARGT_STR || p->unresolved) {
-			free(p->data.str.str);
-			p->data.str.str = NULL;
-			p->unresolved = 0;
-		}
-		else if (p->type == ARGT_REG) {
-			if (p->data.reg) {
-				regex_free(p->data.reg);
-				free(p->data.reg);
-				p->data.reg = NULL;
-			}
-		}
-		p++;
-	}
-
-	if (p_back != empty_arg_list)
-		free(p_back);
-}
-
 static void deinit_stick_rules(struct list *rules)
 {
 	struct sticking_rule *rule, *ruleb;
@@ -1326,13 +1353,7 @@ static void deinit_stick_rules(struct list *rules)
 	list_for_each_entry_safe(rule, ruleb, rules, list) {
 		LIST_DEL(&rule->list);
 		deinit_acl_cond(rule->cond);
-		if (rule->expr) {
-			struct sample_conv_expr *conv_expr, *conv_exprb;
-			list_for_each_entry_safe(conv_expr, conv_exprb, &rule->expr->conv_exprs, list)
-				deinit_sample_arg(conv_expr->arg_p);
-			deinit_sample_arg(rule->expr->arg_p);
-			free(rule->expr);
-		}
+		release_sample_expr(rule->expr);
 		free(rule);
 	}
 }
@@ -1461,6 +1482,7 @@ void deinit(void)
 			if (rule->cond) {
 				prune_acl_cond(rule->cond);
 				free(rule->cond);
+				free(rule->file);
 			}
 			free(rule);
 		}
@@ -1630,6 +1652,10 @@ void deinit(void)
 	deinit_51degrees();
 #endif
 
+#ifdef USE_WURFL
+	ha_wurfl_deinit();
+#endif
+
 	free(global.log_send_hostname); global.log_send_hostname = NULL;
 	chunk_destroy(&global.log_tag);
 	free(global.chroot);  global.chroot = NULL;
@@ -1653,6 +1679,8 @@ void deinit(void)
 		LIST_DEL(&wl->list);
 		free(wl);
 	}
+
+	vars_prune(&global.vars, NULL, NULL);
 
 	pool_destroy2(pool2_stream);
 	pool_destroy2(pool2_session);
@@ -1948,6 +1976,7 @@ int main(int argc, char **argv)
 		int ret = 0;
 		int *children = calloc(global.nbproc, sizeof(int));
 		int proc;
+		char *wrapper_fd;
 
 		/* the father launches the required number of processes */
 		for (proc = 0; proc < global.nbproc; proc++) {
@@ -1982,6 +2011,15 @@ int main(int argc, char **argv)
 		if (pidfd >= 0) {
 			//lseek(pidfd, 0, SEEK_SET);  /* debug: emulate eglibc bug */
 			close(pidfd);
+		}
+
+		/* each child must notify the wrapper that it's ready by closing the requested fd */
+		wrapper_fd = getenv("HAPROXY_WRAPPER_FD");
+		if (wrapper_fd) {
+			int pipe_fd = atoi(wrapper_fd);
+
+			if (pipe_fd >= 0)
+				close(pipe_fd);
 		}
 
 		/* We won't ever use this anymore */

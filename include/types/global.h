@@ -31,6 +31,7 @@
 #include <types/listener.h>
 #include <types/proxy.h>
 #include <types/task.h>
+#include <types/vars.h>
 
 #ifdef USE_51DEGREES
 #include <import/51d.h>
@@ -63,6 +64,8 @@
 /* platform-specific options */
 #define GTUNE_USE_SPLICE         (1<<4)
 #define GTUNE_USE_GAI            (1<<5)
+#define GTUNE_USE_REUSEPORT      (1<<6)
+#define GTUNE_RESOLVE_DONTFAIL   (1<<7)
 
 /* Access level for a stats socket */
 #define ACCESS_LVL_NONE     0
@@ -177,6 +180,7 @@ struct global {
 	unsigned long cpu_map[LONGBITS];  /* list of CPU masks for the 32/64 first processes */
 #endif
 	struct proxy *stats_fe;     /* the frontend holding the stats settings */
+	struct vars   vars;         /* list of variables for the process scope. */
 #ifdef USE_DEVICEATLAS
 	struct {
 		void *atlasimgptr;
@@ -197,8 +201,8 @@ struct global {
 		char *data_file_path;
 		int header_count; /* number of HTTP headers related to device detection. */
 		struct chunk *header_names; /* array of HTTP header names. */
+		fiftyoneDegreesDataSet data_set; /* data set used with the pattern and trie detection methods. */
 #ifdef FIFTYONEDEGREES_H_PATTERN_INCLUDED
-		fiftyoneDegreesDataSet data_set; /* data set used with the pattern detection method. */
 		fiftyoneDegreesWorksetPool *pool; /* pool of worksets to avoid creating a new one for each request. */
 #endif
 #ifdef FIFTYONEDEGREES_H_TRIE_INCLUDED
@@ -207,6 +211,19 @@ struct global {
 #endif
 		int cache_size;
 	} _51degrees;
+#endif
+#ifdef USE_WURFL
+	struct {
+		char *data_file; /* the WURFL data file */
+		char *cache_size; /* the WURFL cache parameters */
+		int engine_mode; /* the WURFL engine mode */
+		int useragent_priority; /* the WURFL ua priority */
+		struct list patch_file_list; /* the list of WURFL patch file to use */
+		char information_list_separator; /* the separator used in request to separate values */
+		struct list information_list; /* the list of WURFL data to return into request */
+		void *handle; /* the handle to WURFL engine */
+		struct eb_root btree; /* btree containing info (name/type) on WURFL data to return */
+	} wurfl;
 #endif
 };
 

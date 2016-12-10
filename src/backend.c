@@ -115,9 +115,11 @@ void recount_servers(struct proxy *px)
 			    !(px->options & PR_O_USE_ALL_BK))
 				px->lbprm.fbck = srv;
 			px->srv_bck++;
+			srv->cumulative_weight = px->lbprm.tot_wbck;
 			px->lbprm.tot_wbck += srv->eweight;
 		} else {
 			px->srv_act++;
+			srv->cumulative_weight = px->lbprm.tot_wact;
 			px->lbprm.tot_wact += srv->eweight;
 		}
 	}
@@ -1017,7 +1019,7 @@ static void assign_tproxy_address(struct stream *s)
  *  - SF_ERR_PRXCOND if the connection has been limited by the proxy (maxconn)
  *  - SF_ERR_RESOURCE if a system resource is lacking (eg: fd limits, ports, ...)
  *  - SF_ERR_INTERNAL for any other purely internal errors
- * Additionnally, in the case of SF_ERR_RESOURCE, an emergency log will be emitted.
+ * Additionally, in the case of SF_ERR_RESOURCE, an emergency log will be emitted.
  * The server-facing stream interface is expected to hold a pre-allocated connection
  * in s->si[1].conn.
  */
@@ -1217,12 +1219,7 @@ int connect_server(struct stream *s)
 			/* restore the pointers */
 			b_adv(s->req.buf, rewind);
 
-			if (smp) {
-				/* get write access to terminate with a zero */
-				smp_dup(smp);
-				if (smp->data.u.str.len >= smp->data.u.str.size)
-					smp->data.u.str.len = smp->data.u.str.size - 1;
-				smp->data.u.str.str[smp->data.u.str.len] = 0;
+			if (smp_make_safe(smp)) {
 				ssl_sock_set_servername(srv_conn, smp->data.u.str.str);
 				srv_conn->flags |= CO_FL_PRIVATE;
 			}
@@ -1329,8 +1326,10 @@ void set_backend_down(struct proxy *be)
 	be->last_change = now.tv_sec;
 	be->down_trans++;
 
-	Alert("%s '%s' has no server available!\n", proxy_type_str(be), be->id);
-	send_log(be, LOG_EMERG, "%s %s has no server available!\n", proxy_type_str(be), be->id);
+	if (!(global.mode & MODE_STARTING)) {
+		Alert("%s '%s' has no server available!\n", proxy_type_str(be), be->id);
+		send_log(be, LOG_EMERG, "%s %s has no server available!\n", proxy_type_str(be), be->id);
+	}
 }
 
 /* Apply RDP cookie persistence to the current stream. For this, the function
@@ -1430,8 +1429,10 @@ const char *backend_lb_algo_str(int algo) {
 		return "hdr";
 	else if (algo == BE_LB_ALGO_RCH)
 		return "rdp-cookie";
+	else if (algo == BE_LB_ALGO_NONE)
+		return "none";
 	else
-		return NULL;
+		return "unknown";
 }
 
 /* This function parses a "balance" statement in a backend section describing

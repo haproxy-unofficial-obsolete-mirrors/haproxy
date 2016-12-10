@@ -10,6 +10,8 @@
  *
  */
 
+#include <ctype.h>
+
 #include <common/standard.h>
 #include <common/time.h>
 #include <common/tools.h>
@@ -32,6 +34,7 @@ struct trace_config {
 	char         *name;
 	int           rand_parsing;
 	int           rand_forwarding;
+	int           hexdump;
 };
 
 #define TRACE(conf, fmt, ...)						\
@@ -39,10 +42,11 @@ struct trace_config {
 		(int)now.tv_sec, (int)now.tv_usec, (conf)->name,	\
 		##__VA_ARGS__)
 
-#define STRM_TRACE(conf, strm, fmt, ...)				\
-	fprintf(stderr, "%d.%06d [%-20s] [strm %p(%x)] " fmt "\n",	\
-		(int)now.tv_sec, (int)now.tv_usec, (conf)->name,	\
-		strm, (strm ? ((struct stream *)strm)->uniq_id : ~0U),	\
+#define STRM_TRACE(conf, strm, fmt, ...)						\
+	fprintf(stderr, "%d.%06d [%-20s] [strm %p(%x) 0x%08x 0x%08x] " fmt "\n",	\
+		(int)now.tv_sec, (int)now.tv_usec, (conf)->name,			\
+		strm, (strm ? ((struct stream *)strm)->uniq_id : ~0U),			\
+		(strm ? strm->req.analysers : 0), (strm ? strm->res.analysers : 0),	\
 		##__VA_ARGS__)
 
 
@@ -66,6 +70,48 @@ stream_pos(const struct stream *s)
 	return (s->flags & SF_BE_ASSIGNED) ? "backend" : "frontend";
 }
 
+static const char *
+filter_type(const struct filter *f)
+{
+	return (f->flags & FLT_FL_IS_BACKEND_FILTER) ? "backend" : "frontend";
+}
+
+static void
+trace_hexdump(struct buffer *buf, int len)
+{
+	unsigned char p[len];
+	int block1, block2, i, j, padding;
+
+	block1 = len;
+        if (block1 > bi_contig_data(buf))
+                block1 = bi_contig_data(buf);
+        block2 = len - block1;
+
+	memcpy(p, buf->p, block1);
+	memcpy(p+block1, buf->data, block2);
+
+	padding = ((len % 16) ? (16 - len % 16) : 0);
+	for (i = 0; i < len + padding; i++) {
+                if (!(i % 16))
+                        fprintf(stderr, "\t0x%06x: ", i);
+		else if (!(i % 8))
+                        fprintf(stderr, "  ");
+
+                if (i < len)
+                        fprintf(stderr, "%02x ", p[i]);
+                else
+                        fprintf(stderr, "   ");
+
+                /* print ASCII dump */
+                if (i % 16 == 15) {
+                        fprintf(stderr, "  |");
+                        for(j = i - 15; j <= i && j < len; j++)
+				fprintf(stderr, "%c", (isprint(p[j]) ? p[j] : '.'));
+                        fprintf(stderr, "|\n");
+                }
+        }
+}
+
 /***************************************************************************
  * Hooks that manage the filter lifecycle (init/check/deinit)
  **************************************************************************/
@@ -80,9 +126,10 @@ trace_init(struct proxy *px, struct flt_conf *fconf)
 	else
 		memprintf(&conf->name, "TRACE/%s", px->id);
 	fconf->conf = conf;
-	TRACE(conf, "filter initialized [read random=%s - fwd random=%s]",
+	TRACE(conf, "filter initialized [read random=%s - fwd random=%s - hexdump=%s]",
 	      (conf->rand_parsing ? "true" : "false"),
-	      (conf->rand_forwarding ? "true" : "false"));
+	      (conf->rand_forwarding ? "true" : "false"),
+	      (conf->hexdump ? "true" : "false"));
 	return 0;
 }
 
@@ -111,6 +158,28 @@ trace_check(struct proxy *px, struct flt_conf *fconf)
 /**************************************************************************
  * Hooks to handle start/stop of streams
  *************************************************************************/
+/* Called when a filter instance is created and attach to a stream */
+static int
+trace_attach(struct stream *s, struct filter *filter)
+{
+	struct trace_config *conf = FLT_CONF(filter);
+
+	STRM_TRACE(conf, s, "%-25s: filter-type=%s",
+		   __FUNCTION__, filter_type(filter));
+	return 1;
+}
+
+/* Called when a filter instance is detach from a stream, just before its
+ * destruction */
+static void
+trace_detach(struct stream *s, struct filter *filter)
+{
+	struct trace_config *conf = FLT_CONF(filter);
+
+	STRM_TRACE(conf, s, "%-25s: filter-type=%s",
+		   __FUNCTION__, filter_type(filter));
+}
+
 /* Called when a stream is created */
 static int
 trace_stream_start(struct stream *s, struct filter *filter)
@@ -122,9 +191,32 @@ trace_stream_start(struct stream *s, struct filter *filter)
 	return 0;
 }
 
+
+/* Called when a backend is set for a stream */
+static int
+trace_stream_set_backend(struct stream *s, struct filter *filter,
+			 struct proxy *be)
+{
+	struct trace_config *conf = FLT_CONF(filter);
+
+	STRM_TRACE(conf, s, "%-25s: backend=%s",
+		   __FUNCTION__, be->id);
+	return 0;
+}
+
 /* Called when a stream is destroyed */
 static void
 trace_stream_stop(struct stream *s, struct filter *filter)
+{
+	struct trace_config *conf = FLT_CONF(filter);
+
+	STRM_TRACE(conf, s, "%-25s",
+		   __FUNCTION__);
+}
+
+/* Called when the stream is woken up because of an expired timer */
+static void
+trace_check_timeouts(struct stream *s, struct filter *filter)
 {
 	struct trace_config *conf = FLT_CONF(filter);
 
@@ -147,6 +239,7 @@ trace_chn_start_analyze(struct stream *s, struct filter *filter,
 		   channel_label(chn), proxy_mode(s), stream_pos(s));
 	filter->pre_analyzers  |= (AN_REQ_ALL | AN_RES_ALL);
 	filter->post_analyzers |= (AN_REQ_ALL | AN_RES_ALL);
+	register_data_filter(s, chn, filter);
 	return 1;
 }
 
@@ -264,7 +357,6 @@ trace_http_headers(struct stream *s, struct filter *filter,
 		cur_hdr += hdr_idx->v[cur_idx].len + hdr_idx->v[cur_idx].cr + 1;
 		cur_idx = hdr_idx->v[cur_idx].next;
 	}
-	register_data_filter(s, msg->chn, filter);
 	return 1;
 }
 
@@ -351,6 +443,12 @@ trace_http_forward_data(struct stream *s, struct filter *filter,
 		   channel_label(msg->chn), proxy_mode(s), stream_pos(s), len,
 		   FLT_NXT(filter, msg->chn), FLT_FWD(filter, msg->chn), ret);
 
+	if (conf->hexdump) {
+		b_adv(msg->chn->buf, FLT_FWD(filter, msg->chn));
+		trace_hexdump(msg->chn->buf, ret);
+		b_rew(msg->chn->buf, FLT_FWD(filter, msg->chn));
+	}
+
 	if ((ret != len) ||
 	    (FLT_NXT(filter, msg->chn) != FLT_FWD(filter, msg->chn) + ret))
 		task_wakeup(s->task, TASK_WOKEN_MSG);
@@ -395,6 +493,12 @@ trace_tcp_forward_data(struct stream *s, struct filter *filter, struct channel *
 		   channel_label(chn), proxy_mode(s), stream_pos(s), len,
 		   FLT_FWD(filter, chn), ret);
 
+	if (conf->hexdump) {
+		b_adv(chn->buf, FLT_FWD(filter, chn));
+		trace_hexdump(chn->buf, ret);
+		b_rew(chn->buf, FLT_FWD(filter, chn));
+	}
+
 	if (ret != len)
 		task_wakeup(s->task, TASK_WOKEN_MSG);
 	return ret;
@@ -410,8 +514,12 @@ struct flt_ops trace_ops = {
 	.check  = trace_check,
 
 	/* Handle start/stop of streams */
-	.stream_start = trace_stream_start,
-	.stream_stop  = trace_stream_stop,
+	.attach             = trace_attach,
+	.detach             = trace_detach,
+	.stream_start       = trace_stream_start,
+	.stream_set_backend = trace_stream_set_backend,
+	.stream_stop        = trace_stream_stop,
+	.check_timeouts     = trace_check_timeouts,
 
 	/* Handle channels activity */
 	.channel_start_analyze = trace_chn_start_analyze,
@@ -470,6 +578,8 @@ parse_trace_flt(char **args, int *cur_arg, struct proxy *px,
 				conf->rand_parsing = 1;
 			else if (!strcmp(args[pos], "random-forwarding"))
 				conf->rand_forwarding = 1;
+			else if (!strcmp(args[pos], "hexdump"))
+				conf->hexdump = 1;
 			else
 				break;
 			pos++;

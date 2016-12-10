@@ -22,8 +22,10 @@
 
 #include <types/applet.h>
 #include <types/capture.h>
+#include <types/cli.h>
 #include <types/filters.h>
 #include <types/global.h>
+#include <types/stats.h>
 
 #include <proto/acl.h>
 #include <proto/action.h>
@@ -31,8 +33,9 @@
 #include <proto/backend.h>
 #include <proto/channel.h>
 #include <proto/checks.h>
+#include <proto/cli.h>
 #include <proto/connection.h>
-#include <proto/dumpstats.h>
+#include <proto/stats.h>
 #include <proto/fd.h>
 #include <proto/filters.h>
 #include <proto/freq_ctr.h>
@@ -46,7 +49,6 @@
 #include <proto/stream.h>
 #include <proto/pipe.h>
 #include <proto/proto_http.h>
-#include <proto/proto_tcp.h>
 #include <proto/proxy.h>
 #include <proto/queue.h>
 #include <proto/server.h>
@@ -54,6 +56,7 @@
 #include <proto/stick_table.h>
 #include <proto/stream_interface.h>
 #include <proto/task.h>
+#include <proto/tcp_rules.h>
 #include <proto/vars.h>
 
 struct pool_head *pool2_stream;
@@ -93,6 +96,11 @@ struct stream *stream_new(struct session *sess, struct task *t, enum obj_type *o
 	s->logs.level = 0;
 	s->logs.accept_date = sess->accept_date; /* user-visible date for logging */
 	s->logs.tv_accept = sess->tv_accept;   /* corrected date for internal use */
+	/* This function is called just after the handshake, so the handshake duration is
+	 * between the accept time and now.
+	 */
+	s->logs.t_handshake = tv_ms_elapsed(&sess->tv_accept, &now);
+	s->logs.t_idle = -1;
 	tv_zero(&s->logs.tv_request);
 	s->logs.t_queue = -1;
 	s->logs.t_connect = -1;
@@ -1615,6 +1623,9 @@ struct task *process_stream(struct task *t)
 			si_shutr(si_b);
 		}
 
+		if (HAS_FILTERS(s))
+			flt_stream_check_timeouts(s);
+
 		/* Once in a while we're woken up because the task expires. But
 		 * this does not necessarily mean that a timeout has been reached.
 		 * So let's not run a whole stream processing if only an expiration
@@ -1828,8 +1839,8 @@ struct task *process_stream(struct task *t)
 				FLT_ANALYZE(s, req, tcp_persist_rdp_cookie,     ana_list, ana_back, AN_REQ_PRST_RDP_COOKIE);
 				FLT_ANALYZE(s, req, process_sticking_rules,     ana_list, ana_back, AN_REQ_STICKING_RULES);
 				ANALYZE    (s, req, flt_analyze_http_headers,   ana_list, ana_back, AN_FLT_HTTP_HDRS);
-				ANALYZE    (s, req, flt_xfer_data,              ana_list, ana_back, AN_FLT_XFER_DATA);
 				ANALYZE    (s, req, http_request_forward_body,  ana_list, ana_back, AN_REQ_HTTP_XFER_BODY);
+				ANALYZE    (s, req, flt_xfer_data,              ana_list, ana_back, AN_FLT_XFER_DATA);
 				ANALYZE    (s, req, flt_end_analyze,            ana_list, ana_back, AN_FLT_END);
 				break;
 			}
@@ -1907,8 +1918,8 @@ struct task *process_stream(struct task *t)
 				FLT_ANALYZE(s, res, process_store_rules,        ana_list, ana_back, AN_RES_STORE_RULES);
 				FLT_ANALYZE(s, res, http_process_res_common,    ana_list, ana_back, AN_RES_HTTP_PROCESS_BE, s->be);
 				ANALYZE    (s, res, flt_analyze_http_headers,   ana_list, ana_back, AN_FLT_HTTP_HDRS);
-				ANALYZE    (s, res, flt_xfer_data,              ana_list, ana_back, AN_FLT_XFER_DATA);
 				ANALYZE    (s, res, http_response_forward_body, ana_list, ana_back, AN_RES_HTTP_XFER_BODY);
+				ANALYZE    (s, res, flt_xfer_data,              ana_list, ana_back, AN_FLT_XFER_DATA);
 				ANALYZE    (s, res, flt_end_analyze,            ana_list, ana_back, AN_FLT_END);
 				break;
 			}
@@ -2360,10 +2371,17 @@ struct task *process_stream(struct task *t)
 
 	update_exp_and_leave:
 		/* Note: please ensure that if you branch here you disable SI_FL_DONT_WAKE */
-		t->expire = tick_first(tick_first(req->rex, req->wex),
-				       tick_first(res->rex, res->wex));
-		if (req->analysers)
-			t->expire = tick_first(t->expire, req->analyse_exp);
+		t->expire = tick_first((tick_is_expired(t->expire, now_ms) ? 0 : t->expire),
+				       tick_first(tick_first(req->rex, req->wex),
+						  tick_first(res->rex, res->wex)));
+		if (!req->analysers)
+			req->analyse_exp = TICK_ETERNITY;
+
+		if ((sess->fe->options & PR_O_CONTSTATS) && (s->flags & SF_BE_ASSIGNED) &&
+		          (!tick_isset(req->analyse_exp) || tick_is_expired(req->analyse_exp, now_ms)))
+			req->analyse_exp = tick_add(now_ms, 5000);
+
+		t->expire = tick_first(t->expire, req->analyse_exp);
 
 		if (si_f->exp)
 			t->expire = tick_first(t->expire, si_f->exp);
@@ -2510,6 +2528,7 @@ void sess_change_server(struct stream *sess, struct server *newsrv)
 
 	if (sess->srv_conn) {
 		sess->srv_conn->served--;
+		sess->srv_conn->proxy->served--;
 		if (sess->srv_conn->proxy->lbprm.server_drop_conn)
 			sess->srv_conn->proxy->lbprm.server_drop_conn(sess->srv_conn);
 		stream_del_srv_conn(sess);
@@ -2517,6 +2536,7 @@ void sess_change_server(struct stream *sess, struct server *newsrv)
 
 	if (newsrv) {
 		newsrv->served++;
+		newsrv->proxy->served++;
 		if (newsrv->proxy->lbprm.server_take_conn)
 			newsrv->proxy->lbprm.server_take_conn(newsrv);
 		stream_add_srv_conn(sess, newsrv);
@@ -2590,710 +2610,6 @@ void stream_shutdown(struct stream *stream, int why)
 /*           All supported ACL keywords must be declared here.          */
 /************************************************************************/
 
-/* Returns a pointer to a stkctr depending on the fetch keyword name.
- * It is designed to be called as sc[0-9]_* sc_* or src_* exclusively.
- * sc[0-9]_* will return a pointer to the respective field in the
- * stream <l4>. sc_* requires an UINT argument specifying the stick
- * counter number. src_* will fill a locally allocated structure with
- * the table and entry corresponding to what is specified with src_*.
- * NULL may be returned if the designated stkctr is not tracked. For
- * the sc_* and sc[0-9]_* forms, an optional table argument may be
- * passed. When present, the currently tracked key is then looked up
- * in the specified table instead of the current table. The purpose is
- * to be able to convery multiple values per key (eg: have gpc0 from
- * multiple tables). <strm> is allowed to be NULL, in which case only
- * the session will be consulted.
- */
-struct stkctr *
-smp_fetch_sc_stkctr(struct session *sess, struct stream *strm, const struct arg *args, const char *kw)
-{
-	static struct stkctr stkctr;
-	struct stkctr *stkptr;
-	struct stksess *stksess;
-	unsigned int num = kw[2] - '0';
-	int arg = 0;
-
-	if (num == '_' - '0') {
-		/* sc_* variant, args[0] = ctr# (mandatory) */
-		num = args[arg++].data.sint;
-		if (num >= MAX_SESS_STKCTR)
-			return NULL;
-	}
-	else if (num > 9) { /* src_* variant, args[0] = table */
-		struct stktable_key *key;
-		struct connection *conn = objt_conn(sess->origin);
-		struct sample smp;
-
-		if (!conn)
-			return NULL;
-
-		/* Fetch source adress in a sample. */
-		smp.px = NULL;
-		smp.sess = sess;
-		smp.strm = strm;
-		if (!smp_fetch_src(NULL, &smp, NULL, NULL))
-			return NULL;
-
-		/* Converts into key. */
-		key = smp_to_stkey(&smp, &args->data.prx->table);
-		if (!key)
-			return NULL;
-
-		stkctr.table = &args->data.prx->table;
-		stkctr_set_entry(&stkctr, stktable_lookup_key(stkctr.table, key));
-		return &stkctr;
-	}
-
-	/* Here, <num> contains the counter number from 0 to 9 for
-	 * the sc[0-9]_ form, or even higher using sc_(num) if needed.
-	 * args[arg] is the first optional argument. We first lookup the
-	 * ctr form the stream, then from the session if it was not there.
-	 */
-
-	if (strm)
-		stkptr = &strm->stkctr[num];
-	if (!strm || !stkctr_entry(stkptr)) {
-		stkptr = &sess->stkctr[num];
-		if (!stkctr_entry(stkptr))
-			return NULL;
-	}
-
-	stksess = stkctr_entry(stkptr);
-	if (!stksess)
-		return NULL;
-
-	if (unlikely(args[arg].type == ARGT_TAB)) {
-		/* an alternate table was specified, let's look up the same key there */
-		stkctr.table = &args[arg].data.prx->table;
-		stkctr_set_entry(&stkctr, stktable_lookup(stkctr.table, stksess));
-		return &stkctr;
-	}
-	return stkptr;
-}
-
-/* same as smp_fetch_sc_stkctr() but dedicated to src_* and can create
- * the entry if it doesn't exist yet. This is needed for a few fetch
- * functions which need to create an entry, such as src_inc_gpc* and
- * src_clr_gpc*.
- */
-struct stkctr *
-smp_create_src_stkctr(struct session *sess, struct stream *strm, const struct arg *args, const char *kw)
-{
-	static struct stkctr stkctr;
-	struct stktable_key *key;
-	struct connection *conn = objt_conn(sess->origin);
-	struct sample smp;
-
-	if (strncmp(kw, "src_", 4) != 0)
-		return NULL;
-
-	if (!conn)
-		return NULL;
-
-	/* Fetch source adress in a sample. */
-	smp.px = NULL;
-	smp.sess = sess;
-	smp.strm = strm;
-	if (!smp_fetch_src(NULL, &smp, NULL, NULL))
-		return NULL;
-
-	/* Converts into key. */
-	key = smp_to_stkey(&smp, &args->data.prx->table);
-	if (!key)
-		return NULL;
-
-	stkctr.table = &args->data.prx->table;
-	stkctr_set_entry(&stkctr, stktable_update_key(stkctr.table, key));
-	return &stkctr;
-}
-
-/* set return a boolean indicating if the requested stream counter is
- * currently being tracked or not.
- * Supports being called as "sc[0-9]_tracked" only.
- */
-static int
-smp_fetch_sc_tracked(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_BOOL;
-	smp->data.u.sint = !!smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	return 1;
-}
-
-/* set <smp> to the General Purpose Flag 0 value from the stream's tracked
- * frontend counters or from the src.
- * Supports being called as "sc[0-9]_get_gpc0" or "src_get_gpt0" only. Value
- * zero is returned if the key is new.
- */
-static int
-smp_fetch_sc_get_gpt0(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-
-	if (stkctr_entry(stkctr) != NULL) {
-		void *ptr = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_GPT0);
-		if (!ptr)
-			return 0; /* parameter not stored */
-		smp->data.u.sint = stktable_data_cast(ptr, gpt0);
-	}
-	return 1;
-}
-
-/* set <smp> to the General Purpose Counter 0 value from the stream's tracked
- * frontend counters or from the src.
- * Supports being called as "sc[0-9]_get_gpc0" or "src_get_gpc0" only. Value
- * zero is returned if the key is new.
- */
-static int
-smp_fetch_sc_get_gpc0(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-
-	if (stkctr_entry(stkctr) != NULL) {
-		void *ptr = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_GPC0);
-		if (!ptr)
-			return 0; /* parameter not stored */
-		smp->data.u.sint = stktable_data_cast(ptr, gpc0);
-	}
-	return 1;
-}
-
-/* set <smp> to the General Purpose Counter 0's event rate from the stream's
- * tracked frontend counters or from the src.
- * Supports being called as "sc[0-9]_gpc0_rate" or "src_gpc0_rate" only.
- * Value zero is returned if the key is new.
- */
-static int
-smp_fetch_sc_gpc0_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-	if (stkctr_entry(stkctr) != NULL) {
-		void *ptr = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_GPC0_RATE);
-		if (!ptr)
-			return 0; /* parameter not stored */
-		smp->data.u.sint = read_freq_ctr_period(&stktable_data_cast(ptr, gpc0_rate),
-		                  stkctr->table->data_arg[STKTABLE_DT_GPC0_RATE].u);
-	}
-	return 1;
-}
-
-/* Increment the General Purpose Counter 0 value from the stream's tracked
- * frontend counters and return it into temp integer.
- * Supports being called as "sc[0-9]_inc_gpc0" or "src_inc_gpc0" only.
- */
-static int
-smp_fetch_sc_inc_gpc0(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-
-	if (stkctr_entry(stkctr) == NULL)
-		stkctr = smp_create_src_stkctr(smp->sess, smp->strm, args, kw);
-
-	if (stkctr && stkctr_entry(stkctr)) {
-		void *ptr1,*ptr2;
-
-		/* First, update gpc0_rate if it's tracked. Second, update its
-		 * gpc0 if tracked. Returns gpc0's value otherwise the curr_ctr.
-		 */
-		ptr1 = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_GPC0_RATE);
-		if (ptr1) {
-			update_freq_ctr_period(&stktable_data_cast(ptr1, gpc0_rate),
-					       stkctr->table->data_arg[STKTABLE_DT_GPC0_RATE].u, 1);
-			smp->data.u.sint = (&stktable_data_cast(ptr1, gpc0_rate))->curr_ctr;
-		}
-
-		ptr2 = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_GPC0);
-		if (ptr2)
-			smp->data.u.sint = ++stktable_data_cast(ptr2, gpc0);
-
-		/* If data was modified, we need to touch to re-schedule sync */
-		if (ptr1 || ptr2)
-			stktable_touch(stkctr->table, stkctr_entry(stkctr), 1);
-	}
-	return 1;
-}
-
-/* Clear the General Purpose Counter 0 value from the stream's tracked
- * frontend counters and return its previous value into temp integer.
- * Supports being called as "sc[0-9]_clr_gpc0" or "src_clr_gpc0" only.
- */
-static int
-smp_fetch_sc_clr_gpc0(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-
-	if (stkctr_entry(stkctr) == NULL)
-		stkctr = smp_create_src_stkctr(smp->sess, smp->strm, args, kw);
-
-	if (stkctr_entry(stkctr) != NULL) {
-		void *ptr = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_GPC0);
-		if (!ptr)
-			return 0; /* parameter not stored */
-		smp->data.u.sint = stktable_data_cast(ptr, gpc0);
-		stktable_data_cast(ptr, gpc0) = 0;
-		/* If data was modified, we need to touch to re-schedule sync */
-		stktable_touch(stkctr->table, stkctr_entry(stkctr), 1);
-	}
-	return 1;
-}
-
-/* set <smp> to the cumulated number of connections from the stream's tracked
- * frontend counters. Supports being called as "sc[0-9]_conn_cnt" or
- * "src_conn_cnt" only.
- */
-static int
-smp_fetch_sc_conn_cnt(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-	if (stkctr_entry(stkctr) != NULL) {
-		void *ptr = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_CONN_CNT);
-		if (!ptr)
-			return 0; /* parameter not stored */
-		smp->data.u.sint = stktable_data_cast(ptr, conn_cnt);
-	}
-	return 1;
-}
-
-/* set <smp> to the connection rate from the stream's tracked frontend
- * counters. Supports being called as "sc[0-9]_conn_rate" or "src_conn_rate"
- * only.
- */
-static int
-smp_fetch_sc_conn_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-	if (stkctr_entry(stkctr) != NULL) {
-		void *ptr = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_CONN_RATE);
-		if (!ptr)
-			return 0; /* parameter not stored */
-		smp->data.u.sint = read_freq_ctr_period(&stktable_data_cast(ptr, conn_rate),
-					       stkctr->table->data_arg[STKTABLE_DT_CONN_RATE].u);
-	}
-	return 1;
-}
-
-/* set temp integer to the number of connections from the stream's source address
- * in the table pointed to by expr, after updating it.
- * Accepts exactly 1 argument of type table.
- */
-static int
-smp_fetch_src_updt_conn_cnt(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct connection *conn = objt_conn(smp->sess->origin);
-	struct stksess *ts;
-	struct stktable_key *key;
-	void *ptr;
-	struct proxy *px;
-
-	if (!conn)
-		return 0;
-
-	/* Fetch source adress in a sample. */
-	if (!smp_fetch_src(NULL, smp, NULL, NULL))
-		return 0;
-
-	/* Converts into key. */
-	key = smp_to_stkey(smp, &args->data.prx->table);
-	if (!key)
-		return 0;
-
-	px = args->data.prx;
-
-	if ((ts = stktable_update_key(&px->table, key)) == NULL)
-		/* entry does not exist and could not be created */
-		return 0;
-
-	ptr = stktable_data_ptr(&px->table, ts, STKTABLE_DT_CONN_CNT);
-	if (!ptr)
-		return 0; /* parameter not stored in this table */
-
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = ++stktable_data_cast(ptr, conn_cnt);
-	/* Touch was previously performed by stktable_update_key */
-	smp->flags = SMP_F_VOL_TEST;
-	return 1;
-}
-
-/* set <smp> to the number of concurrent connections from the stream's tracked
- * frontend counters. Supports being called as "sc[0-9]_conn_cur" or
- * "src_conn_cur" only.
- */
-static int
-smp_fetch_sc_conn_cur(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-	if (stkctr_entry(stkctr) != NULL) {
-		void *ptr = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_CONN_CUR);
-		if (!ptr)
-			return 0; /* parameter not stored */
-		smp->data.u.sint = stktable_data_cast(ptr, conn_cur);
-	}
-	return 1;
-}
-
-/* set <smp> to the cumulated number of streams from the stream's tracked
- * frontend counters. Supports being called as "sc[0-9]_sess_cnt" or
- * "src_sess_cnt" only.
- */
-static int
-smp_fetch_sc_sess_cnt(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-	if (stkctr_entry(stkctr) != NULL) {
-		void *ptr = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_SESS_CNT);
-		if (!ptr)
-			return 0; /* parameter not stored */
-		smp->data.u.sint = stktable_data_cast(ptr, sess_cnt);
-	}
-	return 1;
-}
-
-/* set <smp> to the stream rate from the stream's tracked frontend counters.
- * Supports being called as "sc[0-9]_sess_rate" or "src_sess_rate" only.
- */
-static int
-smp_fetch_sc_sess_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-	if (stkctr_entry(stkctr) != NULL) {
-		void *ptr = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_SESS_RATE);
-		if (!ptr)
-			return 0; /* parameter not stored */
-		smp->data.u.sint = read_freq_ctr_period(&stktable_data_cast(ptr, sess_rate),
-					       stkctr->table->data_arg[STKTABLE_DT_SESS_RATE].u);
-	}
-	return 1;
-}
-
-/* set <smp> to the cumulated number of HTTP requests from the stream's tracked
- * frontend counters. Supports being called as "sc[0-9]_http_req_cnt" or
- * "src_http_req_cnt" only.
- */
-static int
-smp_fetch_sc_http_req_cnt(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-	if (stkctr_entry(stkctr) != NULL) {
-		void *ptr = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_HTTP_REQ_CNT);
-		if (!ptr)
-			return 0; /* parameter not stored */
-		smp->data.u.sint = stktable_data_cast(ptr, http_req_cnt);
-	}
-	return 1;
-}
-
-/* set <smp> to the HTTP request rate from the stream's tracked frontend
- * counters. Supports being called as "sc[0-9]_http_req_rate" or
- * "src_http_req_rate" only.
- */
-static int
-smp_fetch_sc_http_req_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-	if (stkctr_entry(stkctr) != NULL) {
-		void *ptr = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_HTTP_REQ_RATE);
-		if (!ptr)
-			return 0; /* parameter not stored */
-		smp->data.u.sint = read_freq_ctr_period(&stktable_data_cast(ptr, http_req_rate),
-					       stkctr->table->data_arg[STKTABLE_DT_HTTP_REQ_RATE].u);
-	}
-	return 1;
-}
-
-/* set <smp> to the cumulated number of HTTP requests errors from the stream's
- * tracked frontend counters. Supports being called as "sc[0-9]_http_err_cnt" or
- * "src_http_err_cnt" only.
- */
-static int
-smp_fetch_sc_http_err_cnt(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-	if (stkctr_entry(stkctr) != NULL) {
-		void *ptr = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_HTTP_ERR_CNT);
-		if (!ptr)
-			return 0; /* parameter not stored */
-		smp->data.u.sint = stktable_data_cast(ptr, http_err_cnt);
-	}
-	return 1;
-}
-
-/* set <smp> to the HTTP request error rate from the stream's tracked frontend
- * counters. Supports being called as "sc[0-9]_http_err_rate" or
- * "src_http_err_rate" only.
- */
-static int
-smp_fetch_sc_http_err_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-	if (stkctr_entry(stkctr) != NULL) {
-		void *ptr = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_HTTP_ERR_RATE);
-		if (!ptr)
-			return 0; /* parameter not stored */
-		smp->data.u.sint = read_freq_ctr_period(&stktable_data_cast(ptr, http_err_rate),
-					       stkctr->table->data_arg[STKTABLE_DT_HTTP_ERR_RATE].u);
-	}
-	return 1;
-}
-
-/* set <smp> to the number of kbytes received from clients, as found in the
- * stream's tracked frontend counters. Supports being called as
- * "sc[0-9]_kbytes_in" or "src_kbytes_in" only.
- */
-static int
-smp_fetch_sc_kbytes_in(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-	if (stkctr_entry(stkctr) != NULL) {
-		void *ptr = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_BYTES_IN_CNT);
-		if (!ptr)
-			return 0; /* parameter not stored */
-		smp->data.u.sint = stktable_data_cast(ptr, bytes_in_cnt) >> 10;
-	}
-	return 1;
-}
-
-/* set <smp> to the data rate received from clients in bytes/s, as found
- * in the stream's tracked frontend counters. Supports being called as
- * "sc[0-9]_bytes_in_rate" or "src_bytes_in_rate" only.
- */
-static int
-smp_fetch_sc_bytes_in_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-	if (stkctr_entry(stkctr) != NULL) {
-		void *ptr = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_BYTES_IN_RATE);
-		if (!ptr)
-			return 0; /* parameter not stored */
-		smp->data.u.sint = read_freq_ctr_period(&stktable_data_cast(ptr, bytes_in_rate),
-					       stkctr->table->data_arg[STKTABLE_DT_BYTES_IN_RATE].u);
-	}
-	return 1;
-}
-
-/* set <smp> to the number of kbytes sent to clients, as found in the
- * stream's tracked frontend counters. Supports being called as
- * "sc[0-9]_kbytes_out" or "src_kbytes_out" only.
- */
-static int
-smp_fetch_sc_kbytes_out(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-	if (stkctr_entry(stkctr) != NULL) {
-		void *ptr = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_BYTES_OUT_CNT);
-		if (!ptr)
-			return 0; /* parameter not stored */
-		smp->data.u.sint = stktable_data_cast(ptr, bytes_out_cnt) >> 10;
-	}
-	return 1;
-}
-
-/* set <smp> to the data rate sent to clients in bytes/s, as found in the
- * stream's tracked frontend counters. Supports being called as
- * "sc[0-9]_bytes_out_rate" or "src_bytes_out_rate" only.
- */
-static int
-smp_fetch_sc_bytes_out_rate(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
-	if (stkctr_entry(stkctr) != NULL) {
-		void *ptr = stktable_data_ptr(stkctr->table, stkctr_entry(stkctr), STKTABLE_DT_BYTES_OUT_RATE);
-		if (!ptr)
-			return 0; /* parameter not stored */
-		smp->data.u.sint = read_freq_ctr_period(&stktable_data_cast(ptr, bytes_out_rate),
-					       stkctr->table->data_arg[STKTABLE_DT_BYTES_OUT_RATE].u);
-	}
-	return 1;
-}
-
-/* set <smp> to the number of active trackers on the SC entry in the stream's
- * tracked frontend counters. Supports being called as "sc[0-9]_trackers" only.
- */
-static int
-smp_fetch_sc_trackers(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct stkctr *stkctr;
-
-	stkctr = smp_fetch_sc_stkctr(smp->sess, smp->strm, args, kw);
-	if (!stkctr)
-		return 0;
-
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = stkctr_entry(stkctr)->ref_cnt;
-	return 1;
-}
-
-/* set temp integer to the number of used entries in the table pointed to by expr.
- * Accepts exactly 1 argument of type table.
- */
-static int
-smp_fetch_table_cnt(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = args->data.prx->table.current;
-	return 1;
-}
-
-/* set temp integer to the number of free entries in the table pointed to by expr.
- * Accepts exactly 1 argument of type table.
- */
-static int
-smp_fetch_table_avl(const struct arg *args, struct sample *smp, const char *kw, void *private)
-{
-	struct proxy *px;
-
-	px = args->data.prx;
-	smp->flags = SMP_F_VOL_TEST;
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = px->table.size - px->table.current;
-	return 1;
-}
-
 /* 0=OK, <0=Alert, >0=Warning */
 static enum act_parse_ret stream_parse_use_service(const char **args, int *cur_arg,
                                                    struct proxy *px, struct act_rule *rule,
@@ -3332,6 +2648,628 @@ void service_keywords_register(struct action_kw_list *kw_list)
 	LIST_ADDQ(&service_keywords, &kw_list->list);
 }
 
+
+/* This function dumps a complete stream state onto the stream interface's
+ * read buffer. The stream has to be set in strm. It returns 0 if the output
+ * buffer is full and it needs to be called again, otherwise non-zero. It is
+ * designed to be called from stats_dump_strm_to_buffer() below.
+ */
+static int stats_dump_full_strm_to_buffer(struct stream_interface *si, struct stream *strm)
+{
+	struct appctx *appctx = __objt_appctx(si->end);
+	struct tm tm;
+	extern const char *monthname[12];
+	char pn[INET6_ADDRSTRLEN];
+	struct connection *conn;
+	struct appctx *tmpctx;
+
+	chunk_reset(&trash);
+
+	if (appctx->ctx.sess.section > 0 && appctx->ctx.sess.uid != strm->uniq_id) {
+		/* stream changed, no need to go any further */
+		chunk_appendf(&trash, "  *** session terminated while we were watching it ***\n");
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si_applet_cant_put(si);
+			return 0;
+		}
+		appctx->ctx.sess.uid = 0;
+		appctx->ctx.sess.section = 0;
+		return 1;
+	}
+
+	switch (appctx->ctx.sess.section) {
+	case 0: /* main status of the stream */
+		appctx->ctx.sess.uid = strm->uniq_id;
+		appctx->ctx.sess.section = 1;
+		/* fall through */
+
+	case 1:
+		get_localtime(strm->logs.accept_date.tv_sec, &tm);
+		chunk_appendf(&trash,
+			     "%p: [%02d/%s/%04d:%02d:%02d:%02d.%06d] id=%u proto=%s",
+			     strm,
+			     tm.tm_mday, monthname[tm.tm_mon], tm.tm_year+1900,
+			     tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(strm->logs.accept_date.tv_usec),
+			     strm->uniq_id,
+			     strm_li(strm) ? strm_li(strm)->proto->name : "?");
+
+		conn = objt_conn(strm_orig(strm));
+		switch (conn ? addr_to_str(&conn->addr.from, pn, sizeof(pn)) : AF_UNSPEC) {
+		case AF_INET:
+		case AF_INET6:
+			chunk_appendf(&trash, " source=%s:%d\n",
+			              pn, get_host_port(&conn->addr.from));
+			break;
+		case AF_UNIX:
+			chunk_appendf(&trash, " source=unix:%d\n", strm_li(strm)->luid);
+			break;
+		default:
+			/* no more information to print right now */
+			chunk_appendf(&trash, "\n");
+			break;
+		}
+
+		chunk_appendf(&trash,
+			     "  flags=0x%x, conn_retries=%d, srv_conn=%p, pend_pos=%p\n",
+			     strm->flags, strm->si[1].conn_retries, strm->srv_conn, strm->pend_pos);
+
+		chunk_appendf(&trash,
+			     "  frontend=%s (id=%u mode=%s), listener=%s (id=%u)",
+			     strm_fe(strm)->id, strm_fe(strm)->uuid, strm_fe(strm)->mode ? "http" : "tcp",
+			     strm_li(strm) ? strm_li(strm)->name ? strm_li(strm)->name : "?" : "?",
+			     strm_li(strm) ? strm_li(strm)->luid : 0);
+
+		if (conn)
+			conn_get_to_addr(conn);
+
+		switch (conn ? addr_to_str(&conn->addr.to, pn, sizeof(pn)) : AF_UNSPEC) {
+		case AF_INET:
+		case AF_INET6:
+			chunk_appendf(&trash, " addr=%s:%d\n",
+				     pn, get_host_port(&conn->addr.to));
+			break;
+		case AF_UNIX:
+			chunk_appendf(&trash, " addr=unix:%d\n", strm_li(strm)->luid);
+			break;
+		default:
+			/* no more information to print right now */
+			chunk_appendf(&trash, "\n");
+			break;
+		}
+
+		if (strm->be->cap & PR_CAP_BE)
+			chunk_appendf(&trash,
+				     "  backend=%s (id=%u mode=%s)",
+				     strm->be->id,
+				     strm->be->uuid, strm->be->mode ? "http" : "tcp");
+		else
+			chunk_appendf(&trash, "  backend=<NONE> (id=-1 mode=-)");
+
+		conn = objt_conn(strm->si[1].end);
+		if (conn)
+			conn_get_from_addr(conn);
+
+		switch (conn ? addr_to_str(&conn->addr.from, pn, sizeof(pn)) : AF_UNSPEC) {
+		case AF_INET:
+		case AF_INET6:
+			chunk_appendf(&trash, " addr=%s:%d\n",
+				     pn, get_host_port(&conn->addr.from));
+			break;
+		case AF_UNIX:
+			chunk_appendf(&trash, " addr=unix\n");
+			break;
+		default:
+			/* no more information to print right now */
+			chunk_appendf(&trash, "\n");
+			break;
+		}
+
+		if (strm->be->cap & PR_CAP_BE)
+			chunk_appendf(&trash,
+				     "  server=%s (id=%u)",
+				     objt_server(strm->target) ? objt_server(strm->target)->id : "<none>",
+				     objt_server(strm->target) ? objt_server(strm->target)->puid : 0);
+		else
+			chunk_appendf(&trash, "  server=<NONE> (id=-1)");
+
+		if (conn)
+			conn_get_to_addr(conn);
+
+		switch (conn ? addr_to_str(&conn->addr.to, pn, sizeof(pn)) : AF_UNSPEC) {
+		case AF_INET:
+		case AF_INET6:
+			chunk_appendf(&trash, " addr=%s:%d\n",
+				     pn, get_host_port(&conn->addr.to));
+			break;
+		case AF_UNIX:
+			chunk_appendf(&trash, " addr=unix\n");
+			break;
+		default:
+			/* no more information to print right now */
+			chunk_appendf(&trash, "\n");
+			break;
+		}
+
+		chunk_appendf(&trash,
+			     "  task=%p (state=0x%02x nice=%d calls=%d exp=%s%s",
+			     strm->task,
+			     strm->task->state,
+			     strm->task->nice, strm->task->calls,
+			     strm->task->expire ?
+			             tick_is_expired(strm->task->expire, now_ms) ? "<PAST>" :
+			                     human_time(TICKS_TO_MS(strm->task->expire - now_ms),
+			                     TICKS_TO_MS(1000)) : "<NEVER>",
+			     task_in_rq(strm->task) ? ", running" : "");
+
+		chunk_appendf(&trash,
+			     " age=%s)\n",
+			     human_time(now.tv_sec - strm->logs.accept_date.tv_sec, 1));
+
+		if (strm->txn)
+			chunk_appendf(&trash,
+			     "  txn=%p flags=0x%x meth=%d status=%d req.st=%s rsp.st=%s waiting=%d\n",
+			      strm->txn, strm->txn->flags, strm->txn->meth, strm->txn->status,
+			      http_msg_state_str(strm->txn->req.msg_state), http_msg_state_str(strm->txn->rsp.msg_state), !LIST_ISEMPTY(&strm->buffer_wait));
+
+		chunk_appendf(&trash,
+			     "  si[0]=%p (state=%s flags=0x%02x endp0=%s:%p exp=%s, et=0x%03x)\n",
+			     &strm->si[0],
+			     si_state_str(strm->si[0].state),
+			     strm->si[0].flags,
+			     obj_type_name(strm->si[0].end),
+			     obj_base_ptr(strm->si[0].end),
+			     strm->si[0].exp ?
+			             tick_is_expired(strm->si[0].exp, now_ms) ? "<PAST>" :
+			                     human_time(TICKS_TO_MS(strm->si[0].exp - now_ms),
+			                     TICKS_TO_MS(1000)) : "<NEVER>",
+			     strm->si[0].err_type);
+
+		chunk_appendf(&trash,
+			     "  si[1]=%p (state=%s flags=0x%02x endp1=%s:%p exp=%s, et=0x%03x)\n",
+			     &strm->si[1],
+			     si_state_str(strm->si[1].state),
+			     strm->si[1].flags,
+			     obj_type_name(strm->si[1].end),
+			     obj_base_ptr(strm->si[1].end),
+			     strm->si[1].exp ?
+			             tick_is_expired(strm->si[1].exp, now_ms) ? "<PAST>" :
+			                     human_time(TICKS_TO_MS(strm->si[1].exp - now_ms),
+			                     TICKS_TO_MS(1000)) : "<NEVER>",
+			     strm->si[1].err_type);
+
+		if ((conn = objt_conn(strm->si[0].end)) != NULL) {
+			chunk_appendf(&trash,
+			              "  co0=%p ctrl=%s xprt=%s data=%s target=%s:%p\n",
+				      conn,
+				      conn_get_ctrl_name(conn),
+				      conn_get_xprt_name(conn),
+				      conn_get_data_name(conn),
+			              obj_type_name(conn->target),
+			              obj_base_ptr(conn->target));
+
+			chunk_appendf(&trash,
+			              "      flags=0x%08x fd=%d fd.state=%02x fd.cache=%d updt=%d\n",
+			              conn->flags,
+			              conn->t.sock.fd,
+			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].state : 0,
+			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].cache : 0,
+			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].updated : 0);
+		}
+		else if ((tmpctx = objt_appctx(strm->si[0].end)) != NULL) {
+			chunk_appendf(&trash,
+			              "  app0=%p st0=%d st1=%d st2=%d applet=%s\n",
+				      tmpctx,
+				      tmpctx->st0,
+				      tmpctx->st1,
+				      tmpctx->st2,
+			              tmpctx->applet->name);
+		}
+
+		if ((conn = objt_conn(strm->si[1].end)) != NULL) {
+			chunk_appendf(&trash,
+			              "  co1=%p ctrl=%s xprt=%s data=%s target=%s:%p\n",
+				      conn,
+				      conn_get_ctrl_name(conn),
+				      conn_get_xprt_name(conn),
+				      conn_get_data_name(conn),
+			              obj_type_name(conn->target),
+			              obj_base_ptr(conn->target));
+
+			chunk_appendf(&trash,
+			              "      flags=0x%08x fd=%d fd.state=%02x fd.cache=%d updt=%d\n",
+			              conn->flags,
+			              conn->t.sock.fd,
+			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].state : 0,
+			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].cache : 0,
+			              conn->t.sock.fd >= 0 ? fdtab[conn->t.sock.fd].updated : 0);
+		}
+		else if ((tmpctx = objt_appctx(strm->si[1].end)) != NULL) {
+			chunk_appendf(&trash,
+			              "  app1=%p st0=%d st1=%d st2=%d applet=%s\n",
+				      tmpctx,
+				      tmpctx->st0,
+				      tmpctx->st1,
+				      tmpctx->st2,
+			              tmpctx->applet->name);
+		}
+
+		chunk_appendf(&trash,
+			     "  req=%p (f=0x%06x an=0x%x pipe=%d tofwd=%d total=%lld)\n"
+			     "      an_exp=%s",
+			     &strm->req,
+			     strm->req.flags, strm->req.analysers,
+			     strm->req.pipe ? strm->req.pipe->data : 0,
+			     strm->req.to_forward, strm->req.total,
+			     strm->req.analyse_exp ?
+			     human_time(TICKS_TO_MS(strm->req.analyse_exp - now_ms),
+					TICKS_TO_MS(1000)) : "<NEVER>");
+
+		chunk_appendf(&trash,
+			     " rex=%s",
+			     strm->req.rex ?
+			     human_time(TICKS_TO_MS(strm->req.rex - now_ms),
+					TICKS_TO_MS(1000)) : "<NEVER>");
+
+		chunk_appendf(&trash,
+			     " wex=%s\n"
+			     "      buf=%p data=%p o=%d p=%d req.next=%d i=%d size=%d\n",
+			     strm->req.wex ?
+			     human_time(TICKS_TO_MS(strm->req.wex - now_ms),
+					TICKS_TO_MS(1000)) : "<NEVER>",
+			     strm->req.buf,
+			     strm->req.buf->data, strm->req.buf->o,
+			     (int)(strm->req.buf->p - strm->req.buf->data),
+			     strm->txn ? strm->txn->req.next : 0, strm->req.buf->i,
+			     strm->req.buf->size);
+
+		chunk_appendf(&trash,
+			     "  res=%p (f=0x%06x an=0x%x pipe=%d tofwd=%d total=%lld)\n"
+			     "      an_exp=%s",
+			     &strm->res,
+			     strm->res.flags, strm->res.analysers,
+			     strm->res.pipe ? strm->res.pipe->data : 0,
+			     strm->res.to_forward, strm->res.total,
+			     strm->res.analyse_exp ?
+			     human_time(TICKS_TO_MS(strm->res.analyse_exp - now_ms),
+					TICKS_TO_MS(1000)) : "<NEVER>");
+
+		chunk_appendf(&trash,
+			     " rex=%s",
+			     strm->res.rex ?
+			     human_time(TICKS_TO_MS(strm->res.rex - now_ms),
+					TICKS_TO_MS(1000)) : "<NEVER>");
+
+		chunk_appendf(&trash,
+			     " wex=%s\n"
+			     "      buf=%p data=%p o=%d p=%d rsp.next=%d i=%d size=%d\n",
+			     strm->res.wex ?
+			     human_time(TICKS_TO_MS(strm->res.wex - now_ms),
+					TICKS_TO_MS(1000)) : "<NEVER>",
+			     strm->res.buf,
+			     strm->res.buf->data, strm->res.buf->o,
+			     (int)(strm->res.buf->p - strm->res.buf->data),
+			     strm->txn ? strm->txn->rsp.next : 0, strm->res.buf->i,
+			     strm->res.buf->size);
+
+		if (bi_putchk(si_ic(si), &trash) == -1) {
+			si_applet_cant_put(si);
+			return 0;
+		}
+
+		/* use other states to dump the contents */
+	}
+	/* end of dump */
+	appctx->ctx.sess.uid = 0;
+	appctx->ctx.sess.section = 0;
+	return 1;
+}
+
+
+static int cli_parse_show_sess(char **args, struct appctx *appctx, void *private)
+{
+	if (!cli_has_level(appctx, ACCESS_LVL_OPER))
+		return 1;
+
+	if (*args[2] && strcmp(args[2], "all") == 0)
+		appctx->ctx.sess.target = (void *)-1;
+	else if (*args[2])
+		appctx->ctx.sess.target = (void *)strtoul(args[2], NULL, 0);
+	else
+		appctx->ctx.sess.target = NULL;
+	appctx->ctx.sess.section = 0; /* start with stream status */
+	appctx->ctx.sess.pos = 0;
+
+	return 0;
+}
+
+/* This function dumps all streams' states onto the stream interface's
+ * read buffer. It returns 0 if the output buffer is full and it needs
+ * to be called again, otherwise non-zero. It is designed to be called
+ * from stats_dump_sess_to_buffer() below.
+ */
+static int cli_io_handler_dump_sess(struct appctx *appctx)
+{
+	struct stream_interface *si = appctx->owner;
+	struct connection *conn;
+
+	if (unlikely(si_ic(si)->flags & (CF_WRITE_ERROR|CF_SHUTW))) {
+		/* If we're forced to shut down, we might have to remove our
+		 * reference to the last stream being dumped.
+		 */
+		if (appctx->st2 == STAT_ST_LIST) {
+			if (!LIST_ISEMPTY(&appctx->ctx.sess.bref.users)) {
+				LIST_DEL(&appctx->ctx.sess.bref.users);
+				LIST_INIT(&appctx->ctx.sess.bref.users);
+			}
+		}
+		return 1;
+	}
+
+	chunk_reset(&trash);
+
+	switch (appctx->st2) {
+	case STAT_ST_INIT:
+		/* the function had not been called yet, let's prepare the
+		 * buffer for a response. We initialize the current stream
+		 * pointer to the first in the global list. When a target
+		 * stream is being destroyed, it is responsible for updating
+		 * this pointer. We know we have reached the end when this
+		 * pointer points back to the head of the streams list.
+		 */
+		LIST_INIT(&appctx->ctx.sess.bref.users);
+		appctx->ctx.sess.bref.ref = streams.n;
+		appctx->st2 = STAT_ST_LIST;
+		/* fall through */
+
+	case STAT_ST_LIST:
+		/* first, let's detach the back-ref from a possible previous stream */
+		if (!LIST_ISEMPTY(&appctx->ctx.sess.bref.users)) {
+			LIST_DEL(&appctx->ctx.sess.bref.users);
+			LIST_INIT(&appctx->ctx.sess.bref.users);
+		}
+
+		/* and start from where we stopped */
+		while (appctx->ctx.sess.bref.ref != &streams) {
+			char pn[INET6_ADDRSTRLEN];
+			struct stream *curr_strm;
+
+			curr_strm = LIST_ELEM(appctx->ctx.sess.bref.ref, struct stream *, list);
+
+			if (appctx->ctx.sess.target) {
+				if (appctx->ctx.sess.target != (void *)-1 && appctx->ctx.sess.target != curr_strm)
+					goto next_sess;
+
+				LIST_ADDQ(&curr_strm->back_refs, &appctx->ctx.sess.bref.users);
+				/* call the proper dump() function and return if we're missing space */
+				if (!stats_dump_full_strm_to_buffer(si, curr_strm))
+					return 0;
+
+				/* stream dump complete */
+				LIST_DEL(&appctx->ctx.sess.bref.users);
+				LIST_INIT(&appctx->ctx.sess.bref.users);
+				if (appctx->ctx.sess.target != (void *)-1) {
+					appctx->ctx.sess.target = NULL;
+					break;
+				}
+				else
+					goto next_sess;
+			}
+
+			chunk_appendf(&trash,
+				     "%p: proto=%s",
+				     curr_strm,
+				     strm_li(curr_strm) ? strm_li(curr_strm)->proto->name : "?");
+
+			conn = objt_conn(strm_orig(curr_strm));
+			switch (conn ? addr_to_str(&conn->addr.from, pn, sizeof(pn)) : AF_UNSPEC) {
+			case AF_INET:
+			case AF_INET6:
+				chunk_appendf(&trash,
+					     " src=%s:%d fe=%s be=%s srv=%s",
+					     pn,
+					     get_host_port(&conn->addr.from),
+					     strm_fe(curr_strm)->id,
+					     (curr_strm->be->cap & PR_CAP_BE) ? curr_strm->be->id : "<NONE>",
+					     objt_server(curr_strm->target) ? objt_server(curr_strm->target)->id : "<none>"
+					     );
+				break;
+			case AF_UNIX:
+				chunk_appendf(&trash,
+					     " src=unix:%d fe=%s be=%s srv=%s",
+					     strm_li(curr_strm)->luid,
+					     strm_fe(curr_strm)->id,
+					     (curr_strm->be->cap & PR_CAP_BE) ? curr_strm->be->id : "<NONE>",
+					     objt_server(curr_strm->target) ? objt_server(curr_strm->target)->id : "<none>"
+					     );
+				break;
+			}
+
+			chunk_appendf(&trash,
+				     " ts=%02x age=%s calls=%d",
+				     curr_strm->task->state,
+				     human_time(now.tv_sec - curr_strm->logs.tv_accept.tv_sec, 1),
+				     curr_strm->task->calls);
+
+			chunk_appendf(&trash,
+				     " rq[f=%06xh,i=%d,an=%02xh,rx=%s",
+				     curr_strm->req.flags,
+				     curr_strm->req.buf->i,
+				     curr_strm->req.analysers,
+				     curr_strm->req.rex ?
+				     human_time(TICKS_TO_MS(curr_strm->req.rex - now_ms),
+						TICKS_TO_MS(1000)) : "");
+
+			chunk_appendf(&trash,
+				     ",wx=%s",
+				     curr_strm->req.wex ?
+				     human_time(TICKS_TO_MS(curr_strm->req.wex - now_ms),
+						TICKS_TO_MS(1000)) : "");
+
+			chunk_appendf(&trash,
+				     ",ax=%s]",
+				     curr_strm->req.analyse_exp ?
+				     human_time(TICKS_TO_MS(curr_strm->req.analyse_exp - now_ms),
+						TICKS_TO_MS(1000)) : "");
+
+			chunk_appendf(&trash,
+				     " rp[f=%06xh,i=%d,an=%02xh,rx=%s",
+				     curr_strm->res.flags,
+				     curr_strm->res.buf->i,
+				     curr_strm->res.analysers,
+				     curr_strm->res.rex ?
+				     human_time(TICKS_TO_MS(curr_strm->res.rex - now_ms),
+						TICKS_TO_MS(1000)) : "");
+
+			chunk_appendf(&trash,
+				     ",wx=%s",
+				     curr_strm->res.wex ?
+				     human_time(TICKS_TO_MS(curr_strm->res.wex - now_ms),
+						TICKS_TO_MS(1000)) : "");
+
+			chunk_appendf(&trash,
+				     ",ax=%s]",
+				     curr_strm->res.analyse_exp ?
+				     human_time(TICKS_TO_MS(curr_strm->res.analyse_exp - now_ms),
+						TICKS_TO_MS(1000)) : "");
+
+			conn = objt_conn(curr_strm->si[0].end);
+			chunk_appendf(&trash,
+				     " s0=[%d,%1xh,fd=%d,ex=%s]",
+				     curr_strm->si[0].state,
+				     curr_strm->si[0].flags,
+				     conn ? conn->t.sock.fd : -1,
+				     curr_strm->si[0].exp ?
+				     human_time(TICKS_TO_MS(curr_strm->si[0].exp - now_ms),
+						TICKS_TO_MS(1000)) : "");
+
+			conn = objt_conn(curr_strm->si[1].end);
+			chunk_appendf(&trash,
+				     " s1=[%d,%1xh,fd=%d,ex=%s]",
+				     curr_strm->si[1].state,
+				     curr_strm->si[1].flags,
+				     conn ? conn->t.sock.fd : -1,
+				     curr_strm->si[1].exp ?
+				     human_time(TICKS_TO_MS(curr_strm->si[1].exp - now_ms),
+						TICKS_TO_MS(1000)) : "");
+
+			chunk_appendf(&trash,
+				     " exp=%s",
+				     curr_strm->task->expire ?
+				     human_time(TICKS_TO_MS(curr_strm->task->expire - now_ms),
+						TICKS_TO_MS(1000)) : "");
+			if (task_in_rq(curr_strm->task))
+				chunk_appendf(&trash, " run(nice=%d)", curr_strm->task->nice);
+
+			chunk_appendf(&trash, "\n");
+
+			if (bi_putchk(si_ic(si), &trash) == -1) {
+				/* let's try again later from this stream. We add ourselves into
+				 * this stream's users so that it can remove us upon termination.
+				 */
+				si_applet_cant_put(si);
+				LIST_ADDQ(&curr_strm->back_refs, &appctx->ctx.sess.bref.users);
+				return 0;
+			}
+
+		next_sess:
+			appctx->ctx.sess.bref.ref = curr_strm->list.n;
+		}
+
+		if (appctx->ctx.sess.target && appctx->ctx.sess.target != (void *)-1) {
+			/* specified stream not found */
+			if (appctx->ctx.sess.section > 0)
+				chunk_appendf(&trash, "  *** session terminated while we were watching it ***\n");
+			else
+				chunk_appendf(&trash, "Session not found.\n");
+
+			if (bi_putchk(si_ic(si), &trash) == -1) {
+				si_applet_cant_put(si);
+				return 0;
+			}
+
+			appctx->ctx.sess.target = NULL;
+			appctx->ctx.sess.uid = 0;
+			return 1;
+		}
+
+		appctx->st2 = STAT_ST_FIN;
+		/* fall through */
+
+	default:
+		appctx->st2 = STAT_ST_FIN;
+		return 1;
+	}
+}
+
+static void cli_release_show_sess(struct appctx *appctx)
+{
+	if (appctx->st2 == STAT_ST_LIST) {
+		if (!LIST_ISEMPTY(&appctx->ctx.sess.bref.users))
+			LIST_DEL(&appctx->ctx.sess.bref.users);
+	}
+}
+
+/* Parses the "shutdown session" directive, it always returns 1 */
+static int cli_parse_shutdown_session(char **args, struct appctx *appctx, void *private)
+{
+	struct stream *strm, *ptr;
+
+	if (!cli_has_level(appctx, ACCESS_LVL_ADMIN))
+		return 1;
+
+	if (!*args[2]) {
+		appctx->ctx.cli.msg = "Session pointer expected (use 'show sess').\n";
+		appctx->st0 = CLI_ST_PRINT;
+		return 1;
+	}
+
+	ptr = (void *)strtoul(args[2], NULL, 0);
+
+	/* first, look for the requested stream in the stream table */
+	list_for_each_entry(strm, &streams, list) {
+		if (strm == ptr)
+			break;
+	}
+
+	/* do we have the stream ? */
+	if (strm != ptr) {
+		appctx->ctx.cli.msg = "No such session (use 'show sess').\n";
+		appctx->st0 = CLI_ST_PRINT;
+		return 1;
+	}
+
+	stream_shutdown(strm, SF_ERR_KILLED);
+	return 1;
+}
+
+/* Parses the "shutdown session server" directive, it always returns 1 */
+static int cli_parse_shutdown_sessions_server(char **args, struct appctx *appctx, void *private)
+{
+	struct server *sv;
+	struct stream *strm, *strm_bck;
+
+	if (!cli_has_level(appctx, ACCESS_LVL_ADMIN))
+		return 1;
+
+	sv = cli_find_server(appctx, args[3]);
+	if (!sv)
+		return 1;
+
+	/* kill all the stream that are on this server */
+	list_for_each_entry_safe(strm, strm_bck, &sv->actconns, by_srv)
+		if (strm->srv_conn == sv)
+			stream_shutdown(strm, SF_ERR_KILLED);
+	return 1;
+}
+
+/* register cli keywords */
+static struct cli_kw_list cli_kws = {{ },{
+	{ { "show", "sess",  NULL }, "show sess [id] : report the list of current sessions or dump this session", cli_parse_show_sess, cli_io_handler_dump_sess, cli_release_show_sess },
+	{ { "shutdown", "session",  NULL }, "shutdown session : kill a specific session", cli_parse_shutdown_session, NULL, NULL },
+	{ { "shutdown", "sessions",  "server" }, "shutdown sessions server : kill sessions on a server", cli_parse_shutdown_sessions_server, NULL, NULL },
+	{{},}
+}};
+
 /* main configuration keyword registration. */
 static struct action_kw_list stream_tcp_keywords = { ILH, {
 	{ "use-service", stream_parse_use_service },
@@ -3343,128 +3281,12 @@ static struct action_kw_list stream_http_keywords = { ILH, {
 	{ /* END */ }
 }};
 
-/* Note: must not be declared <const> as its list will be overwritten.
- * Please take care of keeping this list alphabetically sorted.
- */
-static struct acl_kw_list acl_kws = {ILH, {
-	{ /* END */ },
-}};
-
-/* Note: must not be declared <const> as its list will be overwritten.
- * Please take care of keeping this list alphabetically sorted.
- */
-static struct sample_fetch_kw_list smp_fetch_keywords = {ILH, {
-	{ "sc_bytes_in_rate",   smp_fetch_sc_bytes_in_rate,  ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc_bytes_out_rate",  smp_fetch_sc_bytes_out_rate, ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc_clr_gpc0",        smp_fetch_sc_clr_gpc0,       ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc_conn_cnt",        smp_fetch_sc_conn_cnt,       ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc_conn_cur",        smp_fetch_sc_conn_cur,       ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc_conn_rate",       smp_fetch_sc_conn_rate,      ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc_get_gpt0",        smp_fetch_sc_get_gpt0,       ARG2(1,SINT,TAB), NULL, SMP_T_BOOL, SMP_USE_INTRN, },
-	{ "sc_get_gpc0",        smp_fetch_sc_get_gpc0,       ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc_gpc0_rate",       smp_fetch_sc_gpc0_rate,      ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc_http_err_cnt",    smp_fetch_sc_http_err_cnt,   ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc_http_err_rate",   smp_fetch_sc_http_err_rate,  ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc_http_req_cnt",    smp_fetch_sc_http_req_cnt,   ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc_http_req_rate",   smp_fetch_sc_http_req_rate,  ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc_inc_gpc0",        smp_fetch_sc_inc_gpc0,       ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc_kbytes_in",       smp_fetch_sc_kbytes_in,      ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "sc_kbytes_out",      smp_fetch_sc_kbytes_out,     ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "sc_sess_cnt",        smp_fetch_sc_sess_cnt,       ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc_sess_rate",       smp_fetch_sc_sess_rate,      ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc_tracked",         smp_fetch_sc_tracked,        ARG2(1,SINT,TAB), NULL, SMP_T_BOOL, SMP_USE_INTRN, },
-	{ "sc_trackers",        smp_fetch_sc_trackers,       ARG2(1,SINT,TAB), NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc0_bytes_in_rate",  smp_fetch_sc_bytes_in_rate,  ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc0_bytes_out_rate", smp_fetch_sc_bytes_out_rate, ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc0_clr_gpc0",       smp_fetch_sc_clr_gpc0,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc0_conn_cnt",       smp_fetch_sc_conn_cnt,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc0_conn_cur",       smp_fetch_sc_conn_cur,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc0_conn_rate",      smp_fetch_sc_conn_rate,      ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc0_get_gpt0",       smp_fetch_sc_get_gpt0,       ARG1(0,TAB),      NULL, SMP_T_BOOL, SMP_USE_INTRN, },
-	{ "sc0_get_gpc0",       smp_fetch_sc_get_gpc0,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc0_gpc0_rate",      smp_fetch_sc_gpc0_rate,      ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc0_http_err_cnt",   smp_fetch_sc_http_err_cnt,   ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc0_http_err_rate",  smp_fetch_sc_http_err_rate,  ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc0_http_req_cnt",   smp_fetch_sc_http_req_cnt,   ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc0_http_req_rate",  smp_fetch_sc_http_req_rate,  ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc0_inc_gpc0",       smp_fetch_sc_inc_gpc0,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc0_kbytes_in",      smp_fetch_sc_kbytes_in,      ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "sc0_kbytes_out",     smp_fetch_sc_kbytes_out,     ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "sc0_sess_cnt",       smp_fetch_sc_sess_cnt,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc0_sess_rate",      smp_fetch_sc_sess_rate,      ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc0_tracked",        smp_fetch_sc_tracked,        ARG1(0,TAB),      NULL, SMP_T_BOOL, SMP_USE_INTRN, },
-	{ "sc0_trackers",       smp_fetch_sc_trackers,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc1_bytes_in_rate",  smp_fetch_sc_bytes_in_rate,  ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc1_bytes_out_rate", smp_fetch_sc_bytes_out_rate, ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc1_clr_gpc0",       smp_fetch_sc_clr_gpc0,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc1_conn_cnt",       smp_fetch_sc_conn_cnt,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc1_conn_cur",       smp_fetch_sc_conn_cur,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc1_conn_rate",      smp_fetch_sc_conn_rate,      ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc1_get_gpt0",       smp_fetch_sc_get_gpt0,       ARG1(0,TAB),      NULL, SMP_T_BOOL, SMP_USE_INTRN, },
-	{ "sc1_get_gpc0",       smp_fetch_sc_get_gpc0,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc1_gpc0_rate",      smp_fetch_sc_gpc0_rate,      ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc1_http_err_cnt",   smp_fetch_sc_http_err_cnt,   ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc1_http_err_rate",  smp_fetch_sc_http_err_rate,  ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc1_http_req_cnt",   smp_fetch_sc_http_req_cnt,   ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc1_http_req_rate",  smp_fetch_sc_http_req_rate,  ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc1_inc_gpc0",       smp_fetch_sc_inc_gpc0,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc1_kbytes_in",      smp_fetch_sc_kbytes_in,      ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "sc1_kbytes_out",     smp_fetch_sc_kbytes_out,     ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "sc1_sess_cnt",       smp_fetch_sc_sess_cnt,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc1_sess_rate",      smp_fetch_sc_sess_rate,      ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc1_tracked",        smp_fetch_sc_tracked,        ARG1(0,TAB),      NULL, SMP_T_BOOL, SMP_USE_INTRN, },
-	{ "sc1_trackers",       smp_fetch_sc_trackers,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc2_bytes_in_rate",  smp_fetch_sc_bytes_in_rate,  ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc2_bytes_out_rate", smp_fetch_sc_bytes_out_rate, ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc2_clr_gpc0",       smp_fetch_sc_clr_gpc0,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc2_conn_cnt",       smp_fetch_sc_conn_cnt,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc2_conn_cur",       smp_fetch_sc_conn_cur,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc2_conn_rate",      smp_fetch_sc_conn_rate,      ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc2_get_gpt0",       smp_fetch_sc_get_gpt0,       ARG1(0,TAB),      NULL, SMP_T_BOOL, SMP_USE_INTRN, },
-	{ "sc2_get_gpc0",       smp_fetch_sc_get_gpc0,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc2_gpc0_rate",      smp_fetch_sc_gpc0_rate,      ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc2_http_err_cnt",   smp_fetch_sc_http_err_cnt,   ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc2_http_err_rate",  smp_fetch_sc_http_err_rate,  ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc2_http_req_cnt",   smp_fetch_sc_http_req_cnt,   ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc2_http_req_rate",  smp_fetch_sc_http_req_rate,  ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc2_inc_gpc0",       smp_fetch_sc_inc_gpc0,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc2_kbytes_in",      smp_fetch_sc_kbytes_in,      ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "sc2_kbytes_out",     smp_fetch_sc_kbytes_out,     ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "sc2_sess_cnt",       smp_fetch_sc_sess_cnt,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc2_sess_rate",      smp_fetch_sc_sess_rate,      ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "sc2_tracked",        smp_fetch_sc_tracked,        ARG1(0,TAB),      NULL, SMP_T_BOOL, SMP_USE_INTRN, },
-	{ "sc2_trackers",       smp_fetch_sc_trackers,       ARG1(0,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "src_bytes_in_rate",  smp_fetch_sc_bytes_in_rate,  ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "src_bytes_out_rate", smp_fetch_sc_bytes_out_rate, ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "src_clr_gpc0",       smp_fetch_sc_clr_gpc0,       ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "src_conn_cnt",       smp_fetch_sc_conn_cnt,       ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "src_conn_cur",       smp_fetch_sc_conn_cur,       ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "src_conn_rate",      smp_fetch_sc_conn_rate,      ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "src_get_gpt0",       smp_fetch_sc_get_gpt0,       ARG1(1,TAB),      NULL, SMP_T_BOOL, SMP_USE_L4CLI, },
-	{ "src_get_gpc0",       smp_fetch_sc_get_gpc0,       ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "src_gpc0_rate",      smp_fetch_sc_gpc0_rate,      ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "src_http_err_cnt",   smp_fetch_sc_http_err_cnt,   ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "src_http_err_rate",  smp_fetch_sc_http_err_rate,  ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "src_http_req_cnt",   smp_fetch_sc_http_req_cnt,   ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "src_http_req_rate",  smp_fetch_sc_http_req_rate,  ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "src_inc_gpc0",       smp_fetch_sc_inc_gpc0,       ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "src_kbytes_in",      smp_fetch_sc_kbytes_in,      ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "src_kbytes_out",     smp_fetch_sc_kbytes_out,     ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "src_sess_cnt",       smp_fetch_sc_sess_cnt,       ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "src_sess_rate",      smp_fetch_sc_sess_rate,      ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "src_updt_conn_cnt",  smp_fetch_src_updt_conn_cnt, ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_L4CLI, },
-	{ "table_avl",          smp_fetch_table_avl,         ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ "table_cnt",          smp_fetch_table_cnt,         ARG1(1,TAB),      NULL, SMP_T_SINT, SMP_USE_INTRN, },
-	{ /* END */ },
-}};
-
 __attribute__((constructor))
 static void __stream_init(void)
 {
-	sample_register_fetches(&smp_fetch_keywords);
-	acl_register_keywords(&acl_kws);
 	tcp_req_cont_keywords_register(&stream_tcp_keywords);
 	http_req_keywords_register(&stream_http_keywords);
+	cli_register_kw(&cli_kws);
 }
 
 /*

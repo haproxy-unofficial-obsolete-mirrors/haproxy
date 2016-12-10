@@ -54,6 +54,10 @@ struct appctx {
 	struct applet *applet;     /* applet this context refers to */
 	void *owner;               /* pointer to upper layer's entity (eg: stream interface) */
 	struct act_rule *rule;     /* rule associated with the applet. */
+	int (*io_handler)(struct appctx *appctx);  /* used within the cli_io_handler when st0 = CLI_ST_CALLBACK */
+	void (*io_release)(struct appctx *appctx);  /* used within the cli_io_handler when st0 = CLI_ST_CALLBACK,
+	                                               if the command is terminated or the session released */
+	void *private;
 
 	union {
 		struct {
@@ -77,7 +81,7 @@ struct appctx {
 		struct {
 			int iid;		/* if >= 0, ID of the proxy to filter on */
 			struct proxy *px;	/* current proxy being dumped, NULL = not started yet. */
-			unsigned int buf;	/* buffer being dumped, 0 = req, 1 = rep */
+			unsigned int flag;	/* bit0: buffer being dumped, 0 = req, 1 = resp ; bit1=skip req ; bit2=skip resp. */
 			unsigned int sid;	/* session ID of error being dumped */
 			int ptr;		/* <0: headers, >=0 : text pointer to restart from */
 			int bol;		/* pointer to beginning of current line */
@@ -119,6 +123,10 @@ struct appctx {
 		} hlua;
 		struct {
 			struct hlua hlua;
+			struct task *task;
+		} hlua_cli;
+		struct {
+			struct hlua hlua;
 			int flags;
 			struct task *task;
 		} hlua_apptcp;
@@ -143,6 +151,14 @@ struct appctx {
 		struct {
 			char **var;
 		} env;
+		struct {
+			struct task *task;
+			void        *ctx;
+			void        *agent;
+			unsigned int version;
+			unsigned int max_frame_size;
+			struct list  list;
+		} spoe;                         /* used by SPOE filter */
 	} ctx;					/* used by stats I/O handlers to dump the stats */
 };
 

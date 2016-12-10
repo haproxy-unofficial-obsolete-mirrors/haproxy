@@ -22,6 +22,7 @@
 #include <errno.h>
 
 #include <sys/time.h>
+#include <sys/uio.h>
 
 #include <common/config.h>
 #include <common/compat.h>
@@ -123,10 +124,14 @@ static const struct logformat_type logformat_keywords[] = {
 	{ "ID", LOG_FMT_UNIQUEID, PR_MODE_HTTP, LW_BYTES, NULL }, /* Unique ID */
 	{ "ST", LOG_FMT_STATUS, PR_MODE_TCP, LW_RESP, NULL },   /* status code */
 	{ "T", LOG_FMT_DATEGMT, PR_MODE_TCP, LW_INIT, NULL },   /* date GMT */
+	{ "Ta", LOG_FMT_Ta, PR_MODE_HTTP, LW_BYTES, NULL },      /* Time active (tr to end) */
 	{ "Tc", LOG_FMT_TC, PR_MODE_TCP, LW_BYTES, NULL },       /* Tc */
-	{ "Tl", LOG_FMT_DATELOCAL, PR_MODE_TCP, LW_INIT, NULL },   /* date local timezone */
-	{ "Tq", LOG_FMT_TQ, PR_MODE_HTTP, LW_BYTES, NULL },       /* Tq */
-	{ "Tr", LOG_FMT_TR, PR_MODE_HTTP, LW_BYTES, NULL },       /* Tr */
+	{ "Th", LOG_FMT_Th, PR_MODE_TCP, LW_BYTES, NULL },       /* Time handshake */
+	{ "Ti", LOG_FMT_Ti, PR_MODE_HTTP, LW_BYTES, NULL },      /* Time idle */
+	{ "Tl", LOG_FMT_DATELOCAL, PR_MODE_TCP, LW_INIT, NULL }, /* date local timezone */
+	{ "Tq", LOG_FMT_TQ, PR_MODE_HTTP, LW_BYTES, NULL },      /* Tq=Th+Ti+TR */
+	{ "Tr", LOG_FMT_Tr, PR_MODE_HTTP, LW_BYTES, NULL },      /* Tr */
+	{ "TR", LOG_FMT_TR, PR_MODE_HTTP, LW_BYTES, NULL },      /* Time to receive a valid request */
 	{ "Td", LOG_FMT_TD, PR_MODE_TCP, LW_BYTES, NULL },       /* Td = Tt - (Tq + Tw + Tc + Tr) */
 	{ "Ts", LOG_FMT_TS, PR_MODE_TCP, LW_INIT, NULL },   /* timestamp GMT */
 	{ "Tt", LOG_FMT_TT, PR_MODE_TCP, LW_BYTES, NULL },       /* Tt */
@@ -168,6 +173,9 @@ static const struct logformat_type logformat_keywords[] = {
 	{ "sslc", LOG_FMT_SSL_CIPHER, PR_MODE_TCP, LW_XPRT, NULL }, /* client-side SSL ciphers */
 	{ "sslv", LOG_FMT_SSL_VERSION, PR_MODE_TCP, LW_XPRT, NULL }, /* client-side SSL protocol version */
 	{ "t", LOG_FMT_DATE, PR_MODE_TCP, LW_INIT, NULL },      /* date */
+	{ "tr", LOG_FMT_tr, PR_MODE_HTTP, LW_INIT, NULL },      /* date of start of request */
+	{ "trg",LOG_FMT_trg, PR_MODE_HTTP, LW_INIT, NULL },     /* date of start of request, GMT */
+	{ "trl",LOG_FMT_trl, PR_MODE_HTTP, LW_INIT, NULL },     /* date of start of request, local */
 	{ "ts", LOG_FMT_TERMSTATE, PR_MODE_TCP, LW_BYTES, NULL },/* termination state */
 	{ "tsc", LOG_FMT_TERMSTATE_CK, PR_MODE_TCP, LW_INIT, NULL },/* termination state */
 
@@ -186,8 +194,8 @@ static const struct logformat_type logformat_keywords[] = {
 	{ 0, 0, 0, 0, NULL }
 };
 
-char default_http_log_format[] = "%ci:%cp [%t] %ft %b/%s %Tq/%Tw/%Tc/%Tr/%Tt %ST %B %CC %CS %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs %{+Q}r"; // default format
-char clf_http_log_format[] = "%{+Q}o %{-Q}ci - - [%T] %r %ST %B \"\" \"\" %cp %ms %ft %b %s %Tq %Tw %Tc %Tr %Tt %tsc %ac %fc %bc %sc %rc %sq %bq %CC %CS %hrl %hsl";
+char default_http_log_format[] = "%ci:%cp [%tr] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %CC %CS %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs %{+Q}r"; // default format
+char clf_http_log_format[] = "%{+Q}o %{-Q}ci - - [%trg] %r %ST %B \"\" \"\" %cp %ms %ft %b %s %TR %Tw %Tc %Tr %Ta %tsc %ac %fc %bc %sc %rc %sq %bq %CC %CS %hrl %hsl";
 char default_tcp_log_format[] = "%ci:%cp [%t] %ft %b/%s %Tw/%Tc/%Tt %B %ts %ac/%fc/%bc/%sc/%rc %sq/%bq";
 char *log_format = NULL;
 
@@ -259,6 +267,10 @@ static inline const char *fmt_directive(const struct proxy *curproxy)
 		return "capture";
 	case ARGC_SRV:
 		return "server";
+	case ARGC_SPOE:
+		return "spoe-message";
+	case ARGC_UBK:
+		return "use_backend";
 	default:
 		return "undefined(please report this bug)"; /* must never happen */
 	}
@@ -276,17 +288,20 @@ int prepare_addrsource(struct logformat_node *node, struct proxy *curproxy)
 
 
 /*
- * Parse args in a logformat_var
+ * Parse args in a logformat_var. Returns 0 in error
+ * case, otherwise, it returns 1.
  */
-int parse_logformat_var_args(char *args, struct logformat_node *node)
+int parse_logformat_var_args(char *args, struct logformat_node *node, char **err)
 {
 	int i = 0;
 	int end = 0;
 	int flags = 0;  // 1 = +  2 = -
 	char *sp = NULL; // start pointer
 
-	if (args == NULL)
-		return 1;
+	if (args == NULL) {
+		memprintf(err, "internal error: parse_logformat_var_args() expects non null 'args'");
+		return 0;
+	}
 
 	while (1) {
 		if (*args == '\0')
@@ -322,7 +337,7 @@ int parse_logformat_var_args(char *args, struct logformat_node *node)
 		}
 		args++;
 	}
-	return 0;
+	return 1;
 }
 
 /*
@@ -330,8 +345,9 @@ int parse_logformat_var_args(char *args, struct logformat_node *node)
  * must pass the args part in the <arg> pointer with its length in <arg_len>,
  * and varname with its length in <var> and <var_len> respectively. <arg> is
  * ignored when arg_len is 0. Neither <var> nor <var_len> may be null.
+ * Returns false in error case and err is filled, otherwise returns true.
  */
-int parse_logformat_var(char *arg, int arg_len, char *var, int var_len, struct proxy *curproxy, struct list *list_format, int *defoptions)
+int parse_logformat_var(char *arg, int arg_len, char *var, int var_len, struct proxy *curproxy, struct list *list_format, int *defoptions, char **err)
 {
 	int j;
 	struct logformat_node *node;
@@ -341,11 +357,16 @@ int parse_logformat_var(char *arg, int arg_len, char *var, int var_len, struct p
 		    strncmp(var, logformat_keywords[j].name, var_len) == 0) {
 			if (logformat_keywords[j].mode != PR_MODE_HTTP || curproxy->mode == PR_MODE_HTTP) {
 				node = calloc(1, sizeof(*node));
+				if (!node) {
+					memprintf(err, "out of memory error");
+					return 0;
+				}
 				node->type = logformat_keywords[j].type;
 				node->options = *defoptions;
 				if (arg_len) {
 					node->arg = my_strndup(arg, arg_len);
-					parse_logformat_var_args(node->arg, node);
+					if (!parse_logformat_var_args(node->arg, node, err))
+						return 0;
 				}
 				if (node->type == LOG_FMT_GLOBAL) {
 					*defoptions = node->options;
@@ -354,7 +375,7 @@ int parse_logformat_var(char *arg, int arg_len, char *var, int var_len, struct p
 				} else {
 					if (logformat_keywords[j].config_callback &&
 					    logformat_keywords[j].config_callback(node, curproxy) != 0) {
-						return -1;
+						return 0;
 					}
 					curproxy->to_log |= logformat_keywords[j].lw;
 					LIST_ADDQ(list_format, &node->list);
@@ -363,22 +384,20 @@ int parse_logformat_var(char *arg, int arg_len, char *var, int var_len, struct p
 					Warning("parsing [%s:%d] : deprecated variable '%s' in '%s', please replace it with '%s'.\n",
 					        curproxy->conf.args.file, curproxy->conf.args.line,
 					        logformat_keywords[j].name, fmt_directive(curproxy), logformat_keywords[j].replace_by);
-				return 0;
+				return 1;
 			} else {
-				Warning("parsing [%s:%d] : '%s' : format variable '%s' is reserved for HTTP mode.\n",
-				        curproxy->conf.args.file, curproxy->conf.args.line, fmt_directive(curproxy),
-				        logformat_keywords[j].name);
-				return -1;
+				memprintf(err, "format variable '%s' is reserved for HTTP mode",
+				          logformat_keywords[j].name);
+				return 0;
 			}
 		}
 	}
 
 	j = var[var_len];
 	var[var_len] = 0;
-	Warning("parsing [%s:%d] : no such format variable '%s' in '%s'. If you wanted to emit the '%%' character verbatim, you need to use '%%%%' in log-format expressions.\n",
-	        curproxy->conf.args.file, curproxy->conf.args.line, var, fmt_directive(curproxy));
+	memprintf(err, "no such format variable '%s'. If you wanted to emit the '%%' character verbatim, you need to use '%%%%'", var);
 	var[var_len] = j;
-	return -1;
+	return 0;
 }
 
 /*
@@ -392,12 +411,16 @@ int parse_logformat_var(char *arg, int arg_len, char *var, int var_len, struct p
  *  LOG_TEXT: copy chars from start to end excluding end.
  *
 */
-void add_to_logformat_list(char *start, char *end, int type, struct list *list_format)
+int add_to_logformat_list(char *start, char *end, int type, struct list *list_format, char **err)
 {
 	char *str;
 
 	if (type == LF_TEXT) { /* type text */
 		struct logformat_node *node = calloc(1, sizeof(*node));
+		if (!node) {
+			memprintf(err, "out of memory error");
+			return 0;
+		}
 		str = calloc(1, end - start + 1);
 		strncpy(str, start, end - start);
 		str[end - start] = '\0';
@@ -406,44 +429,53 @@ void add_to_logformat_list(char *start, char *end, int type, struct list *list_f
 		LIST_ADDQ(list_format, &node->list);
 	} else if (type == LF_SEPARATOR) {
 		struct logformat_node *node = calloc(1, sizeof(*node));
+		if (!node) {
+			memprintf(err, "out of memory error");
+			return 0;
+		}
 		node->type = LOG_FMT_SEPARATOR;
 		LIST_ADDQ(list_format, &node->list);
 	}
+	return 1;
 }
 
 /*
  * Parse the sample fetch expression <text> and add a node to <list_format> upon
  * success. At the moment, sample converters are not yet supported but fetch arguments
  * should work. The curpx->conf.args.ctx must be set by the caller.
+ *
+ * In error case, the function returns 0, otherwise it returns 1.
  */
-void add_sample_to_logformat_list(char *text, char *arg, int arg_len, struct proxy *curpx, struct list *list_format, int options, int cap, const char *file, int line)
+int add_sample_to_logformat_list(char *text, char *arg, int arg_len, struct proxy *curpx, struct list *list_format, int options, int cap, char **err)
 {
 	char *cmd[2];
 	struct sample_expr *expr;
 	struct logformat_node *node;
 	int cmd_arg;
-	char *errmsg = NULL;
 
 	cmd[0] = text;
 	cmd[1] = "";
 	cmd_arg = 0;
 
-	expr = sample_parse_expr(cmd, &cmd_arg, file, line, &errmsg, &curpx->conf.args);
+	expr = sample_parse_expr(cmd, &cmd_arg, curpx->conf.args.file, curpx->conf.args.line, err, &curpx->conf.args);
 	if (!expr) {
-		Warning("parsing [%s:%d] : '%s' : sample fetch <%s> failed with : %s\n",
-		        curpx->conf.args.file, curpx->conf.args.line, fmt_directive(curpx),
-		        text, errmsg);
-		return;
+		memprintf(err, "failed to parse sample expression <%s> : %s", text, *err);
+		return 0;
 	}
 
 	node = calloc(1, sizeof(*node));
+	if (!node) {
+		memprintf(err, "out of memory error");
+		return 0;
+	}
 	node->type = LOG_FMT_EXPR;
 	node->expr = expr;
 	node->options = options;
 
 	if (arg_len) {
 		node->arg = my_strndup(arg, arg_len);
-		parse_logformat_var_args(node->arg, node);
+		if (!parse_logformat_var_args(node->arg, node, err))
+			return 0;
 	}
 	if (expr->fetch->val & cap & SMP_VAL_REQUEST)
 		node->options |= LOG_OPT_REQ_CAP; /* fetch method is request-compatible */
@@ -451,10 +483,11 @@ void add_sample_to_logformat_list(char *text, char *arg, int arg_len, struct pro
 	if (expr->fetch->val & cap & SMP_VAL_RESPONSE)
 		node->options |= LOG_OPT_RES_CAP; /* fetch method is response-compatible */
 
-	if (!(expr->fetch->val & cap))
-		Warning("parsing [%s:%d] : '%s' : sample fetch <%s> may not be reliably used here because it needs '%s' which is not available here.\n",
-		        curpx->conf.args.file, curpx->conf.args.line, fmt_directive(curpx),
-			text, sample_src_names(expr->fetch->use));
+	if (!(expr->fetch->val & cap)) {
+		memprintf(err, "sample fetch <%s> may not be reliably used here because it needs '%s' which is not available here",
+		          text, sample_src_names(expr->fetch->use));
+		return 0;
+	}
 
 	/* check if we need to allocate an hdr_idx struct for HTTP parsing */
 	/* Note, we may also need to set curpx->to_log with certain fetches */
@@ -467,6 +500,7 @@ void add_sample_to_logformat_list(char *text, char *arg, int arg_len, struct pro
 	curpx->to_log |= LW_XPRT;
 	curpx->to_log |= LW_REQ;
 	LIST_ADDQ(list_format, &node->list);
+	return 1;
 }
 
 /*
@@ -480,8 +514,10 @@ void add_sample_to_logformat_list(char *text, char *arg, int arg_len, struct pro
  *  list_format: the destination list
  *  options: LOG_OPT_* to force on every node
  *  cap: all SMP_VAL_* flags supported by the consumer
+ *
+ * The function returns 1 in success case, otherwise, it returns 0 and err is filled.
  */
-void parse_logformat_string(const char *fmt, struct proxy *curproxy, struct list *list_format, int options, int cap, const char *file, int line)
+int parse_logformat_string(const char *fmt, struct proxy *curproxy, struct list *list_format, int options, int cap, char **err)
 {
 	char *sp, *str, *backfmt; /* start pointer for text parts */
 	char *arg = NULL; /* start pointer for args */
@@ -493,6 +529,10 @@ void parse_logformat_string(const char *fmt, struct proxy *curproxy, struct list
 	struct logformat_node *tmplf, *back;
 
 	sp = str = backfmt = strdup(fmt);
+	if (!str) {
+		memprintf(err, "out of memory error");
+		return 0;
+	}
 	curproxy->to_log |= LW_INIT;
 
 	/* flush the list first. */
@@ -535,8 +575,9 @@ void parse_logformat_string(const char *fmt, struct proxy *curproxy, struct list
 				cformat = LF_TEXT;
 				pformat = LF_TEXT; /* finally we include the previous char as well */
 				sp = str - 1; /* send both the '%' and the current char */
-				Warning("parsing [%s:%d] : Fixed missing '%%' before '%c' at position %d in %s line : '%s'. Please use '%%%%' when you need the '%%' character in a log-format expression.\n",
-					curproxy->conf.args.file, curproxy->conf.args.line, *str, (int)(str - backfmt), fmt_directive(curproxy), fmt);
+				memprintf(err, "unexpected variable name near '%c' at position %d line : '%s'. Maybe you want to write a simgle '%%', use the syntax '%%%%'",
+				          *str, (int)(str - backfmt), fmt);
+				return 0;
 
 			}
 			else
@@ -562,10 +603,8 @@ void parse_logformat_string(const char *fmt, struct proxy *curproxy, struct list
 				var = str;
 				break;
 			}
-			Warning("parsing [%s:%d] : Skipping isolated argument in '%s' line : '%%{%s}'\n",
-			        curproxy->conf.args.file, curproxy->conf.args.line, fmt_directive(curproxy), arg);
-			cformat = LF_INIT;
-			break;
+			memprintf(err, "parse argument modifier without variable name near '%%{%s}'", arg);
+			return 0;
 
 		case LF_STEXPR:                        // text immediately following '%['
 			if (*str == ']') {             // end of arg
@@ -597,26 +636,30 @@ void parse_logformat_string(const char *fmt, struct proxy *curproxy, struct list
 		if (cformat != pformat || pformat == LF_SEPARATOR) {
 			switch (pformat) {
 			case LF_VAR:
-				parse_logformat_var(arg, arg_len, var, var_len, curproxy, list_format, &options);
+				if (!parse_logformat_var(arg, arg_len, var, var_len, curproxy, list_format, &options, err))
+					return 0;
 				break;
 			case LF_STEXPR:
-				add_sample_to_logformat_list(var, arg, arg_len, curproxy, list_format, options, cap, file, line);
+				if (!add_sample_to_logformat_list(var, arg, arg_len, curproxy, list_format, options, cap, err))
+					return 0;
 				break;
 			case LF_TEXT:
 			case LF_SEPARATOR:
-				add_to_logformat_list(sp, str, pformat, list_format);
+				if (!add_to_logformat_list(sp, str, pformat, list_format, err))
+					return 0;
 				break;
 			}
 			sp = str; /* new start of text at every state switch and at every separator */
 		}
 	}
 
-	if (pformat == LF_STARTVAR || pformat == LF_STARG || pformat == LF_STEXPR)
-		Warning("parsing [%s:%d] : Ignoring end of truncated '%s' line after '%s'\n",
-		        curproxy->conf.args.file, curproxy->conf.args.line, fmt_directive(curproxy),
-		        var ? var : arg ? arg : "%");
-
+	if (pformat == LF_STARTVAR || pformat == LF_STARG || pformat == LF_STEXPR) {
+		memprintf(err, "truncated line after '%s'", var ? var : arg ? arg : "%");
+		return 0;
+	}
 	free(backfmt);
+
+	return 1;
 }
 
 /*
@@ -830,19 +873,17 @@ char *lf_text_len(char *dst, const char *src, size_t len, size_t size, struct lo
 	}
 
 	if (src && len) {
+		if (++len > size)
+			len = size;
 		if (node->options & LOG_OPT_ESC) {
-			struct chunk chunk;
 			char *ret;
 
-			chunk_initlen(&chunk, (char *)src, 0, len);
-			ret = escape_chunk(dst, dst + size, '\\', rfc5424_escape_map, &chunk);
+			ret = escape_string(dst, dst + len, '\\', rfc5424_escape_map, src);
 			if (ret == NULL || *ret != '\0')
 				return NULL;
 			len = ret - dst;
 		}
 		else {
-			if (++len > size)
-				len = size;
 			len = strlcpy2(dst, src, len);
 		}
 
@@ -1306,6 +1347,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 	char *ret;
 	int iret;
 	struct logformat_node *tmp;
+	struct timeval tv;
 
 	/* FIXME: let's limit ourselves to frontend logging for now. */
 
@@ -1475,7 +1517,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				last_isspace = 0;
 				break;
 
-			case LOG_FMT_DATE: // %t
+			case LOG_FMT_DATE: // %t = accept date
 				get_localtime(s->logs.accept_date.tv_sec, &tm);
 				ret = date2str_log(tmplog, &tm, &(s->logs.accept_date),
 						   dst + maxsize - tmplog);
@@ -1485,7 +1527,18 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				last_isspace = 0;
 				break;
 
-			case LOG_FMT_DATEGMT: // %T
+			case LOG_FMT_tr: // %tr = start of request date
+				/* Note that the timers are valid if we get here */
+				tv_ms_add(&tv, &s->logs.accept_date, s->logs.t_idle >= 0 ? s->logs.t_idle + s->logs.t_handshake : 0);
+				get_localtime(tv.tv_sec, &tm);
+				ret = date2str_log(tmplog, &tm, &tv, dst + maxsize - tmplog);
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
+			case LOG_FMT_DATEGMT: // %T = accept date, GMT
 				get_gmtime(s->logs.accept_date.tv_sec, &tm);
 				ret = gmt2str_log(tmplog, &tm, dst + maxsize - tmplog);
 				if (ret == NULL)
@@ -1494,9 +1547,29 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				last_isspace = 0;
 				break;
 
-			case LOG_FMT_DATELOCAL: // %Tl
+			case LOG_FMT_trg: // %trg = start of request date, GMT
+				tv_ms_add(&tv, &s->logs.accept_date, s->logs.t_idle >= 0 ? s->logs.t_idle + s->logs.t_handshake : 0);
+				get_gmtime(tv.tv_sec, &tm);
+				ret = gmt2str_log(tmplog, &tm, dst + maxsize - tmplog);
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
+			case LOG_FMT_DATELOCAL: // %Tl = accept date, local
 				get_localtime(s->logs.accept_date.tv_sec, &tm);
 				ret = localdate2str_log(tmplog, s->logs.accept_date.tv_sec, &tm, dst + maxsize - tmplog);
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
+			case LOG_FMT_trl: // %trl = start of request date, local
+				tv_ms_add(&tv, &s->logs.accept_date, s->logs.t_idle >= 0 ? s->logs.t_idle + s->logs.t_handshake : 0);
+				get_localtime(tv.tv_sec, &tm);
+				ret = localdate2str_log(tmplog, tv.tv_sec, &tm, dst + maxsize - tmplog);
 				if (ret == NULL)
 					goto out;
 				tmplog = ret;
@@ -1621,7 +1694,32 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				last_isspace = 0;
 				break;
 
-			case LOG_FMT_TQ: // %Tq
+			case LOG_FMT_Th: // %Th = handshake time
+				ret = ltoa_o(s->logs.t_handshake, tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
+			case LOG_FMT_Ti: // %Ti = HTTP idle time
+				ret = ltoa_o(s->logs.t_idle, tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
+			case LOG_FMT_TR: // %TR = HTTP request time
+				ret = ltoa_o((t_request >= 0) ? t_request - s->logs.t_idle - s->logs.t_handshake : -1,
+				             tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
+			case LOG_FMT_TQ: // %Tq = Th + Ti + TR
 				ret = ltoa_o(t_request, tmplog, dst + maxsize - tmplog);
 				if (ret == NULL)
 					goto out;
@@ -1647,7 +1745,7 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				last_isspace = 0;
 				break;
 
-			case LOG_FMT_TR: // %Tr
+			case LOG_FMT_Tr: // %Tr
 				ret = ltoa_o((s->logs.t_data >= 0) ? s->logs.t_data - s->logs.t_connect : -1,
 						tmplog, dst + maxsize - tmplog);
 				if (ret == NULL)
@@ -1669,7 +1767,18 @@ int build_logline(struct stream *s, char *dst, size_t maxsize, struct list *list
 				last_isspace = 0;
 				break;
 
-			case LOG_FMT_TT:  // %Tt
+			case LOG_FMT_Ta:  // %Ta = active time = Tt - Th - Ti
+				if (!(fe->to_log & LW_BYTES))
+					LOGCHAR('+');
+				ret = ltoa_o(s->logs.t_close - (s->logs.t_idle >= 0 ? s->logs.t_idle + s->logs.t_handshake : 0),
+					     tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
+			case LOG_FMT_TT:  // %Tt = total time
 				if (!(fe->to_log & LW_BYTES))
 					LOGCHAR('+');
 				ret = ltoa_o(s->logs.t_close, tmplog, dst + maxsize - tmplog);

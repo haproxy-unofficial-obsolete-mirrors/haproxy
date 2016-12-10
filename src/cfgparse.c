@@ -51,6 +51,7 @@
 #include <types/peers.h>
 #include <types/mailers.h>
 #include <types/dns.h>
+#include <types/stats.h>
 
 #include <proto/acl.h>
 #include <proto/auth.h>
@@ -58,7 +59,7 @@
 #include <proto/channel.h>
 #include <proto/checks.h>
 #include <proto/compression.h>
-#include <proto/dumpstats.h>
+#include <proto/stats.h>
 #include <proto/filters.h>
 #include <proto/frontend.h>
 #include <proto/hdr_idx.h>
@@ -80,8 +81,9 @@
 #include <proto/server.h>
 #include <proto/stream.h>
 #include <proto/raw_sock.h>
-#include <proto/task.h>
 #include <proto/stick_table.h>
+#include <proto/task.h>
+#include <proto/tcp_rules.h>
 
 #ifdef USE_OPENSSL
 #include <types/ssl_sock.h>
@@ -205,6 +207,7 @@ static char *cursection = NULL;
 static struct proxy defproxy;		/* fake proxy used to assign default values on all instances */
 int cfg_maxpconn = DEFAULT_MAXCONN;	/* # of simultaneous connections per proxy (-N) */
 int cfg_maxconn = 0;			/* # of simultaneous connections, (-n) */
+char *cfg_scope = NULL;                 /* the current scope during the configuration parsing */
 
 /* List head of all known configuration keywords */
 static struct cfg_kw_list cfg_keywords = {
@@ -358,6 +361,19 @@ int alertif_too_many_args(int maxarg, const char *file, int linenum, char **args
 	return alertif_too_many_args_idx(maxarg, 0, file, linenum, args, err_code);
 }
 
+/* Report a warning if a rule is placed after a 'tcp-request session' rule.
+ * Return 1 if the warning has been emitted, otherwise 0.
+ */
+int warnif_rule_after_tcp_sess(struct proxy *proxy, const char *file, int line, const char *arg)
+{
+	if (!LIST_ISEMPTY(&proxy->tcp_req.l5_rules)) {
+		Warning("parsing [%s:%d] : a '%s' rule placed after a 'tcp-request session' rule will still be processed before.\n",
+			file, line, arg);
+		return 1;
+	}
+	return 0;
+}
+
 /* Report a warning if a rule is placed after a 'tcp-request content' rule.
  * Return 1 if the warning has been emitted, otherwise 0.
  */
@@ -462,58 +478,10 @@ int warnif_rule_after_use_server(struct proxy *proxy, const char *file, int line
 	return 0;
 }
 
-/* report a warning if a "tcp request connection" rule is dangerously placed */
-int warnif_misplaced_tcp_conn(struct proxy *proxy, const char *file, int line, const char *arg)
+/* report a warning if a redirect rule is dangerously placed */
+int warnif_misplaced_redirect(struct proxy *proxy, const char *file, int line, const char *arg)
 {
-	return	warnif_rule_after_tcp_cont(proxy, file, line, arg) ||
-		warnif_rule_after_block(proxy, file, line, arg) ||
-		warnif_rule_after_http_req(proxy, file, line, arg) ||
-		warnif_rule_after_reqxxx(proxy, file, line, arg) ||
-		warnif_rule_after_reqadd(proxy, file, line, arg) ||
-		warnif_rule_after_redirect(proxy, file, line, arg) ||
-		warnif_rule_after_use_backend(proxy, file, line, arg) ||
-		warnif_rule_after_use_server(proxy, file, line, arg);
-}
-
-/* report a warning if a "tcp request content" rule is dangerously placed */
-int warnif_misplaced_tcp_cont(struct proxy *proxy, const char *file, int line, const char *arg)
-{
-	return	warnif_rule_after_block(proxy, file, line, arg) ||
-		warnif_rule_after_http_req(proxy, file, line, arg) ||
-		warnif_rule_after_reqxxx(proxy, file, line, arg) ||
-		warnif_rule_after_reqadd(proxy, file, line, arg) ||
-		warnif_rule_after_redirect(proxy, file, line, arg) ||
-		warnif_rule_after_use_backend(proxy, file, line, arg) ||
-		warnif_rule_after_use_server(proxy, file, line, arg);
-}
-
-/* report a warning if a block rule is dangerously placed */
-int warnif_misplaced_block(struct proxy *proxy, const char *file, int line, const char *arg)
-{
-	return	warnif_rule_after_http_req(proxy, file, line, arg) ||
-		warnif_rule_after_reqxxx(proxy, file, line, arg) ||
-		warnif_rule_after_reqadd(proxy, file, line, arg) ||
-		warnif_rule_after_redirect(proxy, file, line, arg) ||
-		warnif_rule_after_use_backend(proxy, file, line, arg) ||
-		warnif_rule_after_use_server(proxy, file, line, arg);
-}
-
-/* report a warning if an http-request rule is dangerously placed */
-int warnif_misplaced_http_req(struct proxy *proxy, const char *file, int line, const char *arg)
-{
-	return	warnif_rule_after_reqxxx(proxy, file, line, arg) ||
-		warnif_rule_after_reqadd(proxy, file, line, arg) ||
-		warnif_rule_after_redirect(proxy, file, line, arg) ||
-		warnif_rule_after_use_backend(proxy, file, line, arg) ||
-		warnif_rule_after_use_server(proxy, file, line, arg);
-}
-
-/* report a warning if a reqxxx rule is dangerously placed */
-int warnif_misplaced_reqxxx(struct proxy *proxy, const char *file, int line, const char *arg)
-{
-	return	warnif_rule_after_reqadd(proxy, file, line, arg) ||
-		warnif_rule_after_redirect(proxy, file, line, arg) ||
-		warnif_rule_after_use_backend(proxy, file, line, arg) ||
+	return	warnif_rule_after_use_backend(proxy, file, line, arg) ||
 		warnif_rule_after_use_server(proxy, file, line, arg);
 }
 
@@ -521,15 +489,49 @@ int warnif_misplaced_reqxxx(struct proxy *proxy, const char *file, int line, con
 int warnif_misplaced_reqadd(struct proxy *proxy, const char *file, int line, const char *arg)
 {
 	return	warnif_rule_after_redirect(proxy, file, line, arg) ||
-		warnif_rule_after_use_backend(proxy, file, line, arg) ||
-		warnif_rule_after_use_server(proxy, file, line, arg);
+		warnif_misplaced_redirect(proxy, file, line, arg);
 }
 
-/* report a warning if a redirect rule is dangerously placed */
-int warnif_misplaced_redirect(struct proxy *proxy, const char *file, int line, const char *arg)
+/* report a warning if a reqxxx rule is dangerously placed */
+int warnif_misplaced_reqxxx(struct proxy *proxy, const char *file, int line, const char *arg)
 {
-	return	warnif_rule_after_use_backend(proxy, file, line, arg) ||
-		warnif_rule_after_use_server(proxy, file, line, arg);
+	return	warnif_rule_after_reqadd(proxy, file, line, arg) ||
+		warnif_misplaced_reqadd(proxy, file, line, arg);
+}
+
+/* report a warning if an http-request rule is dangerously placed */
+int warnif_misplaced_http_req(struct proxy *proxy, const char *file, int line, const char *arg)
+{
+	return	warnif_rule_after_reqxxx(proxy, file, line, arg) ||
+		warnif_misplaced_reqxxx(proxy, file, line, arg);;
+}
+
+/* report a warning if a block rule is dangerously placed */
+int warnif_misplaced_block(struct proxy *proxy, const char *file, int line, const char *arg)
+{
+	return	warnif_rule_after_http_req(proxy, file, line, arg) ||
+		warnif_misplaced_http_req(proxy, file, line, arg);
+}
+
+/* report a warning if a "tcp request content" rule is dangerously placed */
+int warnif_misplaced_tcp_cont(struct proxy *proxy, const char *file, int line, const char *arg)
+{
+	return	warnif_rule_after_block(proxy, file, line, arg) ||
+		warnif_misplaced_block(proxy, file, line, arg);
+}
+
+/* report a warning if a "tcp request session" rule is dangerously placed */
+int warnif_misplaced_tcp_sess(struct proxy *proxy, const char *file, int line, const char *arg)
+{
+	return	warnif_rule_after_tcp_cont(proxy, file, line, arg) ||
+		warnif_misplaced_tcp_cont(proxy, file, line, arg);
+}
+
+/* report a warning if a "tcp request connection" rule is dangerously placed */
+int warnif_misplaced_tcp_conn(struct proxy *proxy, const char *file, int line, const char *arg)
+{
+	return	warnif_rule_after_tcp_sess(proxy, file, line, arg) ||
+		warnif_misplaced_tcp_sess(proxy, file, line, arg);
 }
 
 /* Report it if a request ACL condition uses some keywords that are incompatible
@@ -663,6 +665,11 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		if (alertif_too_many_args(0, file, linenum, args, &err_code))
 			goto out;
 		global.tune.options &= ~GTUNE_USE_GAI;
+	}
+	else if (!strcmp(args[0], "noreuseport")) {
+		if (alertif_too_many_args(0, file, linenum, args, &err_code))
+			goto out;
+		global.tune.options &= ~GTUNE_USE_REUSEPORT;
 	}
 	else if (!strcmp(args[0], "quiet")) {
 		if (alertif_too_many_args(0, file, linenum, args, &err_code))
@@ -1604,6 +1611,7 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			if (logsrv->format < 0) {
 				Alert("parsing [%s:%d] : unknown log format '%s'\n", file, linenum, args[arg+3]);
 				err_code |= ERR_ALERT | ERR_FATAL;
+				free(logsrv);
 				goto out;
 			}
 
@@ -1951,6 +1959,7 @@ void init_default_instance()
 	defproxy.maxconn = cfg_maxpconn;
 	defproxy.conn_retries = CONN_RETRIES;
 	defproxy.redispatch_after = 0;
+	defproxy.lbprm.chash.balance_factor = 0;
 
 	defproxy.defsrv.check.inter = DEF_CHKINTR;
 	defproxy.defsrv.check.fastinter = 0;
@@ -2007,7 +2016,7 @@ static int create_cond_regex_rule(const char *file, int line,
 		goto err;
 	}
 
-	if (warnifnotcap(px, PR_CAP_RS, file, line, cmd, NULL))
+	if (warnifnotcap(px, PR_CAP_FE | PR_CAP_BE, file, line, cmd, NULL))
 		ret_code |= ERR_WARN;
 
 	if (cond_start &&
@@ -2330,6 +2339,11 @@ int cfg_parse_resolvers(const char *file, int linenum, char **args, int kwm)
 		curr_resolvers->conf.line = linenum;
 		curr_resolvers->id = strdup(args[1]);
 		curr_resolvers->query_ids = EB_ROOT;
+		/* default hold period for nx, other, refuse and timeout is 30s */
+		curr_resolvers->hold.nx = 30000;
+		curr_resolvers->hold.other = 30000;
+		curr_resolvers->hold.refused = 30000;
+		curr_resolvers->hold.timeout = 30000;
 		/* default hold period for valid is 10s */
 		curr_resolvers->hold.valid = 10000;
 		curr_resolvers->timeout.retry = 1000;
@@ -2429,11 +2443,19 @@ int cfg_parse_resolvers(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		if (strcmp(args[1], "valid") == 0)
+		if (strcmp(args[1], "nx") == 0)
+			curr_resolvers->hold.nx = time;
+		else if (strcmp(args[1], "other") == 0)
+			curr_resolvers->hold.other = time;
+		else if (strcmp(args[1], "refused") == 0)
+			curr_resolvers->hold.refused = time;
+		else if (strcmp(args[1], "timeout") == 0)
+			curr_resolvers->hold.timeout = time;
+		else if (strcmp(args[1], "valid") == 0)
 			curr_resolvers->hold.valid = time;
 		else {
-			Alert("parsing [%s:%d] : '%s' unknown <event>: '%s', expects 'valid'\n",
-			file, linenum, args[0], args[1]);
+			Alert("parsing [%s:%d] : '%s' unknown <event>: '%s', expects either 'nx', 'timeout', 'valid', or 'other'.\n",
+				file, linenum, args[0], args[1]);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
@@ -2697,16 +2719,16 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 	if (!strcmp(args[0], "listen"))
 		rc = PR_CAP_LISTEN;
  	else if (!strcmp(args[0], "frontend"))
-		rc = PR_CAP_FE | PR_CAP_RS;
+		rc = PR_CAP_FE;
 	else if (!strcmp(args[0], "backend"))
-		rc = PR_CAP_BE | PR_CAP_RS;
+		rc = PR_CAP_BE;
 	else
 		rc = PR_CAP_NONE;
 
 	if (rc != PR_CAP_NONE) {  /* new proxy */
 		if (!*args[1]) {
 			Alert("parsing [%s:%d] : '%s' expects an <id> argument and\n"
-			      "  optionnally supports [addr1]:port1[-end1]{,[addr]:port[-end]}...\n",
+			      "  optionally supports [addr1]:port1[-end1]{,[addr]:port[-end]}...\n",
 			      file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_ABORT;
 			goto out;
@@ -2793,6 +2815,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 
 		if (curproxy->cap & PR_CAP_BE) {
 			curproxy->lbprm.algo = defproxy.lbprm.algo;
+			curproxy->lbprm.chash.balance_factor = defproxy.lbprm.chash.balance_factor;
 			curproxy->fullconn = defproxy.fullconn;
 			curproxy->conn_retries = defproxy.conn_retries;
 			curproxy->redispatch_after = defproxy.redispatch_after;
@@ -3963,8 +3986,18 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		}
 
 		rule = calloc(1, sizeof(*rule));
+		if (!rule) {
+			Alert("Out of memory error.\n");
+			goto out;
+		}
 		rule->cond = cond;
 		rule->be.name = strdup(args[1]);
+		rule->line = linenum;
+		rule->file = strdup(file);
+		if (!rule->file) {
+			Alert("Out of memory error.\n");
+			goto out;
+		}
 		LIST_INIT(&rule->list);
 		LIST_ADDQ(&curproxy->switching_rules, &rule->list);
 	}
@@ -5070,6 +5103,34 @@ stats_error_parsing:
 			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
 				goto out;
 		}
+		else if (!strcmp(args[1], "spop-check")) {
+			if (curproxy == &defproxy) {
+				Alert("parsing [%s:%d] : '%s %s' not allowed in 'defaults' section.\n",
+				      file, linenum, args[0], args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			if (curproxy->cap & PR_CAP_FE) {
+				Alert("parsing [%s:%d] : '%s %s' not allowed in 'frontend' and 'listen' sections.\n",
+				      file, linenum, args[0], args[1]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+
+			/* use SPOE request to check servers' health */
+			free(curproxy->check_req);
+			curproxy->check_req = NULL;
+			curproxy->options2 &= ~PR_O2_CHK_ANY;
+			curproxy->options2 |= PR_O2_SPOP_CHK;
+
+			if (prepare_spoe_healthcheck_request(&curproxy->check_req, &curproxy->check_len)) {
+				Alert("parsing [%s:%d] : failed to prepare SPOP healthcheck request.\n", file, linenum);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
+			if (alertif_too_many_args_idx(0, 1, file, linenum, args, &err_code))
+				goto out;
+		}
 		else if (!strcmp(args[1], "tcp-check")) {
 			/* use raw TCPCHK send/expect to check servers' health */
 			if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[1], NULL))
@@ -5926,6 +5987,19 @@ stats_error_parsing:
 			}
 		}
 	}
+	else if (strcmp(args[0], "hash-balance-factor") == 0) {
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		curproxy->lbprm.chash.balance_factor = atol(args[1]);
+		if (curproxy->lbprm.chash.balance_factor != 0 && curproxy->lbprm.chash.balance_factor <= 100) {
+			Alert("parsing [%s:%d] : '%s' must be 0 or greater than 100.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+	}
 	else if (strcmp(args[0], "unique-id-format") == 0) {
 		if (!*(args[1])) {
 			Alert("parsing [%s:%d] : %s expects an argument.\n", file, linenum, args[0]);
@@ -6442,7 +6516,7 @@ stats_error_parsing:
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		else if (warnifnotcap(curproxy, PR_CAP_RS, file, linenum, args[0], NULL))
+		else if (warnifnotcap(curproxy, PR_CAP_FE | PR_CAP_BE, file, linenum, args[0], NULL))
 			err_code |= ERR_WARN;
 
 		if (*(args[1]) == 0) {
@@ -6539,7 +6613,7 @@ stats_error_parsing:
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-		else if (warnifnotcap(curproxy, PR_CAP_RS, file, linenum, args[0], NULL))
+		else if (warnifnotcap(curproxy, PR_CAP_FE | PR_CAP_BE, file, linenum, args[0], NULL))
 			err_code |= ERR_WARN;
 
 		if (*(args[1]) == 0) {
@@ -6841,9 +6915,10 @@ cfg_parse_users(const char *file, int linenum, char **args, int kwm)
 		}
 
 		ag->name = strdup(args[1]);
-		if (!ag) {
+		if (!ag->name) {
 			Alert("parsing [%s:%d]: out of memory.\n", file, linenum);
 			err_code |= ERR_ALERT | ERR_ABORT;
+			free(ag);
 			goto out;
 		}
 
@@ -6858,6 +6933,9 @@ cfg_parse_users(const char *file, int linenum, char **args, int kwm)
 				Alert("parsing [%s:%d]: '%s' only supports 'users' option.\n",
 				      file, linenum, args[0]);
 				err_code |= ERR_ALERT | ERR_FATAL;
+				free(ag->groupusers);
+				free(ag->name);
+				free(ag);
 				goto out;
 			}
 		}
@@ -6942,6 +7020,55 @@ out:
 	return err_code;
 }
 
+int
+cfg_parse_scope(const char *file, int linenum, char *line)
+{
+	char *beg, *end, *scope = NULL;
+	int err_code = 0;
+	const char *err;
+
+	beg = line + 1;
+	end = strchr(beg, ']');
+
+	/* Detect end of scope declaration */
+	if (!end || end == beg) {
+		Alert("parsing [%s:%d] : empty scope name is forbidden.\n",
+		      file, linenum);
+		err_code |= ERR_ALERT | ERR_FATAL;
+		goto out;
+	}
+
+	/* Get scope name and check its validity */
+	scope = my_strndup(beg, end-beg);
+	err = invalid_char(scope);
+	if (err) {
+		Alert("parsing [%s:%d] : character '%c' is not permitted in a scope name.\n",
+		      file, linenum, *err);
+		err_code |= ERR_ALERT | ERR_ABORT;
+		goto out;
+	}
+
+	/* Be sure to have a scope declaration alone on its line */
+	line = end+1;
+	while (isspace((unsigned char)*line))
+		line++;
+	if (*line && *line != '#' && *line != '\n' && *line != '\r') {
+		Alert("parsing [%s:%d] : character '%c' is not permitted after scope declaration.\n",
+		      file, linenum, *line);
+		err_code |= ERR_ALERT | ERR_ABORT;
+		goto out;
+	}
+
+	/* We have a valid scope declaration, save it */
+	free(cfg_scope);
+	cfg_scope = scope;
+	scope = NULL;
+
+  out:
+	free(scope);
+	return err_code;
+}
+
 /*
  * This function reads and parses the configuration file given in the argument.
  * Returns the error code, 0 if OK, or any combination of :
@@ -7012,6 +7139,12 @@ next_line:
 		/* skip leading spaces */
 		while (isspace((unsigned char)*line))
 			line++;
+
+
+		if (*line == '[') {/* This is the begining if a scope */
+			err_code |= cfg_parse_scope(file, linenum, line);
+			goto next_line;
+		}
 
 		arg = 0;
 		args[arg] = line;
@@ -7264,6 +7397,8 @@ next_line:
 		if (err_code & ERR_ABORT)
 			break;
 	}
+	free(cfg_scope);
+	cfg_scope = NULL;
 	cursection = NULL;
 	free(thisline);
 	fclose(f);
@@ -7341,6 +7476,7 @@ int check_config_validity()
 	int err_code = 0;
 	unsigned int next_pxid = 1;
 	struct bind_conf *bind_conf;
+	char *err;
 
 	bind_conf = NULL;
 	/*
@@ -7637,8 +7773,17 @@ int check_config_validity()
 			 */
 			pxname = rule->be.name;
 			LIST_INIT(&rule->be.expr);
-			parse_logformat_string(pxname, curproxy, &rule->be.expr, 0, SMP_VAL_FE_HRQ_HDR,
-			                       curproxy->conf.args.file, curproxy->conf.args.line);
+			curproxy->conf.args.ctx = ARGC_UBK;
+			curproxy->conf.args.file = rule->file;
+			curproxy->conf.args.line = rule->line;
+			err = NULL;
+			if (!parse_logformat_string(pxname, curproxy, &rule->be.expr, 0, SMP_VAL_FE_HRQ_HDR, &err)) {
+				Alert("Parsing [%s:%d]: failed to parse use_backend rule '%s' : %s.\n",
+				      rule->file, rule->line, pxname, err);
+				free(err);
+				cfgerr++;
+				continue;
+			}
 			node = LIST_NEXT(&rule->be.expr, struct logformat_node *, list);
 
 			if (!LIST_ISEMPTY(&rule->be.expr)) {
@@ -7800,6 +7945,45 @@ int check_config_validity()
 			}
 		}
 
+		/* find the target table for 'tcp-request' layer 5 rules */
+		list_for_each_entry(trule, &curproxy->tcp_req.l5_rules, list) {
+			struct proxy *target;
+
+			if (trule->action < ACT_ACTION_TRK_SC0 || trule->action > ACT_ACTION_TRK_SCMAX)
+				continue;
+
+			if (trule->arg.trk_ctr.table.n)
+				target = proxy_tbl_by_name(trule->arg.trk_ctr.table.n);
+			else
+				target = curproxy;
+
+			if (!target) {
+				Alert("Proxy '%s': unable to find table '%s' referenced by track-sc%d.\n",
+				      curproxy->id, trule->arg.trk_ctr.table.n,
+				      tcp_trk_idx(trule->action));
+				cfgerr++;
+			}
+			else if (target->table.size == 0) {
+				Alert("Proxy '%s': table '%s' used but not configured.\n",
+				      curproxy->id, trule->arg.trk_ctr.table.n ? trule->arg.trk_ctr.table.n : curproxy->id);
+				cfgerr++;
+			}
+			else if (!stktable_compatible_sample(trule->arg.trk_ctr.expr,  target->table.type)) {
+				Alert("Proxy '%s': stick-table '%s' uses a type incompatible with the 'track-sc%d' rule.\n",
+				      curproxy->id, trule->arg.trk_ctr.table.n ? trule->arg.trk_ctr.table.n : curproxy->id,
+				      tcp_trk_idx(trule->action));
+				cfgerr++;
+			}
+			else {
+				free(trule->arg.trk_ctr.table.n);
+				trule->arg.trk_ctr.table.t = &target->table;
+				/* Note: if we decide to enhance the track-sc syntax, we may be able
+				 * to pass a list of counters to track and allocate them right here using
+				 * stktable_alloc_data_type().
+				 */
+			}
+		}
+
 		/* find the target table for 'tcp-request' layer 6 rules */
 		list_for_each_entry(trule, &curproxy->tcp_req.inspect_rules, list) {
 			struct proxy *target;
@@ -7880,7 +8064,7 @@ int check_config_validity()
 			if (!target) {
 				Alert("Proxy '%s': unable to find table '%s' referenced by track-sc%d.\n",
 				      curproxy->id, hrqrule->arg.trk_ctr.table.n,
-				      http_req_trk_idx(hrqrule->action));
+				      http_trk_idx(hrqrule->action));
 				cfgerr++;
 			}
 			else if (target->table.size == 0) {
@@ -7891,7 +8075,46 @@ int check_config_validity()
 			else if (!stktable_compatible_sample(hrqrule->arg.trk_ctr.expr,  target->table.type)) {
 				Alert("Proxy '%s': stick-table '%s' uses a type incompatible with the 'track-sc%d' rule.\n",
 				      curproxy->id, hrqrule->arg.trk_ctr.table.n ? hrqrule->arg.trk_ctr.table.n : curproxy->id,
-				      http_req_trk_idx(hrqrule->action));
+				      http_trk_idx(hrqrule->action));
+				cfgerr++;
+			}
+			else {
+				free(hrqrule->arg.trk_ctr.table.n);
+				hrqrule->arg.trk_ctr.table.t = &target->table;
+				/* Note: if we decide to enhance the track-sc syntax, we may be able
+				 * to pass a list of counters to track and allocate them right here using
+				 * stktable_alloc_data_type().
+				 */
+			}
+		}
+
+		/* find the target table for 'http-response' layer 7 rules */
+		list_for_each_entry(hrqrule, &curproxy->http_res_rules, list) {
+			struct proxy *target;
+
+			if (hrqrule->action < ACT_ACTION_TRK_SC0 || hrqrule->action > ACT_ACTION_TRK_SCMAX)
+				continue;
+
+			if (hrqrule->arg.trk_ctr.table.n)
+				target = proxy_tbl_by_name(hrqrule->arg.trk_ctr.table.n);
+			else
+				target = curproxy;
+
+			if (!target) {
+				Alert("Proxy '%s': unable to find table '%s' referenced by track-sc%d.\n",
+				      curproxy->id, hrqrule->arg.trk_ctr.table.n,
+				      http_trk_idx(hrqrule->action));
+				cfgerr++;
+			}
+			else if (target->table.size == 0) {
+				Alert("Proxy '%s': table '%s' used but not configured.\n",
+				      curproxy->id, hrqrule->arg.trk_ctr.table.n ? hrqrule->arg.trk_ctr.table.n : curproxy->id);
+				cfgerr++;
+			}
+			else if (!stktable_compatible_sample(hrqrule->arg.trk_ctr.expr,  target->table.type)) {
+				Alert("Proxy '%s': stick-table '%s' uses a type incompatible with the 'track-sc%d' rule.\n",
+				      curproxy->id, hrqrule->arg.trk_ctr.table.n ? hrqrule->arg.trk_ctr.table.n : curproxy->id,
+				      http_trk_idx(hrqrule->action));
 				cfgerr++;
 			}
 			else {
@@ -8044,8 +8267,14 @@ out_uri_auth_compat:
 			curproxy->conf.args.ctx = ARGC_LOG;
 			curproxy->conf.args.file = curproxy->conf.lfs_file;
 			curproxy->conf.args.line = curproxy->conf.lfs_line;
-			parse_logformat_string(curproxy->conf.logformat_string, curproxy, &curproxy->logformat, LOG_OPT_MANDATORY,
-					       SMP_VAL_FE_LOG_END, curproxy->conf.lfs_file, curproxy->conf.lfs_line);
+			err = NULL;
+			if (!parse_logformat_string(curproxy->conf.logformat_string, curproxy, &curproxy->logformat, LOG_OPT_MANDATORY,
+			                            SMP_VAL_FE_LOG_END, &err)) {
+				Alert("Parsing [%s:%d]: failed to parse log-format : %s.\n",
+				      curproxy->conf.lfs_file, curproxy->conf.lfs_line, err);
+				free(err);
+				cfgerr++;
+			}
 			curproxy->conf.args.file = NULL;
 			curproxy->conf.args.line = 0;
 		}
@@ -8054,9 +8283,19 @@ out_uri_auth_compat:
 			curproxy->conf.args.ctx = ARGC_LOGSD;
 			curproxy->conf.args.file = curproxy->conf.lfsd_file;
 			curproxy->conf.args.line = curproxy->conf.lfsd_line;
-			parse_logformat_string(curproxy->conf.logformat_sd_string, curproxy, &curproxy->logformat_sd, LOG_OPT_MANDATORY,
-					       SMP_VAL_FE_LOG_END, curproxy->conf.lfsd_file, curproxy->conf.lfsd_line);
-			add_to_logformat_list(NULL, NULL, LF_SEPARATOR, &curproxy->logformat_sd);
+			err = NULL;
+			if (!parse_logformat_string(curproxy->conf.logformat_sd_string, curproxy, &curproxy->logformat_sd, LOG_OPT_MANDATORY,
+			                            SMP_VAL_FE_LOG_END, &err)) {
+				Alert("Parsing [%s:%d]: failed to parse log-format-sd : %s.\n",
+				      curproxy->conf.lfs_file, curproxy->conf.lfs_line, err);
+				free(err);
+				cfgerr++;
+			} else if (!add_to_logformat_list(NULL, NULL, LF_SEPARATOR, &curproxy->logformat_sd, &err)) {
+				Alert("Parsing [%s:%d]: failed to parse log-format-sd : %s.\n",
+				      curproxy->conf.lfs_file, curproxy->conf.lfs_line, err);
+				free(err);
+				cfgerr++;
+			}
 			curproxy->conf.args.file = NULL;
 			curproxy->conf.args.line = 0;
 		}
@@ -8065,9 +8304,14 @@ out_uri_auth_compat:
 			curproxy->conf.args.ctx = ARGC_UIF;
 			curproxy->conf.args.file = curproxy->conf.uif_file;
 			curproxy->conf.args.line = curproxy->conf.uif_line;
-			parse_logformat_string(curproxy->conf.uniqueid_format_string, curproxy, &curproxy->format_unique_id, LOG_OPT_HTTP,
-					       (curproxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR,
-					       curproxy->conf.uif_file, curproxy->conf.uif_line);
+			err = NULL;
+			if (!parse_logformat_string(curproxy->conf.uniqueid_format_string, curproxy, &curproxy->format_unique_id, LOG_OPT_HTTP,
+			                            (curproxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR, &err)) {
+				Alert("Parsing [%s:%d]: failed to parse unique-id : %s.\n",
+				      curproxy->conf.uif_file, curproxy->conf.uif_line, err);
+				free(err);
+				cfgerr++;
+			}
 			curproxy->conf.args.file = NULL;
 			curproxy->conf.args.line = 0;
 		}
@@ -8319,13 +8563,6 @@ out_uri_auth_compat:
 						newsrv->id, px->id, srv->id);
 					cfgerr++;
 					goto next_srv;
-				}
-
-				/* if the other server is forced disabled, we have to do the same here */
-				if (srv->admin & SRV_ADMF_MAINT) {
-					newsrv->admin |= SRV_ADMF_IMAINT;
-					newsrv->state = SRV_ST_STOPPED;
-					newsrv->check.health = 0;
 				}
 
 				newsrv->track = srv;
@@ -8746,7 +8983,7 @@ out_uri_auth_compat:
 
 			/* enable separate counters */
 			if (curproxy->options2 & PR_O2_SOCKSTAT) {
-				listener->counters = calloc(1, sizeof(struct licounters));
+				listener->counters = calloc(1, sizeof(*listener->counters));
 				if (!listener->name)
 					memprintf(&listener->name, "sock-%d", listener->luid);
 			}
@@ -8779,7 +9016,10 @@ out_uri_auth_compat:
 			listener->default_target = curproxy->default_target;
 
 			if (!LIST_ISEMPTY(&curproxy->tcp_req.l4_rules))
-				listener->options |= LI_O_TCP_RULES;
+				listener->options |= LI_O_TCP_L4_RULES;
+
+			if (!LIST_ISEMPTY(&curproxy->tcp_req.l5_rules))
+				listener->options |= LI_O_TCP_L5_RULES;
 
 			if (curproxy->mon_mask.s_addr)
 				listener->options |= LI_O_CHK_MONNET;
@@ -9117,6 +9357,26 @@ void cfg_unregister_sections(void)
 	list_for_each_entry_safe(cs, ics, &sections, list) {
 		LIST_DEL(&cs->list);
 		free(cs);
+	}
+}
+
+void cfg_backup_sections(struct list *backup_sections)
+{
+	struct cfg_section *cs, *ics;
+
+	list_for_each_entry_safe(cs, ics, &sections, list) {
+		LIST_DEL(&cs->list);
+		LIST_ADDQ(backup_sections, &cs->list);
+	}
+}
+
+void cfg_restore_sections(struct list *backup_sections)
+{
+	struct cfg_section *cs, *ics;
+
+	list_for_each_entry_safe(cs, ics, backup_sections, list) {
+		LIST_DEL(&cs->list);
+		LIST_ADDQ(&sections, &cs->list);
 	}
 }
 

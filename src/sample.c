@@ -637,7 +637,12 @@ static int c_int2str(struct sample *smp)
 	return 1;
 }
 
-/* This function duplicates data and removes the flag "const". */
+/* This function inconditionally duplicates data and removes the "const" flag.
+ * For strings and binary blocks, it also provides a known allocated size with
+ * a length that is capped to the size, and ensures a trailing zero is always
+ * appended for strings. This is necessary for some operations which may
+ * require to extend the length. It returns 0 if it fails, 1 on success.
+ */
 int smp_dup(struct sample *smp)
 {
 	struct chunk *trash;
@@ -645,8 +650,6 @@ int smp_dup(struct sample *smp)
 	/* If the const flag is not set, we don't need to duplicate the
 	 * pattern as it can be modified in place.
 	 */
-	if (!(smp->flags & SMP_F_CONST))
-		return 1;
 
 	switch (smp->data.type) {
 	case SMP_T_BOOL:
@@ -656,11 +659,24 @@ int smp_dup(struct sample *smp)
 	case SMP_T_IPV6:
 		/* These type are not const. */
 		break;
+
 	case SMP_T_STR:
-	case SMP_T_BIN:
-		/* Duplicate data. */
 		trash = get_trash_chunk();
-		trash->len = smp->data.u.str.len < trash->size ? smp->data.u.str.len : trash->size;
+		trash->len = smp->data.u.str.len;
+		if (trash->len > trash->size - 1)
+			trash->len = trash->size - 1;
+
+		memcpy(trash->str, smp->data.u.str.str, trash->len);
+		trash->str[trash->len] = 0;
+		smp->data.u.str = *trash;
+		break;
+
+	case SMP_T_BIN:
+		trash = get_trash_chunk();
+		trash->len = smp->data.u.str.len;
+		if (trash->len > trash->size)
+			trash->len = trash->size;
+
 		memcpy(trash->str, smp->data.u.str.str, trash->len);
 		smp->data.u.str = *trash;
 		break;
@@ -902,7 +918,7 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, const char *file, in
 
 		if (*endt && *endt != ',') {
 			if (ckw)
-				memprintf(err_msg, "missing comma after conv keyword '%s'", ckw);
+				memprintf(err_msg, "missing comma after converter '%s'", ckw);
 			else
 				memprintf(err_msg, "missing comma after fetch keyword '%s'", fkw);
 			goto out_error;
@@ -911,7 +927,7 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, const char *file, in
 		while (*endt == ',') /* then trailing commas */
 			endt++;
 
-		begw = endt; /* start of conv keyword */
+		begw = endt; /* start of converter */
 
 		if (!*begw) {
 			/* none ? skip to next string */
@@ -931,7 +947,7 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, const char *file, in
 			/* we found an isolated keyword that we don't know, it's not ours */
 			if (begw == str[*idx])
 				break;
-			memprintf(err_msg, "unknown conv method '%s'", ckw);
+			memprintf(err_msg, "unknown converter '%s'", ckw);
 			goto out_error;
 		}
 
@@ -941,19 +957,19 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, const char *file, in
 			while (*endt && *endt != ')')
 				endt++;
 			if (*endt != ')') {
-				memprintf(err_msg, "syntax error: missing ')' after conv keyword '%s'", ckw);
+				memprintf(err_msg, "syntax error: missing ')' after converter '%s'", ckw);
 				goto out_error;
 			}
 		}
 
 		if (conv->in_type >= SMP_TYPES || conv->out_type >= SMP_TYPES) {
-			memprintf(err_msg, "returns type of conv method '%s' is unknown", ckw);
+			memprintf(err_msg, "returns type of converter '%s' is unknown", ckw);
 			goto out_error;
 		}
 
 		/* If impossible type conversion */
 		if (!sample_casts[prev_type][conv->in_type]) {
-			memprintf(err_msg, "conv method '%s' cannot be applied", ckw);
+			memprintf(err_msg, "converter '%s' cannot be applied", ckw);
 			goto out_error;
 		}
 
@@ -969,14 +985,14 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, const char *file, in
 			int err_arg;
 
 			if (!conv->arg_mask) {
-				memprintf(err_msg, "conv method '%s' does not support any args", ckw);
+				memprintf(err_msg, "converter '%s' does not support any args", ckw);
 				goto out_error;
 			}
 
 			al->kw = expr->fetch->kw;
 			al->conv = conv_expr->conv->kw;
 			if (make_arg_list(endw + 1, endt - endw - 1, conv->arg_mask, &conv_expr->arg_p, err_msg, NULL, &err_arg, al) < 0) {
-				memprintf(err_msg, "invalid arg %d in conv method '%s' : %s", err_arg+1, ckw, *err_msg);
+				memprintf(err_msg, "invalid arg %d in converter '%s' : %s", err_arg+1, ckw, *err_msg);
 				goto out_error;
 			}
 
@@ -984,12 +1000,12 @@ struct sample_expr *sample_parse_expr(char **str, int *idx, const char *file, in
 				conv_expr->arg_p = empty_arg_list;
 
 			if (conv->val_args && !conv->val_args(conv_expr->arg_p, conv, file, line, err_msg)) {
-				memprintf(err_msg, "invalid args in conv method '%s' : %s", ckw, *err_msg);
+				memprintf(err_msg, "invalid args in converter '%s' : %s", ckw, *err_msg);
 				goto out_error;
 			}
 		}
 		else if (ARGM(conv->arg_mask)) {
-			memprintf(err_msg, "missing args for conv method '%s'", ckw);
+			memprintf(err_msg, "missing args for converter '%s'", ckw);
 			goto out_error;
 		}
 	}
@@ -1111,6 +1127,7 @@ int smp_resolve_args(struct proxy *p)
 		case ARGC_CAP:   where = "in capture rule in"; break;
 		case ARGC_ACL:   ctx = "ACL keyword"; break;
 		case ARGC_SRV:   where = "in server directive in"; break;
+		case ARGC_SPOE:  where = "in spoe-message directive in"; break;
 		}
 
 		/* set a few default settings */
@@ -1366,6 +1383,46 @@ struct sample *sample_fetch_as_type(struct proxy *px, struct session *sess,
 	return smp;
 }
 
+static void release_sample_arg(struct arg *p)
+{
+	struct arg *p_back = p;
+
+	if (!p)
+		return;
+
+	while (p->type != ARGT_STOP) {
+		if (p->type == ARGT_STR || p->unresolved) {
+			free(p->data.str.str);
+			p->data.str.str = NULL;
+			p->unresolved = 0;
+		}
+		else if (p->type == ARGT_REG) {
+			if (p->data.reg) {
+				regex_free(p->data.reg);
+				free(p->data.reg);
+				p->data.reg = NULL;
+			}
+		}
+		p++;
+	}
+
+	if (p_back != empty_arg_list)
+		free(p_back);
+}
+
+void release_sample_expr(struct sample_expr *expr)
+{
+	struct sample_conv_expr *conv_expr, *conv_exprb;
+
+	if (!expr)
+		return;
+
+	list_for_each_entry_safe(conv_expr, conv_exprb, &expr->conv_exprs, list)
+		release_sample_arg(conv_expr->arg_p);
+	release_sample_arg(expr->arg_p);
+	free(expr);
+}
+
 /*****************************************************************/
 /*    Sample format convert functions                            */
 /*    These functions set the data type on return.               */
@@ -1458,10 +1515,7 @@ static int sample_conv_str2lower(const struct arg *arg_p, struct sample *smp, vo
 {
 	int i;
 
-	if (!smp_dup(smp))
-		return 0;
-
-	if (!smp->data.u.str.size)
+	if (!smp_make_rw(smp))
 		return 0;
 
 	for (i = 0; i < smp->data.u.str.len; i++) {
@@ -1475,10 +1529,7 @@ static int sample_conv_str2upper(const struct arg *arg_p, struct sample *smp, vo
 {
 	int i;
 
-	if (!smp_dup(smp))
-		return 0;
-
-	if (!smp->data.u.str.size)
+	if (!smp_make_rw(smp))
 		return 0;
 
 	for (i = 0; i < smp->data.u.str.len; i++) {
@@ -1642,8 +1693,8 @@ static int sample_conv_json_check(struct arg *arg, struct sample_conv *conv,
 		return 1;
 	}
 
-	memprintf(err, "Unexpected input code type at file '%s', line %d. "
-	               "Allowed value are 'ascii', 'utf8', 'utf8p' and 'utf8pp'", file, line);
+	memprintf(err, "Unexpected input code type. "
+	               "Allowed value are 'ascii', 'utf8', 'utf8s', 'utf8p' and 'utf8ps'");
 	return 0;
 }
 
@@ -2560,7 +2611,7 @@ static int smp_check_const_meth(struct arg *args, char **err)
 		 * token = 1*tchar
 		 */
 		for (i = 0; i < args[0].data.str.len; i++) {
-			if (!http_is_token[(unsigned char)args[0].data.str.str[i]]) {
+			if (!HTTP_IS_TOKEN(args[0].data.str.str[i])) {
 				memprintf(err, "expects valid method.");
 				return 0;
 			}

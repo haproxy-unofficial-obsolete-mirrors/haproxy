@@ -62,6 +62,7 @@ struct cfg_kw_list {
 
 extern int cfg_maxpconn;
 extern int cfg_maxconn;
+extern char *cfg_scope;
 
 int cfg_parse_global(const char *file, int linenum, char **args, int inv);
 int cfg_parse_listen(const char *file, int linenum, char **args, int inv);
@@ -74,7 +75,10 @@ int str2listener(char *str, struct proxy *curproxy, struct bind_conf *bind_conf,
 int cfg_register_section(char *section_name,
                          int (*section_parser)(const char *, int, char **, int));
 void cfg_unregister_sections(void);
+void cfg_backup_sections(struct list *backup_sections);
+void cfg_restore_sections(struct list *backup_sections);
 int warnif_misplaced_tcp_conn(struct proxy *proxy, const char *file, int line, const char *arg);
+int warnif_misplaced_tcp_sess(struct proxy *proxy, const char *file, int line, const char *arg);
 int warnif_misplaced_tcp_cont(struct proxy *proxy, const char *file, int line, const char *arg);
 
 /*
@@ -90,7 +94,6 @@ static inline int warnifnotcap(struct proxy *proxy, int cap, const char *file, i
 	switch (cap) {
 	case PR_CAP_BE: msg = "no backend"; break;
 	case PR_CAP_FE: msg = "no frontend"; break;
-	case PR_CAP_RS: msg = "no ruleset"; break;
 	case PR_CAP_BE|PR_CAP_FE: msg = "neither frontend nor backend"; break;
 	default: msg = "not enough"; break;
 	}

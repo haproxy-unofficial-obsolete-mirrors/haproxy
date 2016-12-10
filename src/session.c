@@ -22,11 +22,11 @@
 #include <proto/listener.h>
 #include <proto/log.h>
 #include <proto/proto_http.h>
-#include <proto/proto_tcp.h>
 #include <proto/proxy.h>
 #include <proto/raw_sock.h>
 #include <proto/session.h>
 #include <proto/stream.h>
+#include <proto/tcp_rules.h>
 #include <proto/vars.h>
 
 struct pool_head *pool2_session;
@@ -41,6 +41,7 @@ struct data_cb sess_conn_cb = {
 	.send = NULL,
 	.wake = conn_update_session,
 	.init = conn_complete_session,
+	.name = "SESS",
 };
 
 /* Create a a new session and assign it to frontend <fe>, listener <li>,
@@ -166,7 +167,7 @@ int session_accept_fd(struct listener *l, int cfd, struct sockaddr_storage *addr
 	/* now evaluate the tcp-request layer4 rules. We only need a session
 	 * and no stream for these rules.
 	 */
-	if ((l->options & LI_O_TCP_RULES) && !tcp_exec_req_rules(sess)) {
+	if ((l->options & LI_O_TCP_L4_RULES) && !tcp_exec_l4_rules(sess)) {
 		/* let's do a no-linger now to close with a single RST. */
 		setsockopt(cfd, SOL_SOCKET, SO_LINGER, (struct linger *) &nolinger, sizeof(struct linger));
 		ret = 0; /* successful termination */
@@ -267,6 +268,10 @@ int session_accept_fd(struct listener *l, int cfd, struct sockaddr_storage *addr
 	if (sess->fe->to_log & LW_XPRT)
 		cli_conn->flags |= CO_FL_XPRT_TRACKED;
 
+	/* we may have some tcp-request-session rules */
+	if ((l->options & LI_O_TCP_L5_RULES) && !tcp_exec_l5_rules(sess))
+		goto out_free_sess;
+
 	session_count_new(sess);
 	strm = stream_new(sess, t, &cli_conn->obj_type);
 	if (!strm)
@@ -337,11 +342,10 @@ static void session_prepare_log_prefix(struct session *sess)
  * disabled and finally kills the file descriptor. This function requires that
  * sess->origin points to the incoming connection.
  */
-static void session_kill_embryonic(struct session *sess)
+static void session_kill_embryonic(struct session *sess, struct task *task)
 {
 	int level = LOG_INFO;
 	struct connection *conn = __objt_conn(sess->origin);
-	struct task *task = conn->owner;
 	unsigned int log = sess->fe->to_log;
 	const char *err_msg;
 
@@ -412,7 +416,7 @@ static struct task *session_expire_embryonic(struct task *t)
 	if (!(t->state & TASK_WOKEN_TIMER))
 		return t;
 
-	session_kill_embryonic(sess);
+	session_kill_embryonic(sess, t);
 	return NULL;
 }
 
@@ -435,6 +439,10 @@ static int conn_complete_session(struct connection *conn)
 	if (sess->fe->to_log & LW_XPRT)
 		conn->flags |= CO_FL_XPRT_TRACKED;
 
+	/* we may have some tcp-request-session rules */
+	if ((sess->listener->options & LI_O_TCP_L5_RULES) && !tcp_exec_l5_rules(sess))
+		goto fail;
+
 	session_count_new(sess);
 	task->process = sess->listener->handler;
 	strm = stream_new(sess, task, &conn->obj_type);
@@ -448,7 +456,7 @@ static int conn_complete_session(struct connection *conn)
 	return 0;
 
  fail:
-	session_kill_embryonic(sess);
+	session_kill_embryonic(sess, task);
 	return -1;
 }
 
@@ -461,7 +469,7 @@ static int conn_update_session(struct connection *conn)
 	struct session *sess = task->context;
 
 	if (conn->flags & CO_FL_ERROR) {
-		session_kill_embryonic(sess);
+		session_kill_embryonic(sess, task);
 		return -1;
 	}
 	return 0;
