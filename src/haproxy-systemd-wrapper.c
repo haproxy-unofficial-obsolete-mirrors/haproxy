@@ -114,9 +114,9 @@ static void spawn_haproxy(char **pid_strv, int nb_pid)
 
 		locate_haproxy(haproxy_bin, 512);
 		argv[argno++] = haproxy_bin;
+		argv[argno++] = "-Ds";
 		for (i = 0; i < main_argc; ++i)
 			argv[argno++] = main_argv[i];
-		argv[argno++] = "-Ds";
 		if (nb_pid > 0) {
 			argv[argno++] = "-sf";
 			for (i = 0; i < nb_pid; ++i)
