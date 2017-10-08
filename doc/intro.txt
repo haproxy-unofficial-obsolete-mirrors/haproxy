@@ -130,10 +130,10 @@ activity is by far the best known case of load balancing.
 A load balancer may act :
 
   - at the link level : this is called link load balancing, and it consists in
-    chosing what network link to send a packet to;
+    choosing what network link to send a packet to;
 
   - at the network level : this is called network load balancing, and it
-    consists in chosing what route a series of packets will follow;
+    consists in choosing what route a series of packets will follow;
 
   - at the server level : this is called server load balancing and it consists
     in deciding what server will process a connection or request.
