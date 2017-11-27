@@ -1047,7 +1047,7 @@ S (Servers).
  82: dses [LF..]: requests denied by "tcp-request session" rules
 
 
-9.2) Typed output format
+9.2. Typed output format
 ------------------------
 
 Both "show info" and "show stat" support a mode where each output value comes
