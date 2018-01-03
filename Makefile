@@ -91,7 +91,7 @@
 
 #### Installation options.
 DESTDIR =
-PREFIX = /usr/local
+PREFIX ?= /usr/local
 SBINDIR = $(PREFIX)/sbin
 MANDIR = $(PREFIX)/share/man
 DOCDIR = $(PREFIX)/doc/haproxy
