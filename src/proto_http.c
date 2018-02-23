@@ -3599,7 +3599,8 @@ resume_execution:
 			if (http_transform_header(s, &txn->req, rule->arg.hdr_add.name,
 			                          rule->arg.hdr_add.name_len,
 			                          &rule->arg.hdr_add.fmt,
-			                          &rule->arg.hdr_add.re, rule->action))
+			                          &rule->arg.hdr_add.re, rule->action,
+			                          rule->arg.hdr_add.re_options))
 				return HTTP_RULE_RES_BADREQ;
 			break;
 
@@ -3870,7 +3871,8 @@ resume_execution:
 			if (http_transform_header(s, &txn->rsp, rule->arg.hdr_add.name,
 			                          rule->arg.hdr_add.name_len,
 			                          &rule->arg.hdr_add.fmt,
-			                          &rule->arg.hdr_add.re, rule->action))
+			                          &rule->arg.hdr_add.re, rule->action, 
+			                          rule->arg.hdr_add.re_options))
 				return HTTP_RULE_RES_STOP; /* note: we should report an error here */
 			break;
 
@@ -9282,7 +9284,10 @@ struct act_rule *parse_http_req_cond(const char **args, const char *file, int li
 		rule->action = args[0][11] == 'h' ? ACT_HTTP_SUBSTITUTE_HDR : ACT_HTTP_SUBSTITUTE_VAL;
 		cur_arg = 1;
 
-		if (!*args[cur_arg] || !*args[cur_arg+1] || !*args[cur_arg+2] || !*args[cur_arg+3]
+		/* Check for !*args[cur_arg+3] is ommitted on purpose because this can be empty. So
+		   in reality if no if/unless part is present, missing options arguments is interpreted as
+		   the empty options ''. */
+                if (!*args[cur_arg] || !*args[cur_arg+1] || !*args[cur_arg+2] ||
 			(*args[cur_arg+4] && strcmp(args[cur_arg+4], "if") != 0 && strcmp(args[cur_arg+4], "unless") != 0)) {
 			Alert("parsing [%s:%d]: 'http-request %s' expects exactly 4 arguments.\n",
 			      file, linenum, args[0]);
@@ -9312,9 +9317,9 @@ struct act_rule *parse_http_req_cond(const char **args, const char *file, int li
 		}
 
 		rule->arg.hdr_add.re_options = 0;
-		if (strcmp(args[cur_arg+3], "g")) {
+		if (strcmp(args[cur_arg+3], "g") == 0) {
 			rule->arg.hdr_add.re_options |= RE_SUBST_GLOBAL;
-		} else if (*args[cur_arg+3][0] != '\0') {
+		} else if (args[cur_arg+3][0] != '\0') {
 			Alert("parsing [%s:%d]: 'http-request %s': Invalid regex substitution option.\n", file, linenum,
 			args[0]);
 			goto out_err;
@@ -9768,7 +9773,10 @@ struct act_rule *parse_http_res_cond(const char **args, const char *file, int li
 		rule->action = args[0][11] == 'h' ? ACT_HTTP_SUBSTITUTE_HDR : ACT_HTTP_SUBSTITUTE_VAL;
 		cur_arg = 1;
 
-		if (!*args[cur_arg] || !*args[cur_arg+1] || !*args[cur_arg+2] || !*args[cur_arg+3]
+		/* Check for !*args[cur_arg+3] is ommitted on purpose because this can be empty. So
+		   in reality if no if/unless part is present, missing options arguments is interpreted as
+                   the empty options ''. */
+		if (!*args[cur_arg] || !*args[cur_arg+1] || !*args[cur_arg+2] ||
 		    (*args[cur_arg+4] && strcmp(args[cur_arg+4], "if") != 0 && strcmp(args[cur_arg+4], "unless") != 0)) {
 			Alert("parsing [%s:%d]: 'http-response %s' expects exactly 4 arguments.\n",
 			      file, linenum, args[0]);
@@ -9798,9 +9806,9 @@ struct act_rule *parse_http_res_cond(const char **args, const char *file, int li
 		}
 
 		rule->arg.hdr_add.re_options = 0;
-		if (strcmp(args[cur_arg+3], "g")) {
+		if (strcmp(args[cur_arg+3], "g") == 0) {
 			rule->arg.hdr_add.re_options |= RE_SUBST_GLOBAL;
-		} else if (*args[cur_arg+3][0] != '\0') {
+		} else if (args[cur_arg+3][0] != '\0') {
 			Alert("parsing [%s:%d]: 'http-response %s': Invalid regex substitution option.\n", file, linenum,
 			args[0]);
 			goto out_err;
