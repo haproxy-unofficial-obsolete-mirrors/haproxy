@@ -3650,6 +3650,8 @@ http-request { allow | tarpit | auth [realm <realm>] | redirect <rule> |
               del-header <name> | set-nice <nice> | set-log-level <level> |
               replace-header <name> <match-regex> <replace-fmt> |
               replace-value <name> <match-regex> <replace-fmt> |
+              substitute-header <name> <match-regex> <replace-fmt> <options> |
+              substitute-value <name> <match-regex> <replace-fmt> <options> |
               set-method <fmt> | set-path <fmt> | set-query <fmt> |
               set-uri <fmt> | set-tos <tos> | set-mark <mark> |
               add-acl(<file name>) <key fmt> |
@@ -3768,6 +3770,29 @@ http-request { allow | tarpit | auth [realm <realm>] | redirect <rule> |
       outputs:
 
         X-Forwarded-For: 172.16.10.1, 172.16.13.24, 10.0.0.37
+
+    - "substitute-header" works similar to "replace-header" but it only
+      substitutes the matching parts within the original header. This makes
+      it possible to replace a varying number of matching parts within the
+      original header. <options> argument can only have value "g" meaning
+      substitute all matches. If <options> is empty "", only the first match
+      gets substituted.
+
+      Example:
+
+        http-request susbtitute-header Referer '-(?=.*\.example\.com)' '.' 'g'
+
+      applied to:
+
+        Referer: https://a-b-c.example.com/x-caliber
+
+      outputs:
+
+        Referer: https://a.b.c.example.com/x-caliber
+
+    - "substitute-value" works similar to "substitute-header" except that it 
+      matches the regex against every comma-delimited value of the header field
+      <name> instead of the entire header (as done in "replace-value"). 
 
     - "set-method" rewrites the request method with the result of the
       evaluation of format string <fmt>. There should be very few valid reasons
@@ -4122,6 +4147,8 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
                 set-header <name> <fmt> | del-header <name> |
                 replace-header <name> <regex-match> <replace-fmt> |
                 replace-value <name> <regex-match> <replace-fmt> |
+                substitute-header <name> <regex-match> <replace-fmt> <options> |
+                substitute-value <name> <regex-match> <replace-fmt> <options> |
                 set-status <status> |
                 set-log-level <level> | set-mark <mark> | set-tos <tos> |
                 add-acl(<file name>) <key fmt> |
@@ -4213,6 +4240,30 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
       outputs:
 
         Cache-Control: max-age=3600, private
+
+    - "substitute-header" works similar to "replace-header" but it only
+      substitutes the matching parts within the original header. This makes
+      it possible to replace a varying number of matching parts within the 
+      original header. <options> argument can only have value "g" meaning
+      substitute all matches. If <options> is empty "", only the first match
+      gets substituted.
+
+      Example:
+
+        http-request susbtitute-header Access-Control-Allow-Origin \
+          '-(?=.*\.example\.com)' '.' 'g'
+
+      applied to:
+
+        Access-Control-Allow-Origin: https://a-b-c.example.com/x-caliber
+
+      outputs:
+
+        Access-Control-Allow-Origin: https://a.b.c.example.com/x-caliber
+
+    - "substitute-value" works similar to "substitute-header" except that it
+      matches the regex against every comma-delimited value of the header field
+      <name> instead of the entire header (as done in "replace-value").
 
     - "set-status" replaces the response status code with <status> which must
       be an integer between 100 and 999. Note that the reason is automatically

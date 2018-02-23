@@ -62,6 +62,10 @@ struct my_regex {
 #define ACT_PASS	4	/* pass this header without allowing or denying the request */
 #define ACT_TARPIT	5	/* tarpit the connection matching this request */
 
+/* define regex substitution options */
+typedef char regex_subst_opts;
+#define RE_SUBST_GLOBAL 1       /* Global substitution */
+
 struct hdr_exp {
     struct hdr_exp *next;
     struct my_regex *preg;		/* expression to look for */
