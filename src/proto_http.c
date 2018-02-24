@@ -9316,12 +9316,11 @@ struct act_rule *parse_http_req_cond(const char **args, const char *file, int li
 			goto out_err;
 		}
 
-		rule->arg.hdr_add.re_options = 0;
-		if (strcmp(args[cur_arg+3], "g") == 0) {
-			rule->arg.hdr_add.re_options |= RE_SUBST_GLOBAL;
-		} else if (args[cur_arg+3][0] != '\0') {
-			Alert("parsing [%s:%d]: 'http-request %s': Invalid regex substitution option.\n", file, linenum,
-			args[0]);
+		rule->arg.hdr_add.re_options = regex_subst_options_comp(args[cur_arg+3], &error);
+		if (rule->arg.hdr_add.re_options < 0) {
+			Alert("parsing [%s:%d]: 'http-request %s': %s.\n", file, linenum,
+			args[0], error);
+			free(error);
 			goto out_err;
 		}
 
@@ -9805,12 +9804,11 @@ struct act_rule *parse_http_res_cond(const char **args, const char *file, int li
 			goto out_err;
 		}
 
-		rule->arg.hdr_add.re_options = 0;
-		if (strcmp(args[cur_arg+3], "g") == 0) {
-			rule->arg.hdr_add.re_options |= RE_SUBST_GLOBAL;
-		} else if (args[cur_arg+3][0] != '\0') {
-			Alert("parsing [%s:%d]: 'http-response %s': Invalid regex substitution option.\n", file, linenum,
-			args[0]);
+		rule->arg.hdr_add.re_options = regex_subst_options_comp(args[cur_arg+3], &error);
+		if (rule->arg.hdr_add.re_options < 0) {
+			Alert("parsing [%s:%d]: 'http-response %s': %s.\n", file, linenum,
+			args[0], error);
+			free(error);
 			goto out_err;
 		}
 

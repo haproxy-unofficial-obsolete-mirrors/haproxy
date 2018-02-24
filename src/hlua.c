@@ -4361,12 +4361,9 @@ __LJMP static inline int hlua_http_sub_hdr(lua_State *L, struct hlua_txn *htxn,
 	if (!regex_comp(reg, &re, 1, 1, NULL))
 		WILL_LJMP(luaL_argerror(L, 3, "invalid regex"));
 
-        // FIXME add proper regex sub compile function
-	if (strcmp(options,"g") == 0)
-		re_options |= 1;
-        else if (*options == '\0')
-		re_options = 0;
-	else
+
+	re_options = regex_subst_options_comp(options, NULL);
+	if (re_options < 0) 
 		WILL_LJMP(luaL_argerror(L, 4, "invalid regex options"));	
 
 	http_substitute_header_str(htxn->s, msg, name, name_len, value, &re, action, re_options);
