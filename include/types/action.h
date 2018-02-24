@@ -115,7 +115,7 @@ struct act_rule {
 			int name_len;          /* header name's length */
 			struct list fmt;       /* log-format compatible expression */
 			struct my_regex re;    /* used by replace/substitute-header and replace/substitute-value */
-			regex_subst_opts re_options; /* substitute-header/value regex flags */
+			regex_subst_opts_t re_options; /* substitute-header/value regex flags */
 		} hdr_add;                     /* args used by "add-header" and "set-header" */
 		struct redirect_rule *redir;   /* redirect rule or "http-request redirect" */
 		int nice;                      /* nice value for ACT_HTTP_SET_NICE */

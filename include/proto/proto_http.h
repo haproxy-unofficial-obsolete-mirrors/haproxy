@@ -114,7 +114,7 @@ int http_replace_header_str(struct stream* s, struct http_msg *msg, const char* 
                               int action);
 int http_substitute_header_str(struct stream* s, struct http_msg *msg, const char* name,
                               unsigned int name_len, const char *str, struct my_regex *re,
-                              int action, regex_subst_opts re_options);
+                              int action, regex_subst_opts_t re_options);
 void inet_set_tos(int fd, const struct sockaddr_storage *from, int tos);
 void http_perform_server_redirect(struct stream *s, struct stream_interface *si);
 void http_return_srv_error(struct stream *s, struct stream_interface *si);

@@ -4352,7 +4352,7 @@ __LJMP static inline int hlua_http_sub_hdr(lua_State *L, struct hlua_txn *htxn,
 	const char *value = MAY_LJMP(luaL_checkstring(L, 4));
 	const char *options = MAY_LJMP(luaL_checkstring(L, 5));
 	struct my_regex re;
-	regex_subst_opts re_options = 0;
+	regex_subst_opts_t re_options = 0;
 
 	/* Check if a valid response is parsed */
 	if (unlikely(msg->msg_state < HTTP_MSG_BODY))

@@ -3340,7 +3340,7 @@ void inet_set_tos(int fd, const struct sockaddr_storage *from, int tos)
 int http_substitute_header_str(struct stream* s, struct http_msg *msg,
                               const char* name, unsigned int name_len,
                               const char *str, struct my_regex *re,
-                              int action, regex_subst_opts re_options)
+                              int action, regex_subst_opts_t re_options)
 {
 	struct hdr_ctx ctx;
 	char *buf = msg->chn->buf->p;
@@ -3466,7 +3466,7 @@ int http_replace_header_str(struct stream* s, struct http_msg *msg,
 static int http_transform_header(struct stream* s, struct http_msg *msg,
                                  const char* name, unsigned int name_len,
                                  struct list *fmt, struct my_regex *re,
-                                 int action, regex_subst_opts re_options)
+                                 int action, regex_subst_opts_t re_options)
 {
 	struct chunk *replace = get_trash_chunk();
 
