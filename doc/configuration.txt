@@ -4250,7 +4250,7 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
 
       Example:
 
-        http-request susbtitute-header Access-Control-Allow-Origin \
+        http-response susbtitute-header Access-Control-Allow-Origin \
           '-(?=.*\.example\.com)' '.' 'g'
 
       applied to:
