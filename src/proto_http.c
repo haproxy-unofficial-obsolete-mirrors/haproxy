@@ -3379,23 +3379,23 @@ int http_substitute_header_str(struct stream* s, struct http_msg *msg,
                 start_match_offset = pmatch[0].rm_so;
 
                 do {
-                  /* if this is not first match and match does not start from beginning and enough space then copy directly */
-                  if (end_match_offset && pmatch[0].rm_so && ((output->size - output->len) >= pmatch[0].rm_so ))
-                    if (memcpy(output->str + output->len, val+end_match_offset, pmatch[0].rm_so))
-                      output->len += pmatch[0].rm_so;
+                	/* if this is not first match and match does not start from beginning and enough space then copy directly */
+                	if (end_match_offset && pmatch[0].rm_so && ((output->size - output->len) >= pmatch[0].rm_so ))
+                		if (memcpy(output->str + output->len, val+end_match_offset, pmatch[0].rm_so))
+                			output->len += pmatch[0].rm_so;
 
-                  res = exp_replace(output->str + output->len, output->size - output->len, val + end_match_offset, str, pmatch);
+                	res = exp_replace(output->str + output->len, output->size - output->len, val + end_match_offset, str, pmatch);
 
-                  if (res == -1)
-                    return -1;
-                  output->len += res;
+                	if (res == -1)
+                		return -1;
+                	output->len += res;
 
-                  end_match_offset += pmatch[0].rm_eo;
+                	end_match_offset += pmatch[0].rm_eo;
 
-                  /* checking if more matches are possibe: 
-                     Regex global matches flag is on and more bytes to read after last match */
-                  if ((re_options&RE_SUBST_GLOBAL) && (end_match_offset >= (val_end-val)))
-                    break;
+                	/* continue only if more matches are possibe: 
+                	   Regex global matches flag is on and more bytes to read after last match */
+                	if ((!re_options&RE_SUBST_GLOBAL) || (end_match_offset >= (val_end-val)))
+                		break;
                 }
                 while (regex_exec_match2(re, val + end_match_offset, (val_end-val) - end_match_offset , MAX_MATCH, pmatch, 0)  );
 
