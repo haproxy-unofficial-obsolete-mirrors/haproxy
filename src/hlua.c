@@ -4294,7 +4294,7 @@ __LJMP static inline int hlua_http_rep_hdr(lua_State *L, struct hlua_txn *htxn,
 	if (!regex_comp(reg, &re, 1, 1, NULL))
 		WILL_LJMP(luaL_argerror(L, 3, "invalid regex"));
 
-	http_transform_header_str(htxn->s, msg, name, name_len, value, &re, action);
+	http_replace_header_str(htxn->s, msg, name, name_len, value, &re, action);
 	regex_free(&re);
 	return 0;
 }
@@ -4337,6 +4337,81 @@ __LJMP static int hlua_http_res_rep_val(lua_State *L)
 	htxn = MAY_LJMP(hlua_checkhttp(L, 1));
 
 	return MAY_LJMP(hlua_http_rep_hdr(L, htxn, &htxn->s->txn->rsp, ACT_HTTP_REPLACE_VAL));
+}
+
+/* This function substitue matching part of header or value in
+ * the request or in the response. It is a wrapper for the
+ * 4 following functions.
+ */
+__LJMP static inline int hlua_http_sub_hdr(lua_State *L, struct hlua_txn *htxn,
+                                           struct http_msg *msg, int action)
+{
+	size_t name_len;
+	const char *name = MAY_LJMP(luaL_checklstring(L, 2, &name_len));
+	const char *reg = MAY_LJMP(luaL_checkstring(L, 3));
+	const char *value = MAY_LJMP(luaL_checkstring(L, 4));
+	const char *options = MAY_LJMP(luaL_checkstring(L, 5));
+	struct my_regex re;
+	regex_subst_opts re_options = 0;
+
+	/* Check if a valid response is parsed */
+	if (unlikely(msg->msg_state < HTTP_MSG_BODY))
+		return 0;
+
+	if (!regex_comp(reg, &re, 1, 1, NULL))
+		WILL_LJMP(luaL_argerror(L, 3, "invalid regex"));
+
+        // FIXME add proper regex sub compile function
+	if (strcmp(options,"g") == 0)
+		re_options |= 1;
+        else if (*options == '\0')
+		re_options = 0;
+	else
+		WILL_LJMP(luaL_argerror(L, 4, "invalid regex options"));	
+
+	http_substitute_header_str(htxn->s, msg, name, name_len, value, &re, action, re_options);
+	regex_free(&re);
+	return 0;
+}
+
+__LJMP static int hlua_http_req_sub_hdr(lua_State *L)
+{
+	struct hlua_txn *htxn;
+
+	MAY_LJMP(check_args(L, 5, "req_sub_hdr"));
+	htxn = MAY_LJMP(hlua_checkhttp(L, 1));
+
+	return MAY_LJMP(hlua_http_sub_hdr(L, htxn, &htxn->s->txn->req, ACT_HTTP_REPLACE_HDR));
+}
+
+__LJMP static int hlua_http_res_sub_hdr(lua_State *L)
+{
+	struct hlua_txn *htxn;
+
+	MAY_LJMP(check_args(L, 5, "res_sub_hdr"));
+	htxn = MAY_LJMP(hlua_checkhttp(L, 1));
+
+	return MAY_LJMP(hlua_http_sub_hdr(L, htxn, &htxn->s->txn->rsp, ACT_HTTP_REPLACE_HDR));
+}
+
+__LJMP static int hlua_http_req_sub_val(lua_State *L)
+{
+	struct hlua_txn *htxn;
+
+	MAY_LJMP(check_args(L, 5, "req_sub_hdr"));
+	htxn = MAY_LJMP(hlua_checkhttp(L, 1));
+
+	return MAY_LJMP(hlua_http_sub_hdr(L, htxn, &htxn->s->txn->req, ACT_HTTP_REPLACE_VAL));
+}
+
+__LJMP static int hlua_http_res_sub_val(lua_State *L)
+{
+	struct hlua_txn *htxn;
+
+	MAY_LJMP(check_args(L, 5, "res_sub_val"));
+	htxn = MAY_LJMP(hlua_checkhttp(L, 1));
+
+	return MAY_LJMP(hlua_http_sub_hdr(L, htxn, &htxn->s->txn->rsp, ACT_HTTP_REPLACE_VAL));
 }
 
 /* This function deletes all the occurences of an header.
@@ -7126,6 +7201,8 @@ void hlua_init(void)
 	hlua_class_function(gL.T, "req_del_header", hlua_http_req_del_hdr);
 	hlua_class_function(gL.T, "req_rep_header", hlua_http_req_rep_hdr);
 	hlua_class_function(gL.T, "req_rep_value",  hlua_http_req_rep_val);
+	hlua_class_function(gL.T, "req_sub_header", hlua_http_req_sub_hdr);
+	hlua_class_function(gL.T, "req_sub_value",  hlua_http_req_sub_val);
 	hlua_class_function(gL.T, "req_add_header", hlua_http_req_add_hdr);
 	hlua_class_function(gL.T, "req_set_header", hlua_http_req_set_hdr);
 	hlua_class_function(gL.T, "req_set_method", hlua_http_req_set_meth);
@@ -7137,6 +7214,8 @@ void hlua_init(void)
 	hlua_class_function(gL.T, "res_del_header", hlua_http_res_del_hdr);
 	hlua_class_function(gL.T, "res_rep_header", hlua_http_res_rep_hdr);
 	hlua_class_function(gL.T, "res_rep_value",  hlua_http_res_rep_val);
+	hlua_class_function(gL.T, "res_sub_header", hlua_http_res_sub_hdr);
+	hlua_class_function(gL.T, "res_sub_value",  hlua_http_res_sub_val);
 	hlua_class_function(gL.T, "res_add_header", hlua_http_res_add_hdr);
 	hlua_class_function(gL.T, "res_set_header", hlua_http_res_set_hdr);
 	hlua_class_function(gL.T, "res_set_status", hlua_http_res_set_status);
