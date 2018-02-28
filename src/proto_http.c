@@ -3368,38 +3368,38 @@ int http_substitute_header_str(struct stream* s, struct http_msg *msg,
 		int delta;
 		char *val = ctx.line + ctx.val;
 		char* val_end = val + ctx.vlen;
-                int end_match_offset = 0; // holds offset of end of all matches from start of string
-                int start_match_offset = 0; // holds offset of start of all matches from start of string
-                int res;
-                output->len = 0;
+		int end_match_offset = 0; // holds offset of end of all matches from start of string
+		int start_match_offset = 0; // holds offset of start of all matches from start of string
+		int res;
+		output->len = 0;
 
-                if (!regex_exec_match2(re, val, val_end-val, MAX_MATCH, pmatch, 0))
-                        continue;
+		if (!regex_exec_match2(re, val, val_end-val, MAX_MATCH, pmatch, 0))
+		        continue;
 
-                start_match_offset = pmatch[0].rm_so;
+		start_match_offset = pmatch[0].rm_so;
 
-                do {
-                	/* if this is not first match and match does not start from beginning and enough space then copy directly */
-                	if (end_match_offset && pmatch[0].rm_so && ((output->size - output->len) >= pmatch[0].rm_so ))
-                		if (memcpy(output->str + output->len, val+end_match_offset, pmatch[0].rm_so))
-                			output->len += pmatch[0].rm_so;
+		do {
+			/* if this is not first match and match does not start from beginning and enough space then copy directly */
+			if (end_match_offset && pmatch[0].rm_so && ((output->size - output->len) >= pmatch[0].rm_so ))
+				if (memcpy(output->str + output->len, val+end_match_offset, pmatch[0].rm_so))
+					output->len += pmatch[0].rm_so;
 
-                	res = exp_replace(output->str + output->len, output->size - output->len, val + end_match_offset, str, pmatch);
+			res = exp_replace(output->str + output->len, output->size - output->len, val + end_match_offset, str, pmatch);
 
-                	if (res == -1)
-                		return -1;
-                	output->len += res;
+			if (res == -1)
+				return -1;
+			output->len += res;
 
-                	end_match_offset += pmatch[0].rm_eo;
+			end_match_offset += pmatch[0].rm_eo;
 
-                	/* continue only if more matches are possibe: 
-                	   Regex global matches flag is on and more bytes to read after last match */
-                	if ((!re_options&RE_SUBST_GLOBAL) || (end_match_offset >= (val_end-val)))
-                		break;
-                }
-                while (regex_exec_match2(re, val + end_match_offset, (val_end-val) - end_match_offset , MAX_MATCH, pmatch, 0)  );
+			/* continue only if more matches are possibe: 
+			   Regex global matches flag is on and more bytes to read after last match */
+			if ((!re_options&RE_SUBST_GLOBAL) || (end_match_offset >= (val_end-val)))
+				break;
+		}
+		while (regex_exec_match2(re, val + end_match_offset, (val_end-val) - end_match_offset , MAX_MATCH, pmatch, 0)  );
 
-                delta = buffer_replace2(msg->chn->buf, val+start_match_offset, val + end_match_offset, output->str, output->len);
+		delta = buffer_replace2(msg->chn->buf, val+start_match_offset, val + end_match_offset, output->str, output->len);
 
 
 		hdr->len += delta;
