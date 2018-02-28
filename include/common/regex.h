@@ -156,7 +156,7 @@ static inline void regex_free(struct my_regex *preg) {
  * "err" is the standard error message pointer.
  *
  * The function returns the bit mask of regex substitution options.
- * Its value is > 0 in case of success or negative in case of failue.
+ * Its value is >= 0 in case of success or negative in case of failure.
  */
 regex_subst_opts_t regex_subst_options_comp(const char *options_str, char **err);
 
