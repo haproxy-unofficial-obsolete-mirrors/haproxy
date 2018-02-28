@@ -326,6 +326,18 @@ int regex_comp(const char *str, struct my_regex *regex, int cs, int cap, char **
 	return 1;
 }
 
+regex_subst_opts_t regex_subst_options_comp(const char *options_str, char **err){
+	regex_subst_opts_t result = 0;
+	if (strcmp(options_str, "g") == 0) {
+                        result |= RE_SUBST_GLOBAL;
+                } else if (*options_str != '\0') {
+			memprintf(err, "invalid regex substitution options '%s'", options_str);
+			return -1;
+                }
+	return result;
+}
+
+
 /*
  * Local variables:
  *  c-indent-level: 8

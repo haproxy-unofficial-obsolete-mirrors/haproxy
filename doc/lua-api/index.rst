@@ -1318,6 +1318,38 @@ HTTP class
   :param string replace: The replacement value.
   :see: HTTP.req_replace_header()
 
+.. js:function:: HTTP.req_sub_header(http, name, regex, replace, options)
+
+  Matches the regular expression in all occurrences of header field "name"
+  according to "regex", and substitutes matches with the "replace" argument.
+  The replacement value can contain back references like \1, \2, ... If the
+  "options" argument contains "g" all matches are substituted - if empty 
+  only only the first match in each header is substituted. This
+  function works with the request.
+
+  :param class_http http: The related http object.
+  :param string name: The header name.
+  :param string regex: The match regular expression.
+  :param string replace: The replacement value.
+  :param string options: Regex substitution options.
+  :see: HTTP.res_sub_header()
+
+.. js:function:: HTTP.res_sub_header(http, name, regex, string, options)
+
+  Matches the regular expression in all occurrences of header field "name"
+  according to "regex", and substitutes matches with the "replace" argument.
+  The replacement value can contain back references like \1, \2, ... If the
+  "options" argument contains "g" all matches are substituted - if empty 
+  only only the first match in each header is substituted. This
+  function works with the response.
+
+  :param class_http http: The related http object.
+  :param string name: The header name.
+  :param string regex: The match regular expression.
+  :param string replace: The replacement value.
+  :param string options: Regex substitution options.
+  :see: HTTP.req_sub_header()
+
 .. js:function:: HTTP.req_set_method(http, method)
 
   Rewrites the request method with the parameter "method".

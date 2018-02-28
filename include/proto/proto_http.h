@@ -109,9 +109,12 @@ int http_remove_header2(struct http_msg *msg, struct hdr_idx *idx, struct hdr_ct
 int http_header_add_tail2(struct http_msg *msg, struct hdr_idx *hdr_idx, const char *text, int len);
 int http_replace_req_line(int action, const char *replace, int len, struct proxy *px, struct stream *s);
 void http_set_status(unsigned int status, struct stream *s);
-int http_transform_header_str(struct stream* s, struct http_msg *msg, const char* name,
+int http_replace_header_str(struct stream* s, struct http_msg *msg, const char* name,
                               unsigned int name_len, const char *str, struct my_regex *re,
                               int action);
+int http_substitute_header_str(struct stream* s, struct http_msg *msg, const char* name,
+                              unsigned int name_len, const char *str, struct my_regex *re,
+                              int action, regex_subst_opts_t re_options);
 void inet_set_tos(int fd, const struct sockaddr_storage *from, int tos);
 void http_perform_server_redirect(struct stream *s, struct stream_interface *si);
 void http_return_srv_error(struct stream *s, struct stream_interface *si);

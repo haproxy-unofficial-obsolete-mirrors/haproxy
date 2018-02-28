@@ -3337,7 +3337,82 @@ void inet_set_tos(int fd, const struct sockaddr_storage *from, int tos)
 #endif
 }
 
-int http_transform_header_str(struct stream* s, struct http_msg *msg,
+int http_substitute_header_str(struct stream* s, struct http_msg *msg,
+                              const char* name, unsigned int name_len,
+                              const char *str, struct my_regex *re,
+                              int action, regex_subst_opts_t re_options)
+{
+	struct hdr_ctx ctx;
+	char *buf = msg->chn->buf->p;
+	struct hdr_idx *idx = &s->txn->hdr_idx;
+	int (*http_find_hdr_func)(const char *name, int len, char *sol,
+	                          struct hdr_idx *idx, struct hdr_ctx *ctx);
+	struct chunk *output = get_trash_chunk();
+
+	ctx.idx = 0;
+
+	/* Choose the header browsing function. */
+	switch (action) {
+	case ACT_HTTP_SUBSTITUTE_VAL:
+		http_find_hdr_func = http_find_header2;
+		break;
+	case ACT_HTTP_SUBSTITUTE_HDR:
+		http_find_hdr_func = http_find_full_header2;
+		break;
+	default: /* impossible */
+		return -1;
+	}
+
+	while (http_find_hdr_func(name, name_len, buf, idx, &ctx)) {
+		struct hdr_idx_elem *hdr = idx->v + ctx.idx;
+		int delta;
+		char *val = ctx.line + ctx.val;
+		char* val_end = val + ctx.vlen;
+		int end_match_offset = 0; // holds offset of end of all matches from start of string
+		int start_match_offset = 0; // holds offset of start of all matches from start of string
+		int res;
+		output->len = 0;
+
+		if (!regex_exec_match2(re, val, val_end-val, MAX_MATCH, pmatch, 0))
+		        continue;
+
+		start_match_offset = pmatch[0].rm_so;
+
+		do {
+			/* if this is not first match and match does not start from beginning and enough space then copy directly */
+			if (end_match_offset && pmatch[0].rm_so && ((output->size - output->len) >= pmatch[0].rm_so ))
+				if (memcpy(output->str + output->len, val+end_match_offset, pmatch[0].rm_so))
+					output->len += pmatch[0].rm_so;
+
+			res = exp_replace(output->str + output->len, output->size - output->len, val + end_match_offset, str, pmatch);
+
+			if (res == -1)
+				return -1;
+			output->len += res;
+
+			end_match_offset += pmatch[0].rm_eo;
+
+			/* continue only if more matches are possibe: 
+			   Regex global matches flag is on and more bytes to read after last match */
+			if ((!re_options&RE_SUBST_GLOBAL) || (end_match_offset >= (val_end-val)))
+				break;
+		}
+		while (regex_exec_match2(re, val + end_match_offset, (val_end-val) - end_match_offset , MAX_MATCH, pmatch, 0)  );
+
+		delta = buffer_replace2(msg->chn->buf, val+start_match_offset, val + end_match_offset, output->str, output->len);
+
+
+		hdr->len += delta;
+		http_msg_move_end(msg, delta);
+
+		/* Adjust the length of the current value of the index. */
+		ctx.vlen += delta;
+	}
+
+	return 0;
+}
+
+int http_replace_header_str(struct stream* s, struct http_msg *msg,
                               const char* name, unsigned int name_len,
                               const char *str, struct my_regex *re,
                               int action)
@@ -3391,7 +3466,7 @@ int http_transform_header_str(struct stream* s, struct http_msg *msg,
 static int http_transform_header(struct stream* s, struct http_msg *msg,
                                  const char* name, unsigned int name_len,
                                  struct list *fmt, struct my_regex *re,
-                                 int action)
+                                 int action, regex_subst_opts_t re_options)
 {
 	struct chunk *replace = get_trash_chunk();
 
@@ -3399,7 +3474,11 @@ static int http_transform_header(struct stream* s, struct http_msg *msg,
 	if (replace->len >= replace->size - 1)
 		return -1;
 
-	return http_transform_header_str(s, msg, name, name_len, replace->str, re, action);
+        if (action ==  ACT_HTTP_REPLACE_HDR || action ==  ACT_HTTP_REPLACE_VAL)
+		return http_replace_header_str(s, msg, name, name_len, replace->str, re, action);
+        else
+		/* action ==  ACT_HTTP_SUBSTITUTE_HDR || action ==  ACT_HTTP_SUBSTITUTE_VAL */
+		return http_substitute_header_str(s, msg, name, name_len, replace->str, re, action, re_options);
 }
 
 /* Executes the http-request rules <rules> for stream <s>, proxy <px> and
@@ -3515,10 +3594,13 @@ resume_execution:
 
 		case ACT_HTTP_REPLACE_HDR:
 		case ACT_HTTP_REPLACE_VAL:
+		case ACT_HTTP_SUBSTITUTE_HDR:
+		case ACT_HTTP_SUBSTITUTE_VAL:
 			if (http_transform_header(s, &txn->req, rule->arg.hdr_add.name,
 			                          rule->arg.hdr_add.name_len,
 			                          &rule->arg.hdr_add.fmt,
-			                          &rule->arg.hdr_add.re, rule->action))
+			                          &rule->arg.hdr_add.re, rule->action,
+			                          rule->arg.hdr_add.re_options))
 				return HTTP_RULE_RES_BADREQ;
 			break;
 
@@ -3784,10 +3866,13 @@ resume_execution:
 
 		case ACT_HTTP_REPLACE_HDR:
 		case ACT_HTTP_REPLACE_VAL:
+		case ACT_HTTP_SUBSTITUTE_HDR:
+		case ACT_HTTP_SUBSTITUTE_VAL:
 			if (http_transform_header(s, &txn->rsp, rule->arg.hdr_add.name,
 			                          rule->arg.hdr_add.name_len,
 			                          &rule->arg.hdr_add.fmt,
-			                          &rule->arg.hdr_add.re, rule->action))
+			                          &rule->arg.hdr_add.re, rule->action, 
+			                          rule->arg.hdr_add.re_options))
 				return HTTP_RULE_RES_STOP; /* note: we should report an error here */
 			break;
 
@@ -9195,6 +9280,54 @@ struct act_rule *parse_http_req_cond(const char **args, const char *file, int li
 		proxy->conf.lfs_file = strdup(proxy->conf.args.file);
 		proxy->conf.lfs_line = proxy->conf.args.line;
 		cur_arg += 3;
+	} else if (strcmp(args[0], "substitute-header") == 0 || strcmp(args[0], "substitute-value") == 0 ) {
+		rule->action = args[0][11] == 'h' ? ACT_HTTP_SUBSTITUTE_HDR : ACT_HTTP_SUBSTITUTE_VAL;
+		cur_arg = 1;
+
+		/* Check for !*args[cur_arg+3] is ommitted on purpose because this can be empty. So
+		   in reality if no if/unless part is present, missing options arguments is interpreted as
+		   the empty options ''. */
+                if (!*args[cur_arg] || !*args[cur_arg+1] || !*args[cur_arg+2] ||
+			(*args[cur_arg+4] && strcmp(args[cur_arg+4], "if") != 0 && strcmp(args[cur_arg+4], "unless") != 0)) {
+			Alert("parsing [%s:%d]: 'http-request %s' expects exactly 4 arguments.\n",
+			      file, linenum, args[0]);
+			goto out_err;
+		}
+
+		rule->arg.hdr_add.name = strdup(args[cur_arg]);
+		rule->arg.hdr_add.name_len = strlen(rule->arg.hdr_add.name);
+		LIST_INIT(&rule->arg.hdr_add.fmt);
+
+		error = NULL;
+		if (!regex_comp(args[cur_arg + 1], &rule->arg.hdr_add.re, 1, 1, &error)) {
+			Alert("parsing [%s:%d] : '%s' : %s.\n", file, linenum,
+			      args[cur_arg + 1], error);
+			free(error);
+			goto out_err;
+		}
+
+		proxy->conf.args.ctx = ARGC_HRQ;
+		error = NULL;
+		if (!parse_logformat_string(args[cur_arg + 2], proxy, &rule->arg.hdr_add.fmt, LOG_OPT_HTTP,
+		                            (proxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRQ_HDR : SMP_VAL_BE_HRQ_HDR, &error)) {
+			Alert("parsing [%s:%d]: 'http-request %s': %s.\n",
+			      file, linenum, args[0], error);
+			free(error);
+			goto out_err;
+		}
+
+		rule->arg.hdr_add.re_options = regex_subst_options_comp(args[cur_arg+3], &error);
+		if (rule->arg.hdr_add.re_options < 0) {
+			Alert("parsing [%s:%d]: 'http-request %s': %s.\n", file, linenum,
+			args[0], error);
+			free(error);
+			goto out_err;
+		}
+
+		free(proxy->conf.lfs_file);
+		proxy->conf.lfs_file = strdup(proxy->conf.args.file);
+		proxy->conf.lfs_line = proxy->conf.args.line;
+		cur_arg += 4;
 	} else if (strcmp(args[0], "del-header") == 0) {
 		rule->action = ACT_HTTP_DEL_HDR;
 		cur_arg = 1;
@@ -9635,6 +9768,54 @@ struct act_rule *parse_http_res_cond(const char **args, const char *file, int li
 		proxy->conf.lfs_file = strdup(proxy->conf.args.file);
 		proxy->conf.lfs_line = proxy->conf.args.line;
 		cur_arg += 3;
+	} else if (strcmp(args[0], "substitute-header") == 0 || strcmp(args[0], "substitute-value") == 0) {
+		rule->action = args[0][11] == 'h' ? ACT_HTTP_SUBSTITUTE_HDR : ACT_HTTP_SUBSTITUTE_VAL;
+		cur_arg = 1;
+
+		/* Check for !*args[cur_arg+3] is ommitted on purpose because this can be empty. So
+		   in reality if no if/unless part is present, missing options arguments is interpreted as
+                   the empty options ''. */
+		if (!*args[cur_arg] || !*args[cur_arg+1] || !*args[cur_arg+2] ||
+		    (*args[cur_arg+4] && strcmp(args[cur_arg+4], "if") != 0 && strcmp(args[cur_arg+4], "unless") != 0)) {
+			Alert("parsing [%s:%d]: 'http-response %s' expects exactly 4 arguments.\n",
+			      file, linenum, args[0]);
+			goto out_err;
+		}
+
+		rule->arg.hdr_add.name = strdup(args[cur_arg]);
+		rule->arg.hdr_add.name_len = strlen(rule->arg.hdr_add.name);
+		LIST_INIT(&rule->arg.hdr_add.fmt);
+
+		error = NULL;
+		if (!regex_comp(args[cur_arg + 1], &rule->arg.hdr_add.re, 1, 1, &error)) {
+			Alert("parsing [%s:%d] : '%s' : %s.\n", file, linenum,
+			      args[cur_arg + 1], error);
+			free(error);
+			goto out_err;
+		}
+
+		proxy->conf.args.ctx = ARGC_HRQ;
+		error = NULL;
+		if (!parse_logformat_string(args[cur_arg + 2], proxy, &rule->arg.hdr_add.fmt, LOG_OPT_HTTP,
+		                            (proxy->cap & PR_CAP_BE) ? SMP_VAL_BE_HRS_HDR : SMP_VAL_FE_HRS_HDR, &error)) {
+			Alert("parsing [%s:%d]: 'http-response %s': %s.\n",
+			      file, linenum, args[0], error);
+			free(error);
+			goto out_err;
+		}
+
+		rule->arg.hdr_add.re_options = regex_subst_options_comp(args[cur_arg+3], &error);
+		if (rule->arg.hdr_add.re_options < 0) {
+			Alert("parsing [%s:%d]: 'http-response %s': %s.\n", file, linenum,
+			args[0], error);
+			free(error);
+			goto out_err;
+		}
+
+		free(proxy->conf.lfs_file);
+		proxy->conf.lfs_file = strdup(proxy->conf.args.file);
+		proxy->conf.lfs_line = proxy->conf.args.line;
+		cur_arg += 4;
 	} else if (strcmp(args[0], "del-header") == 0) {
 		rule->action = ACT_HTTP_DEL_HDR;
 		cur_arg = 1;
@@ -9880,7 +10061,8 @@ struct act_rule *parse_http_res_cond(const char **args, const char *file, int li
 	} else {
 		action_build_list(&http_res_keywords.list, &trash);
 		Alert("parsing [%s:%d]: 'http-response' expects 'allow', 'deny', 'redirect', "
-		      "'add-header', 'del-header', 'set-header', 'replace-header', 'replace-value', 'set-nice', "
+		      "'add-header', 'del-header', 'set-header', 'replace-header', 'replace-value', "
+                      "'substitute-header', 'substitute-value', 'set-nice', "
 		      "'set-tos', 'set-mark', 'set-log-level', 'add-acl', 'del-acl', 'del-map', 'set-map', 'track-sc*'"
 		      "%s%s, but got '%s'%s.\n",
 		      file, linenum, *trash.str ? ", " : "", trash.str, args[0], *args[0] ? "" : " (missing argument)");

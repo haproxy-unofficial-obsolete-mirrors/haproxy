@@ -62,6 +62,10 @@ struct my_regex {
 #define ACT_PASS	4	/* pass this header without allowing or denying the request */
 #define ACT_TARPIT	5	/* tarpit the connection matching this request */
 
+/* define regex substitution options */
+typedef char regex_subst_opts_t;
+#define RE_SUBST_GLOBAL 1       /* Global substitution */
+
 struct hdr_exp {
     struct hdr_exp *next;
     struct my_regex *preg;		/* expression to look for */
@@ -147,6 +151,14 @@ static inline void regex_free(struct my_regex *preg) {
 	regfree(&preg->regex);
 #endif
 }
+
+/* "options_str" is the string of regex substitution options
+ * "err" is the standard error message pointer.
+ *
+ * The function returns the bit mask of regex substitution options.
+ * Its value is >= 0 in case of success or negative in case of failure.
+ */
+regex_subst_opts_t regex_subst_options_comp(const char *options_str, char **err);
 
 #endif /* _COMMON_REGEX_H */
 
